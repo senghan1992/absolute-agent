@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.log
+# 실제 인가 파일은 커밋하지 않는다(대상 정보 포함 가능).
+config/authorization.yaml
+.prime/
+# 자동 학습된 playbook 은 로컬 산출물(seed 는 추적).
+knowledge/playbooks/pb_[0-9a-z]*_*.json

@@ -1,0 +1,43 @@
+{
+  "name": "redcell",
+  "version": "0.1.0",
+  "description": "자기발전형 화이트해커 훈련 에이전트 — prime-agent 위에서 인가된 대상만 학습·공략",
+  "type": "module",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "redcell": "tsx src/cli.ts",
+    "run": "tsx src/cli.ts run",
+    "providers": "tsx src/cli.ts providers",
+    "explore": "tsx src/explore-demo.ts",
+    "mcts": "tsx src/mcts-demo.ts",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.123.0",
+    "yaml": "^2.5.0"
+  },
+  "devDependencies": {
+    "@sinclair/typebox": "^0.32.0",
+    "@types/node": "^20.19.43",
+    "tsx": "^4.19.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  },
+  "bin": {
+    "redcell": "bin/redcell"
+  },
+  "files": [
+    "src",
+    "prime-agent",
+    "knowledge",
+    "config",
+    "skills",
+    "bin",
+    "docs",
+    "README.md"
+  ]
+}

@@ -1,0 +1,11 @@
+#!/usr/bin/env bash
+# RedCell CLI 런처 — 어느 위치에서 실행하든 저장소 루트를 찾아 tsx 로 CLI 를 구동한다.
+set -euo pipefail
+SOURCE="${BASH_SOURCE[0]}"
+while [ -h "$SOURCE" ]; do
+  DIR="$(cd -P "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ "$SOURCE" != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+ROOT="$(cd -P "$(dirname "$SOURCE")/.." && pwd)"
+exec npx --prefix "$ROOT" tsx "$ROOT/src/cli.ts" "$@"

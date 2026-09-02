@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# RedCell 인가 파일 (Rules of Engagement)
+# ─────────────────────────────────────────────────────────────────────────────
+# RedCell는 이 파일에 명시적으로 허용된 대상에 대해서만 동작합니다.
+# 이 파일이 없거나, 대상이 여기에 없으면 모든 공격성 툴은 거부됩니다.
+#
+# 이 파일은 "당신이 테스트할 법적 권한을 가진 대상"만 기술해야 합니다.
+#   - 본인 소유의 VM / 홈랩
+#   - 명시적 서면 허가를 받은 pentest 계약 대상
+#   - CTF / 취약점 실습 플랫폼 (HTB, THM, PortSwigger, DVWA 등)
+# 권한 없는 대상을 여기에 적는 것은 당신의 책임이며 불법일 수 있습니다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+engagement:
+  name: "local-lab-training"
+  # 이 인가의 유효 기간. 만료되면 RedCell는 동작을 거부합니다.
+  authorized_from: "2026-09-01"
+  authorized_until: "2026-12-31"
+  # 인가를 승인한 주체(문서/계약/플랫폼 ToS 근거를 남겨두세요).
+  authorized_by: "self-owned home lab — see labs/README.md"
+  contact: "senghan1992@gmail.com"
+
+# 허용 대상. 이 안에 들어오는 것만 스캔/공격 가능.
+scope:
+  allow:
+    - host: "127.0.0.1"
+    - host: "localhost"
+    - cidr: "10.13.37.0/24"        # 로컬 실습용 격리 네트워크
+    - domain: "*.vulnlab.local"     # 홈랩 내부 도메인
+  # allow에 포함되더라도 절대 건드리면 안 되는 것(우선순위 최상).
+  deny:
+    - host: "10.13.37.1"            # 게이트웨이/라우터 제외
+    - cidr: "169.254.0.0/16"        # link-local 제외
+
+# 허용 포트/서비스 (선택). 비우면 scope 내 전체 허용.
+ports:
+  allow_tcp: [80, 443, 8080, 8443, 3000, 22, 3306, 5432, 6379]
+
+# 안전 제한 — CTF/랩이라도 기본은 보수적으로.
+limits:
+  max_requests_per_second: 20      # 무차별 대입/DoS 방지
+  disallow_destructive: true       # rm, drop table, ransomware 류 페이로드 차단
+  disallow_dos: true               # 볼류메트릭/자원고갈 공격 차단
+  disallow_lateral_beyond_scope: true
+
+# 자동 발전(self-improvement) 시 학습 결과를 어디까지 재사용할지.
+learning:
+  persist_playbooks: true          # 성공한 전술을 knowledge/에 저장
+  share_findings: false            # 외부 전송 금지(로컬에만 보관)
