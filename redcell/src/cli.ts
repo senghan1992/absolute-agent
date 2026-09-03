@@ -17,13 +17,29 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAuthorization } from "./scope/load-auth.js";
 import { SkillMemory } from "./memory/skill-memory.js";
-import { Orchestrator } from "./core/orchestrator.js";
-import { DefaultToolBox } from "./tools/toolbox.js";
+import { Orchestrator, type OrchestratorEvent, type SessionContext } from "./core/orchestrator.js";
+import { performLogin } from "./net/login.js";
+import { AutoPilot } from "./core/autopilot.js";
+import { PythonAgent } from "./py/python-agent.js";
+import { MockCoder } from "./py/mock-coder.js";
+import { ContextualBandit } from "./explore/bandit.js";
+import { BanditStore } from "./explore/bandit-store.js";
+import { DefaultToolBox, OPT_IN_TOOLS } from "./tools/toolbox.js";
 import { MockModel } from "./core/mock-model.js";
-import { toMarkdown } from "./report/report.js";
+import { parseTargetMap, argsFromMap, type TargetMap } from "./core/target-map.js";
+import type { Fingerprint } from "./memory/skill-memory.js";
+import { forge, type VulnClass } from "./core/payload-forge.js";
+import { httpRequest } from "./net/http-client.js";
+import { toMarkdown, type ReportOptions } from "./report/report.js";
+import { toVisualBoard } from "./report/visual.js";
+import { buildProvenance, applyWaivers, checkSeparationOfDuties } from "./report/provenance.js";
+import { decideVerdict } from "./core/autopilot.js";
 import { ProviderRegistry } from "./providers/registry.js";
 import { loadConfig, saveConfig, resolveModel, redcellHome, type RedcellConfig } from "./config.js";
-import type { ModelAdapter } from "./core/types.js";
+import type { ModelAdapter, EngagementFinding, Coverage, GateVerdict } from "./core/types.js";
+import { execFileSync } from "node:child_process";
+import type { ScopeGuard } from "./scope/scope-guard.js";
+import { AuditLog, verifyAuditFile } from "./audit/audit-log.js";
 
 // ── 인자 파서 ────────────────────────────────────────────────────────────────
 interface Args {
@@ -47,6 +63,27 @@ function parse(argv: string[]): Args {
   return { _, flags };
 }
 const str = (v: string | boolean | undefined): string | undefined => (typeof v === "string" ? v : undefined);
+
+/**
+ * 대상별로 켠 opt-in 프로브 목록을 계산한다.
+ *   - authorization.yaml 의 optional_probes + CLI --enable(콤마 구분) 을 합친다.
+ *   - "all" 은 등록된 OPT_IN_TOOLS 전체를 켠다(명시적 전체 승인).
+ *   - OPT_IN_TOOLS 에 없는 이름은 무시한다(오타·비-opt-in 툴 방지).
+ */
+function resolveEnabledOptIns(fromAuth: string[], flag: string | undefined): string[] {
+  const raw = [...fromAuth, ...(flag ? flag.split(",") : [])].map((s) => s.trim()).filter(Boolean);
+  const out = new Set<string>();
+  for (const name of raw) {
+    if (name.toLowerCase() === "all") {
+      for (const t of OPT_IN_TOOLS) out.add(t);
+    } else if (OPT_IN_TOOLS.has(name)) {
+      out.add(name);
+    } else {
+      console.error(`[opt-in] ⚠️ 무시: '${name}' 는 opt-in 프로브가 아닙니다(대상: ${[...OPT_IN_TOOLS].join(", ")}).`);
+    }
+  }
+  return [...out];
+}
 
 // ── 서브커맨드 ───────────────────────────────────────────────────────────────
 const registry = new ProviderRegistry();
@@ -93,6 +130,56 @@ async function findAuthPath(explicit: string | undefined, cfg: RedcellConfig): P
   );
 }
 
+/**
+ * 감사 추적을 열어 ScopeGuard 에 붙인다(항상 켜짐 — --no-audit 로만 끈다).
+ * 모든 scope 판정이 변조탐지(해시체인) 로그에 남아 "봉쇄 증거"가 된다.
+ * 감사 파일 자체를 열지 못하면(디스크/권한) 예외를 던져 스캔을 시작하지 않는다(fail-closed):
+ * 봉쇄 증거를 남길 수 없는 상태로 공격성 액션을 하지 않기 위함.
+ */
+function attachAudit(guard: ScopeGuard, args: Args, meta: Record<string, unknown>): AuditLog | undefined {
+  if (args.flags["no-audit"]) {
+    console.error("[audit] 비활성화됨(--no-audit) — 봉쇄 증거가 기록되지 않습니다.");
+    return undefined;
+  }
+  const engagement = guard.engagementMeta.name;
+  let log: AuditLog;
+  try {
+    log = AuditLog.open(engagement, { dir: str(args.flags["audit-dir"]) });
+  } catch (e) {
+    throw new Error(
+      `감사 추적을 열 수 없습니다: ${(e as Error).message}\n` +
+        `봉쇄 증거 없이 실행하지 않습니다(fail-closed). --audit-dir 로 쓰기 가능한 경로를 지정하거나 --no-audit 로 명시적으로 끄세요.`,
+    );
+  }
+  log.record("event", { kind: "meta", ...meta });
+  guard.setAuditSink(log);
+  console.error(`[audit] 감사 추적: ${log.filePath}`);
+  return log;
+}
+
+/** 발견을 감사 추적에 기록하고 로그를 닫는다(판정 요약 포함). */
+function auditFinishRun(audit: AuditLog | undefined, findings: EngagementFinding[], summary: Record<string, unknown>): void {
+  if (!audit) return;
+  for (const f of findings) {
+    audit.record("finding", { severity: f.severity, title: f.title, phase: f.phase });
+  }
+  audit.end({ findings: findings.length, ...summary });
+}
+
+async function cmdAudit(args: Args): Promise<void> {
+  const file = str(args._[1]) ?? str(args.flags.file);
+  if (!file) throw new Error("사용법: redcell audit verify <감사파일.jsonl>");
+  const sub = str(args._[0]);
+  if (sub && sub !== "verify") throw new Error(`알 수 없는 audit 하위명령: ${sub}. 지원: verify`);
+  const r = verifyAuditFile(file);
+  if (r.ok) {
+    console.log(`✅ 감사 무결성 확인: ${r.entries}개 항목, 해시 체인/순번 정상(변조 없음).`);
+  } else {
+    console.error(`❌ 감사 무결성 실패: ${r.reason}${r.brokenAtSeq ? ` (seq ${r.brokenAtSeq})` : ""}`);
+    process.exit(2);
+  }
+}
+
 async function cmdScope(args: Args): Promise<void> {
   const cfg = await loadConfig();
   const authPath = await findAuthPath(str(args.flags.auth), cfg);
@@ -110,25 +197,82 @@ async function cmdRun(args: Args): Promise<void> {
 
   const authPath = await findAuthPath(str(args.flags.auth), cfg);
   const guard = await loadAuthorization(authPath);
+  const audit = attachAudit(guard, args, { command: "run", target: { host, port }, goal, authPath });
+
+  // --full/--gate: 결정적 전수(게이트) 모드. 밴딧을 쓰지 않고 각 단계 모든 툴을 1회씩
+  //   실행하며(재현성), 종료코드로 게이트 판정을 낸다(clean=0 / findings=2 / inconclusive=4).
+  // --fresh: 영속 밴딧 상태(bandit.json)를 로드/저장하지 않는다(표적 간 오염 제거). full 이면 자동.
+  const gate = !!args.flags.full || !!args.flags.gate;
+  const fresh = !!args.flags.fresh || gate;
+  const allowUnauth = !!args.flags["allow-unauth"];
+  // --enable <tool[,tool]>: 부작용성 opt-in 프로브를 대상별로 켠다(authorization.yaml optional_probes 와 합쳐짐).
+  const enabledOptIns = resolveEnabledOptIns(guard.enabledOptIns, str(args.flags.enable));
+  if (enabledOptIns.length) console.error(`[opt-in] 활성 프로브: ${enabledOptIns.join(", ")}`);
+  // --no-visual: 초보자용 시각 상황판(ASCII)을 끄고 상세 리포트만 낸다(기본은 켜짐).
+  const visual = !args.flags["no-visual"];
+  // --auto: 밴딧 자율 드라이버(모델 불필요). 게이트 모드는 자동으로 auto 경로를 탄다.
+  const auto = !!args.flags.auto || gate;
+
+  // --target-map <file.json>: 운영자가 아는 경로/파라미터를 직접 주입(정찰 크롤 보강).
+  const targetMap = await loadTargetMapFlag(str(args.flags["target-map"]));
+  const argsForFn = targetMap
+    ? (tool: string, fp: Fingerprint) => argsFromMap(tool, targetMap) ?? autoArgsFor(tool, fp)
+    : autoArgsFor;
+  if (targetMap) console.error(`[target-map] 로드됨: ${str(args.flags["target-map"])}`);
+
+  // P0-4: 사전 scope 게이트. 대상/포트/인가기간이 막히면 로그인·엔게이지먼트 이전에
+  // 즉시 중단한다(로그인 요청조차 미인가 대상에 보내지 않기 위해 login 앞에 둔다).
+  // 조용히 빈 리포트로 끝나면 "정상 통과"로 오인되므로, stderr 경고 + 리포트 배너 +
+  // 전용 종료코드(3)로 차단을 분명히 드러낸다.
+  const preflight = guard.check({ host, port, intent: "recon" });
+  if (!preflight.allowed) {
+    const banner = scopeBlockedBanner(host, port, preflight.reason);
+    console.error(banner);
+    if (args.flags.ndjson) {
+      process.stdout.write(JSON.stringify({ type: "blocked", text: preflight.reason, target: { host, port } }) + "\n");
+    } else {
+      console.log("\n" + banner + "\n");
+    }
+    audit?.end({ verdict: "scope-blocked", reason: preflight.reason });
+    process.exit(3);
+  }
+
+  // 프록시(Burp/ZAP): --proxy 또는 env REDCELL_PROXY.
+  const proxy = str(args.flags.proxy) ?? process.env.REDCELL_PROXY;
+
+  // 로그인 플로우: 인가 파일에 login 블록이 있으면 실제 로그인으로 세션을 확립한다.
+  let session: SessionContext | undefined;
+  const loginCfg = guard.loginConfig;
+  if (loginCfg) {
+    const scheme = port === 443 || port === 8443 ? "https" : "http";
+    const base = `${scheme}://${host}${port ? `:${port}` : ""}`;
+    const lr = await performLogin(base, loginCfg, guard.requestsPerSecond, proxy, (h, p) => guard.check({ host: h, port: p, intent: "recon" }).allowed);
+    console.error(`[login] ${lr.detail}`);
+    session = { auth: lr.headers, jar: lr.jar, proxy };
+  } else if (proxy) {
+    session = { proxy };
+  }
 
   // 모델 선택: --provider mock 이면 오프라인, 아니면 레지스트리 해석.
-  let model: ModelAdapter;
-  let label: string;
+  let model: ModelAdapter = new MockModel();
+  let label = "mock";
   const provider = str(args.flags.provider);
-  if (provider === "mock") {
-    model = new MockModel();
-    label = "mock";
-  } else {
-    try {
-      const r = resolveModel(registry, cfg, { provider, model: str(args.flags.model) });
-      model = r.model;
-      label = `${r.provider}:${r.modelId}${r.credentialSource ? ` (${r.credentialSource})` : ""}`;
-    } catch (e) {
-      if (args.flags.mock) {
-        model = new MockModel();
-        label = "mock(fallback)";
-      } else {
-        throw new Error(`${(e as Error).message}\n오프라인 검증은 --provider mock 또는 --mock 를 쓰세요.`);
+  if (!auto) {
+    if (provider === "mock") {
+      model = new MockModel();
+      label = "mock";
+    } else {
+      try {
+        const r = resolveModel(registry, cfg, { provider, model: str(args.flags.model) });
+        model = r.model;
+        label = `${r.provider}:${r.modelId}${r.credentialSource ? ` (${r.credentialSource})` : ""}`;
+      } catch (e) {
+        if (args.flags.mock) {
+          model = new MockModel();
+          label = "mock(fallback)";
+        } else {
+          throw new Error(`${(e as Error).message}\n오프라인 검증은 --provider mock 또는 --mock 를 쓰세요.`);
+        }
       }
     }
   }
@@ -137,15 +281,333 @@ async function cmdRun(args: Args): Promise<void> {
   const memory = new SkillMemory(path.join(root, "knowledge", "playbooks"));
   await memory.load();
 
-  console.error(`[model] ${label}`);
+  console.error(`[model] ${auto ? "autopilot(bandit, 모델 없음)" : label}`);
   console.error(`[scope] ${authPath}`);
+
+  // --ndjson: 각 이벤트를 한 줄 JSON 으로 stdout 에 흘린다(데스크톱 앱 연동).
+  //           이때 사람이 읽는 Markdown 리포트는 출력하지 않는다.
+  const ndjson = !!args.flags.ndjson;
+  if (ndjson) {
+    process.stdout.write(JSON.stringify({ type: "meta", model: auto ? "autopilot" : label, authPath, target: { host, port }, goal }) + "\n");
+  }
+  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+
+  if (auto) {
+    // 게이트 모드: 엔게이지먼트 전에 도달성부터 확인한다. 대상이 죽어 있으면 스캔이
+    // 무의미하게 오래 돌다 '발견 0'으로 끝나 '통과'로 오인되므로, 즉시 종료코드 4 로 끊는다.
+    if (gate) {
+      const reach = await probeReachable(host, port, proxy);
+      if (!reach.ok) {
+        const banner = unreachableBanner(host, port, reach.detail);
+        console.error(banner);
+        if (ndjson) process.stdout.write(JSON.stringify({ type: "error", text: reach.detail }) + "\n");
+        else console.log("\n" + banner + "\n");
+        audit?.end({ verdict: "inconclusive", reason: reach.detail });
+        process.exit(4);
+      }
+    }
+
+    // 게이트/--fresh 는 영속 밴딧을 로드·저장하지 않는다(표적 간 오염 제거 → 재현성).
+    const storePath = path.join(redcellHome(), "bandit.json");
+    const store = new BanditStore(storePath);
+    const bandit = fresh ? new ContextualBandit("ucb1") : await store.load("ucb1");
+    const autopilot = new AutoPilot(guard, memory, bandit, new DefaultToolBox(), {
+      maxStepsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 8,
+      globalBudget: gate ? 200 : 60,
+      banditStore: fresh ? undefined : store,
+      argsFor: argsForFn,
+      onEvent: emit,
+      session,
+      full: gate,
+      allowUnauth,
+      enabledOptIns,
+    });
+    const rep = await autopilot.run({ host, port }, goal);
+    // 프로세스 성숙도: 직무분리 + waiver(수용된 위험 제외 판정) + 서명 리포트 출처.
+    const gov = await governReport(guard, args, root, allowUnauth, {
+      findings: rep.findings,
+      coverage: rep.coverage,
+      verdict: rep.verdict,
+      verdictReason: rep.verdictReason,
+    });
+    if (!ndjson) {
+      const log = {
+        target: rep.target,
+        fingerprint: rep.fingerprint,
+        findings: gov.activeFindings, // 수용된 위험은 별도 섹션에 표기(중복 방지)
+        usedPlaybooks: rep.usedPlaybooks,
+        distilled: [],
+        transcript: rep.transcript,
+        coverage: rep.coverage,
+        verdict: gov.verdict,
+        verdictReason: gov.verdictReason,
+      };
+      if (visual) console.log("\n" + toVisualBoard(log, { waived: gov.reportOpts.waived }));
+      console.log("\n" + toMarkdown(log, gov.reportOpts) + "\n");
+    }
+    auditFinishRun(audit, gov.activeFindings, { command: "run", mode: gate ? "gate" : "auto", verdict: gov.verdict ?? rep.verdict });
+    // 게이트 모드: 판정을 종료코드로 낸다(CI 연동). findings=2, inconclusive=4, clean=0.
+    // waiver 로 수용된 위험을 제외한 재계산 판정(gov.verdict)을 사용한다.
+    if (gate) {
+      console.error(gateExitBanner(gov.verdict ?? rep.verdict, gov.verdictReason ?? rep.verdictReason));
+      if (gov.verdict === "findings") process.exit(2);
+      if (gov.verdict === "inconclusive") process.exit(4);
+    }
+    return;
+  }
 
   const orch = new Orchestrator(guard, memory, model, new DefaultToolBox(), {
     maxActionsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 4,
     allowActivePhases: !args.flags["dry-run"],
+    onEvent: emit,
+    session,
+    enabledOptIns,
   });
   const log = await orch.run({ host, port }, goal);
-  console.log("\n" + toMarkdown(log) + "\n");
+  let activeFindings = log.findings;
+  if (!ndjson) {
+    const gov = await governReport(guard, args, root, allowUnauth, { findings: log.findings });
+    activeFindings = gov.activeFindings;
+    log.findings = gov.activeFindings; // 수용된 위험은 별도 섹션으로 분리
+    if (visual) console.log("\n" + toVisualBoard(log, { waived: gov.reportOpts.waived }));
+    console.log("\n" + toMarkdown(log, gov.reportOpts) + "\n");
+  }
+  auditFinishRun(audit, activeFindings, { command: "run", mode: "orchestrator" });
+}
+
+/** scope 차단 시 사람이 놓칠 수 없는 배너(빈 리포트를 "정상 통과"로 오인하는 것을 막는다). */
+function scopeBlockedBanner(host: string, port: number | undefined, reason: string): string {
+  const t = `${host}${port != null ? ":" + port : ""}`;
+  return [
+    "╔══════════════════════════════════════════════════════════════╗",
+    "║  ⛔ SCOPE 차단 — engagement 를 실행하지 않았습니다               ║",
+    "╚══════════════════════════════════════════════════════════════╝",
+    `대상   : ${t}`,
+    `사유   : ${reason}`,
+    "조치   : authorization.yaml 의 scope.allow / ports.allow_tcp / 인가기간을 확인하세요.",
+    "         (인가된 대상만 추가할 것. 임시(ephemeral) 포트는 ports.allow_tcp 에 포함해야 함)",
+    "종료코드: 3 (scope 차단) — 스캔이 수행되지 않았으므로 '취약점 없음'이 아닙니다.",
+  ].join("\n");
+}
+
+/**
+ * 게이트 도달성 사전 점검 — 단일 요청(짧은 타임아웃, 재시도 없음)으로 대상이 살아있는지 본다.
+ * 죽은 대상에 대해 스캔이 오래 돌다 '발견 0'으로 끝나 '통과'로 오인되는 것을 막는다.
+ */
+async function probeReachable(host: string, port: number | undefined, proxy: string | undefined): Promise<{ ok: boolean; detail: string }> {
+  const scheme = port === 443 || port === 8443 ? "https" : "http";
+  const url = `${scheme}://${host}${port ? `:${port}` : ""}/`;
+  try {
+    const res = await httpRequest(url, { method: "GET", timeoutMs: 4000, retries: 0, proxy });
+    return { ok: true, detail: `도달 확인: ${url} → HTTP ${res.status}` };
+  } catch (e) {
+    return { ok: false, detail: `대상 미도달: ${url} — ${(e as Error).message}` };
+  }
+}
+
+/** 게이트 도달 실패 배너(종료코드 4 = 스캔 미수행, '취약점 없음' 아님). */
+function unreachableBanner(host: string, port: number | undefined, detail: string): string {
+  const t = `${host}${port != null ? ":" + port : ""}`;
+  return [
+    "╔══════════════════════════════════════════════════════════════╗",
+    "║  🟡 INCONCLUSIVE — 대상에 도달하지 못해 스캔을 수행하지 못함     ║",
+    "╚══════════════════════════════════════════════════════════════╝",
+    `대상   : ${t}`,
+    `사유   : ${detail}`,
+    "조치   : 대상이 실행 중인지·포트가 맞는지·프록시 설정을 확인하세요.",
+    "종료코드: 4 (도달 실패) — 스캔이 수행되지 않았으므로 '취약점 없음'이 아닙니다.",
+  ].join("\n");
+}
+
+/** 게이트 판정 → 종료코드 요약 배너(CI 로그에서 결과를 놓치지 않도록). */
+function gateExitBanner(verdict: string, reason: string): string {
+  const map: Record<string, string> = {
+    clean: "🟢 PASS(clean) — 종료코드 0",
+    findings: "🔴 FAIL(findings) — 종료코드 2",
+    inconclusive: "🟡 INCONCLUSIVE — 종료코드 4",
+  };
+  return [
+    "──────────────────────────────────────────────────────────────",
+    `게이트 판정: ${map[verdict] ?? verdict}`,
+    `사유: ${reason}`,
+    verdict === "clean"
+      ? "주의: 이 PASS 는 검사한 표면 한정입니다. 수동 펜테스트·SCA·인증/로직 리뷰를 병행하세요."
+      : "오픈 불가 — 위 사유를 해소한 뒤 재실행하세요.",
+    "──────────────────────────────────────────────────────────────",
+  ].join("\n");
+}
+
+/** RedCell 소스 커밋(있으면). 이 리포트를 낸 툴 빌드 식별용(best-effort). */
+function toolCommit(root: string): string | undefined {
+  try {
+    return execFileSync("git", ["rev-parse", "--short", "HEAD"], { cwd: root, stdio: ["ignore", "pipe", "ignore"] })
+      .toString()
+      .trim() || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function readVersion(root: string): Promise<string> {
+  try {
+    const pkg = JSON.parse(await fs.readFile(path.join(root, "package.json"), "utf8"));
+    return String(pkg.version ?? "0.0.0");
+  } catch {
+    return "0.0.0";
+  }
+}
+
+interface ReportShape {
+  findings: EngagementFinding[];
+  coverage?: Coverage;
+  verdict?: GateVerdict;
+  verdictReason?: string;
+}
+interface Governed {
+  reportOpts: ReportOptions;
+  activeFindings: EngagementFinding[];
+  verdict?: GateVerdict;
+  verdictReason?: string;
+}
+
+/**
+ * 프로세스 성숙도 게이트: 직무분리 확인 → waiver 적용(정식 위험수용) → 판정 재계산 →
+ * 서명 리포트 출처 구성. 라이브러리(autopilot/orchestrator)는 건드리지 않고 CLI 경계에서만 적용한다.
+ */
+async function governReport(
+  guard: ScopeGuard,
+  args: Args,
+  root: string,
+  allowUnauth: boolean,
+  log: ReportShape,
+): Promise<Governed> {
+  const meta = guard.engagementMeta;
+
+  // 직무분리(SoD): 인가자≠운영자여야 한다. 위반 시 경고(차단은 아님 — 운영 정책에 위임).
+  const sod = checkSeparationOfDuties(meta.authorizedBy, meta.operator);
+  console.error(sod.ok ? `[직무분리] ${sod.message}` : `[직무분리] ⚠️ ${sod.message}`);
+
+  // waiver(정식 위험수용): 만료된 waiver 는 적용하지 않는다.
+  const w = applyWaivers(log.findings, guard.waivers);
+  for (const iv of w.invalid) {
+    console.error(`[waiver] ⚠️ 무효 waiver 무시: match="${iv.match}" (빈 패턴 또는 잘못된 정규식) → 어떤 발견도 수용하지 않음`);
+  }
+  for (const ex of w.expired) {
+    console.error(`[waiver] ⚠️ 만료된 waiver 무시: "${ex.match}" (만료 ${ex.expires}) → 해당 발견 유효 유지`);
+  }
+  for (const wf of w.waived) {
+    console.error(`[waiver] 수용된 위험: "${wf.finding.title}" (승인 ${wf.waiver.approved_by}, 만료 ${wf.waiver.expires})`);
+  }
+
+  // 판정 재계산: 수용된 위험을 제외하고 다시 판정한다(감사 가능한 게이트 통과).
+  let verdict = log.verdict;
+  let reason = log.verdictReason;
+  if (log.coverage && w.waived.length > 0) {
+    const v = decideVerdict(log.coverage, w.active, allowUnauth);
+    verdict = v.verdict;
+    reason = `${v.reason} (수용된 위험 ${w.waived.length}건 제외 — 승인된 waiver)`;
+  }
+
+  const version = await readVersion(root);
+  const prov = buildProvenance({
+    version,
+    tools: new DefaultToolBox().list(),
+    engagement: meta.name,
+    authorizedBy: meta.authorizedBy,
+    operator: meta.operator,
+    targetRef: str(args.flags["target-ref"]) ?? meta.targetRef,
+    toolCommit: toolCommit(root),
+  });
+
+  return {
+    reportOpts: { provenance: prov, waived: w.waived, signingKey: guard.signingKey() },
+    activeFindings: w.active,
+    verdict,
+    verdictReason: reason,
+  };
+}
+
+/** AutoPilot 이 발견한 엔드포인트로 공격 툴 인자를 구성(툴 간 데이터 흐름). */
+/** --target-map <file.json> 로드(없으면 undefined, 형식 오류면 던진다). */
+async function loadTargetMapFlag(pathArg: string | undefined): Promise<TargetMap | undefined> {
+  if (!pathArg) return undefined;
+  let raw: string;
+  try {
+    raw = await fs.readFile(pathArg, "utf8");
+  } catch {
+    throw new Error(`--target-map 파일을 읽을 수 없습니다: ${pathArg}`);
+  }
+  let json: unknown;
+  try {
+    json = JSON.parse(raw);
+  } catch {
+    throw new Error(`--target-map 파일이 올바른 JSON 이 아닙니다: ${pathArg}`);
+  }
+  return parseTargetMap(json);
+}
+
+function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, unknown> {
+  const endpoints: string[] = [];
+  for (const i of fp.indicators ?? []) {
+    const m = /^endpoint (\/\S+)/.exec(i);
+    if (m) endpoints.push(m[1]);
+  }
+  const forgeMap: Record<string, VulnClass> = {
+    xss_probe: "xss",
+    path_traversal: "lfi",
+    open_redirect: "redirect",
+    ssrf_probe: "ssrf",
+  };
+  // 발견된 엔드포인트에서 서로 다른 경로/파라미터 집합을 추출한다.
+  // 취약점은 엔드포인트마다 다르므로(예: /tpl→SSTI, /ping→CMDI), 주입 계열
+  // 툴에는 발견한 경로·파라미터 전체를 넘겨 발산적으로 스윕하게 한다.
+  const paths = [...new Set(endpoints.map((e) => e.split("?")[0]))].slice(0, 8);
+  const params = [
+    ...new Set(
+      endpoints.flatMap((e) => {
+        const q = e.split("?")[1];
+        return q ? [...new URLSearchParams(q).keys()] : [];
+      }),
+    ),
+  ].filter(Boolean).slice(0, 8);
+
+  if (endpoints.length === 0) {
+    // 엔드포인트가 없어도 페이로드 툴은 fp 기반 변형을 실어 발산을 유지한다.
+    return forgeMap[toolName] ? { payloads: forge(forgeMap[toolName], fp) } : {};
+  }
+  const first = endpoints[0];
+  const path0 = first.split("?")[0];
+  // 주입 계열 툴: 발견한 경로 전체를 스윕(+ 파라미터 힌트). 페이로드는 fp 기반 변형.
+  if (forgeMap[toolName]) {
+    const a: Record<string, unknown> = { paths, payloads: forge(forgeMap[toolName], fp) };
+    if (params.length) a.params = params;
+    return a;
+  }
+  switch (toolName) {
+    case "api_probe":
+      return { paths };
+    case "ssti_probe":
+    case "cmdi_probe":
+    case "logic_probe": {
+      const a: Record<string, unknown> = { paths };
+      if (params.length) a.params = params;
+      return a;
+    }
+    case "xxe_probe":
+    case "deserialize_probe":
+    case "auth_session_probe":
+    case "cache_poison_probe":
+      return { paths };
+    case "sqli_probe":
+    case "cors_audit":
+      return { path: path0, ...(params.length ? { params } : {}) };
+    case "idor_probe": {
+      const idPath = endpoints.find((e) => /\/\d+(\/?$)/.test(e.split("?")[0])) ?? first;
+      return { path: idPath.split("?")[0] };
+    }
+    default:
+      return {};
+  }
 }
 
 async function cmdConfig(args: Args): Promise<void> {
@@ -175,6 +637,100 @@ async function cmdMcts(args: Args): Promise<void> {
   await import("./mcts-demo.js");
 }
 
+/**
+ * cmdPyRun — "absolute-agent" 모드: 모델이 파이썬 코드를 스스로 작성·실행하며 대상을
+ * 공략한다(고정 툴박스 대신). 모든 대상 통신은 broker(ScopeGuard) 를 경유한다.
+ */
+async function cmdPyRun(args: Args): Promise<void> {
+  const cfg = await loadConfig();
+  const host = str(args.flags.host);
+  if (!host) throw new Error("redcell pyrun 에는 --host 가 필요합니다. 예: redcell pyrun --host 127.0.0.1 --port 8080");
+  const port = args.flags.port ? Number(str(args.flags.port)) : undefined;
+  const goal = str(args.flags.goal) ?? "인가된 대상의 취약점을 파이썬으로 직접 탐색하고 방어 권고 보고";
+
+  const authPath = await findAuthPath(str(args.flags.auth), cfg);
+  const guard = await loadAuthorization(authPath);
+  const audit = attachAudit(guard, args, { command: "pyrun", target: { host, port }, goal, authPath });
+  const allowUnauth = !!args.flags["allow-unauth"];
+  const visual = !args.flags["no-visual"];
+
+  // 사전 scope 게이트(로그인·실행 이전) — 미인가면 종료코드 3.
+  const preflight = guard.check({ host, port, intent: "recon" });
+  if (!preflight.allowed) {
+    const banner = scopeBlockedBanner(host, port, preflight.reason);
+    console.error(banner);
+    if (args.flags.ndjson) process.stdout.write(JSON.stringify({ type: "blocked", text: preflight.reason, target: { host, port } }) + "\n");
+    else console.log("\n" + banner + "\n");
+    audit?.end({ verdict: "scope-blocked", reason: preflight.reason });
+    process.exit(3);
+  }
+
+  const proxy = str(args.flags.proxy) ?? process.env.REDCELL_PROXY;
+  let session: SessionContext | undefined;
+  const loginCfg = guard.loginConfig;
+  if (loginCfg) {
+    const scheme = port === 443 || port === 8443 ? "https" : "http";
+    const base = `${scheme}://${host}${port ? `:${port}` : ""}`;
+    const lr = await performLogin(base, loginCfg, guard.requestsPerSecond, proxy, (h, p) => guard.check({ host: h, port: p, intent: "recon" }).allowed);
+    console.error(`[login] ${lr.detail}`);
+    session = { auth: lr.headers, jar: lr.jar, proxy };
+  } else if (proxy) {
+    session = { proxy };
+  }
+
+  // 코드 작성 모델: --provider mock 이면 오프라인 MockCoder, 아니면 레지스트리 해석.
+  let model: ModelAdapter = new MockCoder();
+  let label = "mock-coder";
+  const provider = str(args.flags.provider);
+  if (provider !== "mock") {
+    try {
+      const r = resolveModel(registry, cfg, { provider, model: str(args.flags.model) });
+      model = r.model;
+      label = `${r.provider}:${r.modelId}${r.credentialSource ? ` (${r.credentialSource})` : ""}`;
+    } catch (e) {
+      if (args.flags.mock) {
+        model = new MockCoder();
+        label = "mock-coder(fallback)";
+      } else {
+        throw new Error(`${(e as Error).message}\n오프라인 검증은 --provider mock 또는 --mock 를 쓰세요.`);
+      }
+    }
+  }
+
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  console.error(`[model] python-agent · ${label}`);
+  console.error(`[scope] ${authPath}`);
+
+  const ndjson = !!args.flags.ndjson;
+  if (ndjson) process.stdout.write(JSON.stringify({ type: "meta", model: label, mode: "python-agent", authPath, target: { host, port }, goal }) + "\n");
+  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+
+  // OS 격리 정책: 기본 required(신뢰불가 코드는 격리 백엔드 없으면 거부). --isolation 로 조정.
+  const isoFlag = str(args.flags.isolation);
+  const isolation: "required" | "best-effort" | "off" =
+    isoFlag === "off" || isoFlag === "best-effort" || isoFlag === "required" ? isoFlag : "required";
+  if (isoFlag && isoFlag !== isolation) throw new Error(`--isolation 값은 required|best-effort|off 중 하나여야 합니다(받은 값: ${isoFlag}).`);
+
+  const agent = new PythonAgent(guard, model, {
+    maxIterations: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 8,
+    stepTimeoutMs: args.flags["step-timeout"] ? Number(str(args.flags["step-timeout"])) : 15000,
+    onEvent: emit,
+    session,
+    isolation,
+  });
+  const log = await agent.run({ host, port }, goal);
+
+  let activeFindings = log.findings;
+  if (!ndjson) {
+    const gov = await governReport(guard, args, root, allowUnauth, { findings: log.findings });
+    activeFindings = gov.activeFindings;
+    log.findings = gov.activeFindings;
+    if (visual) console.log("\n" + toVisualBoard(log, { waived: gov.reportOpts.waived }));
+    console.log("\n" + toMarkdown(log, gov.reportOpts) + "\n");
+  }
+  auditFinishRun(audit, activeFindings, { command: "pyrun", isolation });
+}
+
 function help(): void {
   console.log(`RedCell — 자기발전형 화이트해커 에이전트 (prime-agent 기반)
 
@@ -184,10 +740,30 @@ Commands:
   run          인가된 대상에 engagement 실행
                  --host <h> [--port <p>] [--goal <g>]
                  [--provider <name>] [--model <id>] [--auth <path>]
-                 [--dry-run] [--mock] [--max-actions <n>]
+                 [--proxy <url>]  Burp/ZAP 등 프록시 경유(env REDCELL_PROXY 도 가능)
+                 [--dry-run] [--mock] [--max-actions <n>] [--ndjson]
+                 [--auto]  모델 없이 밴딧 자율 드라이버로 다각 벡터 발산 탐색
+                 [--full|--gate]  결정적 전수(게이트) 모드: 밴딧 없이 모든 툴 1회씩 실행,
+                                  종료코드로 판정(clean=0/findings=2/inconclusive=4)
+                 [--fresh]  영속 밴딧 상태를 로드·저장하지 않음(표적 간 오염 제거·재현성)
+                 [--allow-unauth]  공개 서비스로 간주해 인증 표면 미점검을 허용(게이트 판정)
+                 [--enable <t[,t]>]  부작용성 opt-in 프로브를 대상별로 켠다(logic_probe,cache_poison_probe|all)
+                 [--target-ref <ref>]  검사 대상의 커밋/빌드 참조(서명 리포트 출처에 기록)
+                 [--target-map <file.json>]  아는 경로/파라미터를 직접 주입(정찰 크롤 보강)
+                 [--no-visual]  초보자용 시각 상황판(ASCII 그림)을 끄고 상세 리포트만 출력
+  pyrun        absolute-agent 모드: 모델이 파이썬 코드를 스스로 작성·실행하며 공략
+                 --host <h> [--port <p>] [--goal <g>] [--provider <name>] [--model <id>]
+                 [--auth <path>] [--proxy <url>] [--max-actions <n>] 코드 반복 횟수
+                 [--step-timeout <ms>] 코드 1회 실행 타임아웃 [--ndjson] [--no-visual]
+                 [--isolation required|best-effort|off] OS 격리 정책(기본 required):
+                   신뢰불가(라이브 모델) 코드는 격리 백엔드(bwrap) 없으면 실행 거부(fail-closed)
+                 대상과의 모든 HTTP 는 ScopeGuard 브로커를 경유(비파괴·RPS·scope 강제)
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
   models       프로바이더별 기본 모델 표시
   scope        인가(scope) 상태 확인   [--auth <path>]
+  audit        감사 추적 무결성 검증     verify <감사파일.jsonl>
+                 (run/pyrun 은 기본으로 변조탐지 감사 추적을 남긴다: --no-audit 로 끄고,
+                  --audit-dir <경로> 로 위치 지정. 기본 ~/.redcell/audit)
   explore      밴딧 자기발전 데모       [episodes] [ucb1|thompson]
   mcts         MCTS 트리검색 데모        [depth] [branching]
   config       설정 조회/변경           get | set <key> <value>
@@ -214,9 +790,11 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case "run": return void (await cmdRun(args));
+    case "pyrun": return void (await cmdPyRun(args));
     case "providers": return void (await cmdProviders());
     case "models": return void (await cmdModels());
     case "scope": return void (await cmdScope(args));
+    case "audit": return void (await cmdAudit(args));
     case "explore": return void (await cmdExplore(args));
     case "mcts": return void (await cmdMcts(args));
     case "config": return void (await cmdConfig(args));

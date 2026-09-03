@@ -4,7 +4,7 @@
  */
 
 import type { Tool, ToolContext, ToolResult } from "../core/types.js";
-import { baseUrl, safeGet } from "./util.js";
+import { baseUrl, authGet } from "./util.js";
 
 const EXPECTED: Array<{ header: string; why: string }> = [
   { header: "content-security-policy", why: "XSS/데이터 주입 완화" },
@@ -20,7 +20,7 @@ export const headerAudit: Tool = {
   intent: "recon",
   async run(_args, ctx: ToolContext): Promise<ToolResult> {
     try {
-      const res = await safeGet(baseUrl(ctx.target), ctx.rps);
+      const res = await authGet(ctx, baseUrl(ctx.target));
       const missing = EXPECTED.filter((e) => !(e.header in res.headers));
       const ok = true;
       return {

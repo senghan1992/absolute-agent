@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>RedCell</title>
+    <!-- 무플래시 테마 초기화: 첫 페인트 전에 저장/시스템 선호를 적용 -->
+    <script>
+      (function () {
+        try {
+          var forced = location.hash === "#light" || location.hash === "#dark" ? location.hash.slice(1) : null;
+          var saved = localStorage.getItem("redcell-theme");
+          var sys = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+          document.documentElement.setAttribute("data-theme", forced || saved || sys);
+        } catch (e) { document.documentElement.setAttribute("data-theme", "dark"); }
+      })();
+    </script>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <!-- 인라인 SVG 아이콘 정의(1.6px stroke, currentColor) -->
+    <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+      <defs>
+        <symbol id="i-crosshair" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 2v4M12 18v4M2 12h4M18 12h4"/></symbol>
+        <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5v14M5 12h14"/></symbol>
+        <symbol id="i-gear" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"/></symbol>
+        <symbol id="i-sun" viewBox="0 0 24 24"><circle cx="12" cy="12" r="4.2"/><path d="M12 1.8v2.6M12 19.6v2.6M4.2 4.2l1.8 1.8M18 18l1.8 1.8M1.8 12h2.6M19.6 12h2.6M4.2 19.8l1.8-1.8M18 6l1.8-1.8"/></symbol>
+        <symbol id="i-moon" viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></symbol>
+        <symbol id="i-play" viewBox="0 0 24 24"><path d="M7 4.5l12 7.5-12 7.5z"/></symbol>
+        <symbol id="i-stop" viewBox="0 0 24 24"><rect x="6.5" y="6.5" width="11" height="11" rx="2"/></symbol>
+        <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h14M12 5l7 7-7 7"/></symbol>
+        <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
+        <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9.2 12l2 2 3.6-4"/></symbol>
+      </defs>
+    </svg>
+
+    <!-- 상단바 -->
+    <header id="topbar">
+      <div class="brand">
+        <span class="mark"><svg class="ic"><use href="#i-shield"/></svg></span>
+        RedCell<span class="brand-sub">/ operator console</span>
+      </div>
+      <nav id="tabs" class="tabs"></nav>
+      <div class="top-actions">
+        <button id="themeBtn" class="btn btn-icon" title="테마 전환" aria-label="라이트/다크 테마 전환">
+          <svg class="ic" id="themeIcon"><use href="#i-moon"/></svg>
+        </button>
+        <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>세션</button>
+        <button id="settingsBtn" class="btn btn-icon" title="설정" aria-label="설정"><svg class="ic"><use href="#i-gear"/></svg></button>
+      </div>
+    </header>
+
+    <main id="workspace">
+      <!-- 왼쪽: 메인 캡처 패널 -->
+      <section id="mainPanel" class="panel">
+        <!-- 세션 헤더 -->
+        <div class="session-header">
+          <input id="shName" class="sh-name" placeholder="세션 이름" spellcheck="false" />
+          <div class="sh-target">
+            <span class="tgt-ico"><svg class="ic"><use href="#i-crosshair"/></svg></span>
+            <input id="shHost" class="sh-input" placeholder="host" spellcheck="false" />
+            <span class="tgt-sep">:</span>
+            <input id="shPort" class="sh-input sh-port" placeholder="port" spellcheck="false" />
+            <select id="shProvider" class="sh-input sh-provider">
+              <option value="mock">mock</option>
+              <option value="anthropic">anthropic</option>
+              <option value="openai">openai</option>
+              <option value="openrouter">openrouter</option>
+              <option value="prime-inference">prime-inference</option>
+              <option value="ollama">ollama</option>
+            </select>
+            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스, python=absolute-agent(코드 작성→실행 반복)">
+              <option value="tools">tools</option>
+              <option value="python">python(RLM)</option>
+            </select>
+          </div>
+          <span id="statusBadge" class="badge badge-idle">idle</span>
+          <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
+        </div>
+
+        <!-- 진행 리본: 단계 스테퍼 + 메트릭 -->
+        <div class="ribbon">
+          <div id="stepper" class="stepper">
+            <div class="step" data-phase="recon"><span class="s-dot"></span>recon</div>
+            <div class="step" data-phase="enumerate"><span class="s-dot"></span>enumerate</div>
+            <div class="step" data-phase="exploit"><span class="s-dot"></span>exploit</div>
+            <div class="step" data-phase="post"><span class="s-dot"></span>post</div>
+          </div>
+          <div id="metrics" class="metrics">
+            <span class="metric"><b id="mEvents">0</b> events</span>
+            <span class="metric sev-critical"><b id="mCrit">0</b> crit</span>
+            <span class="metric sev-high"><b id="mHigh">0</b> high</span>
+            <span class="metric sev-medium"><b id="mMed">0</b> med</span>
+            <span class="metric sev-low"><b id="mLow">0</b> low</span>
+            <span class="metric blocked"><b id="mBlocked">0</b> blocked</span>
+          </div>
+        </div>
+
+        <!-- 현재 활동: 에이전트가 지금 하는 일을 사람 말로 -->
+        <div id="activityBar" class="activity hidden">
+          <span class="activity-dot"></span>
+          <span id="activityText" class="activity-text"></span>
+        </div>
+
+        <!-- 서브탭 -->
+        <div class="subtabs">
+          <button class="subtab active" data-view="live">라이브 캡처</button>
+          <button class="subtab" data-view="findings">발견 <span id="cntFindings" class="count">0</span></button>
+          <button class="subtab" data-view="intel">인텔</button>
+          <button class="subtab" data-view="next">다음 단계</button>
+        </div>
+
+        <!-- 라이브 캡처: 테이블 + 상세 -->
+        <div id="view-live" class="view active live">
+          <div class="capture">
+            <table class="cap-table">
+              <thead>
+                <tr>
+                  <th class="c-seq">#</th>
+                  <th class="c-time">time</th>
+                  <th class="c-phase">phase</th>
+                  <th class="c-tool">tool</th>
+                  <th class="c-msg">event</th>
+                  <th class="c-status">status</th>
+                </tr>
+              </thead>
+              <tbody id="capBody"></tbody>
+            </table>
+            <div id="capEmpty" class="placeholder">대기 중 — 오른쪽 에이전트에게 목표를 지시하면 캡처가 시작됩니다.</div>
+          </div>
+          <div id="detail" class="detail">
+            <div class="detail-empty">행을 선택하면 상세가 표시됩니다.</div>
+          </div>
+        </div>
+
+        <div class="view-scroll-wrap">
+          <div id="view-findings" class="view"></div>
+          <div id="view-intel" class="view"></div>
+          <div id="view-next" class="view"></div>
+        </div>
+      </section>
+
+      <!-- 오른쪽: 에이전트 패널 -->
+      <aside id="agentPanel" class="panel">
+        <div class="agent-head">
+          <span class="agent-title"><span class="agent-orb"></span>Agent</span>
+          <span id="agentState" class="agent-state">대기</span>
+        </div>
+        <div id="chatMessages" class="chat-messages"></div>
+        <div class="composer">
+          <textarea id="chatInput" rows="3" placeholder="지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+          <div class="composer-row">
+            <span class="composer-hint">인가된 scope 안에서만 실행됩니다</span>
+            <button id="chatSend" class="btn btn-primary">지시<svg class="ic"><use href="#i-send"/></svg></button>
+          </div>
+        </div>
+      </aside>
+    </main>
+
+    <!-- 빈 상태 -->
+    <div id="emptyState" class="empty-state hidden">
+      <div class="empty-card">
+        <span class="empty-mark"><svg class="ic"><use href="#i-shield"/></svg></span>
+        <h2>세션을 시작하세요</h2>
+        <p>인가된 대상 하나로 오퍼레이션을 엽니다.<br />모든 액션은 <code>authorization.yaml</code> scope 안에서만 실행됩니다.</p>
+        <button id="emptyNewBtn" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-plus"/></svg>새 세션 만들기</button>
+      </div>
+    </div>
+
+    <!-- 설정 -->
+    <div id="settingsModal" class="modal hidden">
+      <div class="modal-card">
+        <h3>설정</h3>
+        <label>redcell 프로젝트 경로<input id="setRedcellDir" class="sh-input" placeholder="/path/to/redcell" spellcheck="false" /></label>
+        <label>authorization.yaml 경로 <span class="lbl-dim">(선택)</span><input id="setAuthPath" class="sh-input" placeholder="config/authorization.yaml" spellcheck="false" /></label>
+        <label>기본 provider<input id="setProvider" class="sh-input" placeholder="mock" spellcheck="false" /></label>
+        <div class="modal-actions">
+          <button id="settingsCancel" class="btn btn-ghost">닫기</button>
+          <button id="settingsSave" class="btn btn-primary">저장</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 테마 토글(TAURI 유무와 무관하게 동작) -->
+    <script>
+      (function () {
+        var btn = document.getElementById("themeBtn");
+        var icon = document.getElementById("themeIcon");
+        function sync() {
+          var t = document.documentElement.getAttribute("data-theme") || "dark";
+          // 다음에 전환될 테마를 아이콘으로 예고: 다크면 해(→라이트), 라이트면 달(→다크)
+          icon.innerHTML = '<use href="#' + (t === "dark" ? "i-sun" : "i-moon") + '"/>';
+          btn.setAttribute("title", t === "dark" ? "라이트 테마로 전환" : "다크 테마로 전환");
+        }
+        btn.addEventListener("click", function () {
+          var next = (document.documentElement.getAttribute("data-theme") === "dark") ? "light" : "dark";
+          document.documentElement.classList.add("theme-anim");
+          document.documentElement.setAttribute("data-theme", next);
+          try { localStorage.setItem("redcell-theme", next); } catch (e) {}
+          sync();
+          setTimeout(function () { document.documentElement.classList.remove("theme-anim"); }, 320);
+        });
+        sync();
+      })();
+    </script>
+
+    <!-- 브라우저 프리뷰용 목: 실제 Tauri 앱에선 __TAURI__ 가 이미 있어 무시됨 -->
+    <script src="mock.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

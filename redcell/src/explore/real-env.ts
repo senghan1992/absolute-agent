@@ -20,6 +20,20 @@ import type { LabEnv, Observation, StepResult } from "./env.js";
 import type { ScopeGuard, Target } from "../scope/scope-guard.js";
 import type { ToolBox } from "../core/types.js";
 import type { Fingerprint } from "../memory/skill-memory.js";
+import { forge, type VulnClass } from "../core/payload-forge.js";
+
+/** 페이로드 툴(툴이름→취약점 부류)에 fp 기반 변형 페이로드를 실어 인자를 만든다. */
+function payloadArgs(toolName: string, fp: Fingerprint, path?: string): Record<string, unknown> {
+  const map: Record<string, VulnClass> = {
+    xss_probe: "xss",
+    path_traversal: "lfi",
+    open_redirect: "redirect",
+    ssrf_probe: "ssrf",
+  };
+  const cls = map[toolName];
+  if (!cls) return path ? { path } : {};
+  return { ...(path ? { path } : {}), payloads: forge(cls, fp) };
+}
 
 const SEV_REWARD: Record<string, number> = { critical: 1, high: 1, medium: 0.5, low: 0.5, info: 0 };
 
@@ -35,6 +49,8 @@ export class RealTargetEnv implements LabEnv {
     private readonly tools: ToolBox,
     private readonly target: Target,
     private readonly maxSteps = 30,
+    /** 툴별 인자 보정 훅(발견 경로 활용 등). 미지정 시 fingerprint 기반 기본값. */
+    private readonly argsFor: (toolName: string, fp: Fingerprint) => Record<string, unknown> = defaultArgsFor,
   ) {
     this.name = `real:${target.host}${target.port ? ":" + target.port : ""}`;
   }
@@ -74,7 +90,8 @@ export class RealTargetEnv implements LabEnv {
       return { observation: this.observe(), reward: -0.2, done: false, info: { blocked: decision.reason } };
     }
 
-    const res = await tool.run({}, { target: this.target, rps: this.guard.requestsPerSecond });
+    const args = this.argsFor(action, this.fp);
+    const res = await tool.run(args, { target: this.target, rps: this.guard.requestsPerSecond, auth: this.guard.authHeaders });
 
     // fingerprint 진전 계산.
     let novelty = 0;
@@ -102,4 +119,38 @@ export class RealTargetEnv implements LabEnv {
 
 function dedupe(xs: string[]): string[] {
   return [...new Set(xs.map((x) => x.trim()).filter(Boolean))];
+}
+
+/**
+ * fingerprint 지표에서 발견한 엔드포인트로 공격 툴 인자를 구성하는 기본 훅.
+ * 엔드포인트가 아직 없으면 빈 인자(툴 기본값 사용).
+ */
+function defaultArgsFor(toolName: string, fp: Fingerprint): Record<string, unknown> {
+  const endpoints: string[] = [];
+  for (const i of fp.indicators ?? []) {
+    const m = /^endpoint (\/\S+)/.exec(i);
+    if (m) endpoints.push(m[1]);
+  }
+  // 엔드포인트가 없어도 페이로드 툴은 fp 기반 변형을 실어 보낸다(발산 유지).
+  if (endpoints.length === 0) return payloadArgs(toolName, fp, undefined);
+  const first = endpoints[0];
+  const path = first.split("?")[0];
+  switch (toolName) {
+    case "api_probe":
+      return { paths: [...new Set(endpoints.map((e) => e.split("?")[0]))].slice(0, 6) };
+    case "sqli_probe":
+    case "cors_audit":
+      return { path };
+    case "xss_probe":
+    case "path_traversal":
+    case "open_redirect":
+    case "ssrf_probe":
+      return payloadArgs(toolName, fp, path);
+    case "idor_probe": {
+      const idPath = endpoints.find((e) => /\/\d+(\/?$)/.test(e.split("?")[0])) ?? first;
+      return { path: idPath.split("?")[0] };
+    }
+    default:
+      return {};
+  }
 }

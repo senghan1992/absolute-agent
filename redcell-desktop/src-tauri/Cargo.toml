@@ -1,0 +1,21 @@
+[package]
+name = "redcell-desktop"
+version = "0.1.0"
+edition = "2021"
+description = "RedCell Desktop — 세션별 침투테스트 로그/대화 UI (RedCell 인가 에이전트 프론트엔드)"
+authors = ["seunghwan.byun"]
+license = "MIT"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+chrono = { version = "0.4", features = ["clock"] }
+uuid = { version = "1", features = ["v4"] }
+
+[profile.release]
+strip = true
+lto = true

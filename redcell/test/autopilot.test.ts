@@ -52,8 +52,11 @@ describe("AutoPilot 자율 인게이지먼트", () => {
     await memory.load();
     const bandit = new ContextualBandit("ucb1");
     const auto = new AutoPilot(new ScopeGuard(auth()), memory, bandit, new DefaultToolBox(), {
-      maxStepsPerPhase: 5,
-      globalBudget: 30,
+      // exploit 단계 벡터가 9종(sqli/xss/lfi/redirect/ssrf/idor/ssti/cmdi/xxe)이므로
+      // 모든 후보를 최소 한 번씩 시도할 여유(>=후보 수)를 준다. UCB1 이 미시도 arm 을
+      // 먼저 소진하므로 이 예산이면 sqli_probe 가 반드시 실행되어 결정적으로 통과한다.
+      maxStepsPerPhase: 12,
+      globalBudget: 60,
       // 익스플로잇 단계에서 발견된 경로로 sqli_probe 유도(툴 간 데이터 흐름 시뮬)
       argsFor: (name) => (name === "sqli_probe" ? { path: "/item", param: "id" } : {}),
     });

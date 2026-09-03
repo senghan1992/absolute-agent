@@ -19,6 +19,12 @@ engagement:
   # 인가를 승인한 주체(문서/계약/플랫폼 ToS 근거를 남겨두세요).
   authorized_by: "self-owned home lab — see labs/README.md"
   contact: "senghan1992@gmail.com"
+  # 직무분리(SoD): scope 를 인가한 사람(authorized_by)과 실제 실행 운영자(operator)를
+  # 분리하세요. 동일하면 리포트에 "자기인가" 통제 약점 경고가 출력됩니다(차단은 아님).
+  # operator: "홍길동 (pentest operator)"
+  # 검사한 대상의 커밋/빌드 참조(선택). 서명 리포트 출처에 기록되어 어떤 대상 상태를
+  # 검사했는지 고정됩니다. CLI 의 --target-ref 로도 덮어쓸 수 있습니다.
+  # target_ref: "app@git:9f3c1ab / image:myapp:2026.09.02"
 
 # 허용 대상. 이 안에 들어오는 것만 스캔/공격 가능.
 scope:
@@ -33,6 +39,9 @@ scope:
     - cidr: "169.254.0.0/16"        # link-local 제외
 
 # 허용 포트/서비스 (선택). 비우면 scope 내 전체 허용.
+# ⚠️ 로컬 테스트 서버가 임시(ephemeral) 포트(예: listen(0) 로 OS 가 배정한 49152~65535)
+#    에 뜨면, 그 포트를 반드시 여기 추가해야 한다. 없으면 사전 scope 게이트가
+#    "포트 미허용"으로 즉시 차단하고 종료코드 3 으로 끝난다(스캔 미수행 = '취약점 없음' 아님).
 ports:
   allow_tcp: [80, 443, 8080, 8443, 3000, 22, 3306, 5432, 6379]
 
@@ -43,7 +52,75 @@ limits:
   disallow_dos: true               # 볼류메트릭/자원고갈 공격 차단
   disallow_lateral_beyond_scope: true
 
+# 인증 컨텍스트 (선택) — "로그인 뒤" 표면까지 점검하려면 인가된 테스트 계정의
+# 세션/토큰을 넣습니다. 여기 넣는 자격증명은 반드시 인가된 테스트 계정만!
+# (실제 사용자 계정 금지). 모든 요청 헤더에 병합되어 인증된 표면을 스캔합니다.
+# ⚠️ 게이트 모드(--full)에서는 이 자격증명(또는 아래 login:)이 없으면 "로그인 뒤" 표면을
+#    점검하지 못하므로 판정이 clean 이 아니라 inconclusive 로 강등됩니다. 인증이 필요 없는
+#    공개 서비스라면 CLI 에 --allow-unauth 를 명시해야 clean 판정을 받을 수 있습니다.
+# credentials:
+#   cookie: "session=abc123; csrf=def456"     # Cookie 헤더 값 전체
+#   bearer: "eyJhbGciOiJI..."                  # Authorization: Bearer <token>
+#   headers:                                    # 임의 추가 헤더
+#     x-api-key: "test-key-xxxx"
+
+# 실제 로그인 플로우 (선택) — 정적 쿠키/토큰 대신 "진짜 로그인"으로 세션을 얻어
+# 로그인 뒤 표면을 점검합니다. 자격증명을 로그인 엔드포인트에 제출하고 받은
+# Set-Cookie 세션을 이후 모든 요청에 재전송하며, 필요 시 응답에서 토큰을 추출합니다.
+# ⚠️ fields 에 넣는 자격증명은 반드시 인가된 테스트 계정만! (실제 사용자 계정 금지)
+# login:
+#   url: "/api/login"            # 경로 또는 절대 URL
+#   method: "POST"               # 기본 POST
+#   type: "json"                 # form | json (기본 form)
+#   fields:
+#     username: "testuser"       # 인가된 테스트 계정
+#     password: "test-password"
+#   headers:                     # 추가 요청 헤더(예: 사전 획득 CSRF 토큰)
+#     x-csrf-token: "..."
+#   token:                       # 쿠키 세션만 쓰면 생략 가능
+#     fromJson: "data.accessToken"   # JSON 응답 본문의 점 경로에서 추출
+#     # fromHeader: "authorization"  # 또는 응답 헤더에서
+#     # fromCookie: "access_token"   # 또는 세션 쿠키에서
+#     sendAs: "authorization"        # 재전송할 헤더(기본 authorization)
+#     prefix: "Bearer "              # 값 접두사(authorization 이면 기본 "Bearer ")
+#   success:                     # 성공 판정(선택). 없으면 쿠키/토큰 획득 여부로 판정
+#     status: 200
+#     bodyIncludes: "\"ok\":true"
+#
+# 프록시 (선택) — 모든 트래픽을 Burp/ZAP 등 중간 프록시로 보내려면 CLI 로:
+#   redcell run --target ... --proxy http://127.0.0.1:8080
+# 또는 환경변수 REDCELL_PROXY / HTTPS_PROXY / HTTP_PROXY 로 지정합니다.
+
+# 명시적 opt-in 이 필요한 부작용성 프로브(선택) — 대상별로 켤 때만 자율/모델 드라이버가 실행합니다.
+# 기본은 꺼짐(안전). 켜지 않으면 후보에서 제외되고 리포트에 "미승인 건너뜀"으로 남습니다.
+#   - logic_probe        : 가격/수량/권한 파라미터에 비정상 값 주입(결제/주문/권한 로직에 닿을 수 있음)
+#   - cache_poison_probe : 캐시 계층 오염 성격(고유 cache-buster 로 blast radius=0 이지만 opt-in 로 둠)
+# CLI 로도 켤 수 있습니다: redcell run ... --enable logic_probe,cache_poison_probe  (또는 --enable all)
+# optional_probes:
+#   - logic_probe
+#   - cache_poison_probe
+
 # 자동 발전(self-improvement) 시 학습 결과를 어디까지 재사용할지.
 learning:
   persist_playbooks: true          # 성공한 전술을 knowledge/에 저장
   share_findings: false            # 외부 전송 금지(로컬에만 보관)
+
+# 정식 위험수용(waiver) (선택) — 승인자가 특정 발견의 위험을 정식으로 수용합니다.
+# 수용된 발견은 게이트 판정에서 제외되지만 리포트에는 "수용된 위험" 섹션으로 남습니다
+# (숨김이 아니라 명시적 수용). 만료일이 지난 waiver 는 적용되지 않아 발견이 되살아납니다.
+# match 는 두 형식만 허용합니다(부분문자열 매칭 금지 — 과도 억제 방지):
+#   - 완전일치: 발견 제목과 트림·대소문자 무시로 정확히 같아야 함
+#   - 정규식  : "/pattern/flags" 로 감싸면 정규식 매칭(예: "/^Missing Security Headers/")
+# 빈 패턴/잘못된 정규식은 무효로 거부되어 어떤 발견도 수용하지 않습니다(리포트에 경고).
+# waivers:
+#   - match: "/^Missing Security Headers/"   # 정규식(제목 접두 매칭). 완전일치면 슬래시 없이 제목 그대로.
+#     reason: "정적 자산 CDN 전면 적용 예정(2026 Q4). 현 노출 영향 낮음."
+#     approved_by: "김보안 (CISO)"           # 위험을 수용할 권한이 있는 사람
+#     expires: "2026-12-31"                  # 이후엔 waiver 무효 → 발견 유효
+#     ticket: "SEC-1234"
+
+# 리포트 무결성/서명 (선택) — 리포트에 항상 SHA-256 무결성 다이제스트가 붙습니다.
+# 아래에 환경변수 이름을 지정하면 그 값(HMAC 키)으로 서명해 키 보유자만 검증할 수 있습니다.
+# ⚠️ 키 값 자체는 파일에 저장하지 마세요. 환경변수 이름만 참조합니다.
+# report:
+#   signing_key_env: "REDCELL_REPORT_KEY"

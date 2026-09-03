@@ -21,6 +21,19 @@ beforeAll(async () => {
 });
 afterAll(() => server.close());
 
+// 결정적 테스트를 위한 시드 RNG(mulberry32). 프로덕션의 무작위 발산 탐색은
+// 그대로 두고, 테스트에서만 밴딧의 미시도 arm 선택 순서를 고정한다.
+function seededRng(seed: number): () => number {
+  let a = seed >>> 0;
+  return () => {
+    a |= 0;
+    a = (a + 0x6d2b79f5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 function auth(): AuthorizationFile {
   return {
     engagement: { name: "real", authorized_from: "2026-01-01", authorized_until: "2999-12-31", authorized_by: "test" },
@@ -32,7 +45,7 @@ function auth(): AuthorizationFile {
 describe("RealTargetEnv + Explorer (동일 엔진으로 실대상 구동)", () => {
   it("인가된 대상을 정찰하면 fingerprint 를 학습한다", async () => {
     const env = new RealTargetEnv(new ScopeGuard(auth()), new DefaultToolBox(), { host: "127.0.0.1", port }, 5);
-    const explorer = new Explorer(new ContextualBandit("ucb1"), { maxSteps: 5 });
+    const explorer = new Explorer(new ContextualBandit("ucb1", Math.SQRT2, seededRng(1)), { maxSteps: 5 });
     const res = await explorer.runEpisode(env);
 
     expect(res.steps).toBeGreaterThan(0);

@@ -7,6 +7,7 @@
 
 import type { Tool, ToolContext, ToolResult } from "../core/types.js";
 import type { Fingerprint } from "../memory/skill-memory.js";
+import { authGet } from "./util.js";
 
 export const httpProbe: Tool = {
   name: "http_probe",
@@ -18,18 +19,10 @@ export const httpProbe: Tool = {
     const pathArg = typeof args.path === "string" && args.path ? args.path : "/";
     const url = `${scheme}://${ctx.target.host}${port}${pathArg.startsWith("/") ? "" : "/"}${pathArg}`;
 
-    await throttle(ctx.rps);
-
     try {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 8000);
-      const res = await fetch(url, { method: "GET", redirect: "manual", signal: ctrl.signal });
-      clearTimeout(t);
-      const headers: Record<string, string> = {};
-      res.headers.forEach((v, k) => {
-        headers[k.toLowerCase()] = v;
-      });
-      const body = (await res.text()).slice(0, 4000); // 앞부분만
+      const res = await authGet(ctx, url, { cap: 4000 });
+      const headers = res.headers;
+      const body = res.body;
       const fp = fingerprintFrom(headers, body);
 
       const title = fp.service
@@ -88,13 +81,4 @@ function fingerprintFrom(headers: Record<string, string>, body: string): Fingerp
   if (/csrf-token|_token/i.test(body)) indicators.push("csrf-token present");
 
   return { service, version, tech: [...tech], indicators };
-}
-
-const last: { at: number } = { at: 0 };
-async function throttle(rps: number): Promise<void> {
-  const minGap = 1000 / Math.max(1, rps);
-  const now = Date.now();
-  const wait = Math.max(0, last.at + minGap - now);
-  if (wait > 0) await new Promise((r) => setTimeout(r, wait));
-  last.at = Date.now();
 }

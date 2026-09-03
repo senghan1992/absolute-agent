@@ -14,6 +14,8 @@
     "explore": "tsx src/explore-demo.ts",
     "mcts": "tsx src/mcts-demo.ts",
     "test": "vitest run",
+    "bench": "tsx bench/bench.ts",
+    "bench:external": "tsx bench/external.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

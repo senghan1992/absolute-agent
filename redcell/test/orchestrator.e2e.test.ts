@@ -58,7 +58,9 @@ describe("Orchestrator end-to-end", () => {
     const md = toMarkdown(log);
     expect(md).toContain("RedCell Engagement Report");
     expect(md).toContain("nginx");
-  });
+    // cmdi/sqli 가 출력 기반 미탐 시 시간 기반 블라인드까지 스윕하므로 요청 수가 늘어(RPS 제한 하)
+    // 전체 오케스트레이션 런이 5s 를 살짝 넘는다. 여유 있는 타임아웃을 준다.
+  }, 20000);
 
   it("scope 밖 대상은 거부하고 아무 것도 실행하지 않음", async () => {
     const dir = await fs.mkdtemp(path.join(os.tmpdir(), "redcell-e2e2-"));

@@ -1,0 +1,52 @@
+name: Windows Build
+
+# push 하면 자동으로 Windows 데스크톱 앱(redcell-desktop, Tauri v2)을 빌드한다.
+# 무료 tier 분(minute)을 아끼려 데스크톱 앱 경로가 바뀔 때만 돌고, 같은 브랜치의
+# 이전 실행은 취소한다. 수동 실행(workflow_dispatch)도 가능.
+on:
+  push:
+    paths:
+      - "redcell-desktop/**"
+      - ".github/workflows/windows-build.yml"
+  workflow_dispatch:
+
+# 최소 권한(읽기 전용) — 아티팩트 업로드는 이 권한으로 충분하다.
+permissions:
+  contents: read
+
+# 같은 ref 에서 새 push 가 오면 진행 중이던 빌드를 취소(분 절약).
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      # Node 20 지원 종료 대응: 최신 메이저(v5)는 Node 24 위에서 돈다.
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      # Rust 툴체인(안정). 이 액션은 composite(run 단계)라 Node 런타임 지원종료와 무관.
+      # windows-latest 는 MSVC 빌드도구 + WebView2 가 이미 설치돼 있어 추가 시스템 의존성이 없다.
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # Cargo 레지스트리/빌드 캐시(재빌드 가속 → 무료 tier 분 절약).
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: redcell-desktop/src-tauri
+
+      # 정적 프론트엔드(redcell-desktop/ui)를 쓰는 Tauri v2 앱이라 번들링 없이 release 실행파일만
+      # 컴파일한다(tauri.conf.json 의 bundle.active=false). --locked 로 Cargo.lock 재현성 보장.
+      - name: Build (release)
+        working-directory: redcell-desktop/src-tauri
+        run: cargo build --release --locked
+
+      - name: Upload Windows executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: redcell-desktop-windows
+          path: redcell-desktop/src-tauri/target/release/redcell-desktop.exe
+          if-no-files-found: error
