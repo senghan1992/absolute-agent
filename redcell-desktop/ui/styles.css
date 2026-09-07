@@ -171,6 +171,12 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .brand .mark .ic { width: 13px; height: 13px; stroke: #fff; stroke-width: 2; }
 .brand-sub { color: var(--faint); font-weight: 500; font-size: 11.5px; letter-spacing: 0; }
 
+/* 레드셀 로고: 실드 + 조준 십자(타깃 획득) */
+.logo-svg { display: block; }
+.logo-svg .lg-body { fill: #fff; stroke: none; }
+.logo-svg .lg-reticle, .logo-svg .lg-tick { fill: none; stroke: #0d1424; stroke-width: 3.2; stroke-linecap: round; }
+.logo-svg .lg-core { fill: #22d3ee; stroke: none; }
+
 .tabs { display: flex; gap: 4px; flex: 1 1 auto; overflow-x: auto; scrollbar-width: none; }
 .tabs::-webkit-scrollbar { display: none; }
 .tab {

@@ -31,6 +31,12 @@
         <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h14M12 5l7 7-7 7"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
         <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9.2 12l2 2 3.6-4"/></symbol>
+        <symbol id="i-logo" viewBox="0 0 64 64">
+          <path class="lg-body" d="M32 4.8 56 14.6v18.6c0 14.2-10.3 23.1-24 27.2C18.3 56.3 8 47.4 8 33.2V14.6Z"/>
+          <circle class="lg-reticle" cx="32" cy="32" r="11.6"/>
+          <path class="lg-tick" d="M32 14.6v8.6M32 40.8v8.6M14.6 32h8.6M40.8 32h8.6"/>
+          <circle class="lg-core" cx="32" cy="32" r="3.4"/>
+        </symbol>
         <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
         <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
         <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
@@ -41,7 +47,7 @@
     <!-- 상단바 -->
     <header id="topbar">
       <div class="brand">
-        <span class="mark"><svg class="ic"><use href="#i-shield"/></svg></span>
+        <span class="mark"><svg class="ic logo-svg"><use href="#i-logo"/></svg></span>
         RedCell<span class="brand-sub">/ operator console</span>
       </div>
       <nav id="tabs" class="tabs"></nav>
@@ -168,7 +174,7 @@
     <!-- 빈 상태 -->
     <div id="emptyState" class="empty-state hidden">
       <div class="empty-card">
-        <span class="empty-mark"><svg class="ic"><use href="#i-shield"/></svg></span>
+        <span class="empty-mark"><svg class="ic logo-svg"><use href="#i-logo"/></svg></span>
         <h2>세션을 시작하세요</h2>
         <p>인가된 대상 하나로 오퍼레이션을 엽니다.<br />모든 액션은 <code>authorization.yaml</code> scope 안에서만 실행됩니다.</p>
         <button id="emptyNewBtn" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-plus"/></svg>새 세션 만들기</button>

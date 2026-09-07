@@ -319,7 +319,7 @@
       case "get_providers": return [
         { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: [], base_url: "https://api.anthropic.com/v1", ready_env: false, needs_base: false },
         { name: "openai", kind: "openai-compat", note: "GPT 공식 API", default_model: "gpt-5.4", env_keys: ["OPENAI_API_KEY"], base_url: "https://api.openai.com/v1", ready_env: false, needs_base: false },
-        { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이", default_model: "moonshotai/kimi-k2.6", env_keys: [], base_url: "https://openrouter.ai/api/v1", ready_env: false, needs_base: false },
+        { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이 — 무료 모델은 :free 접미사", default_model: "moonshotai/kimi-k2.6", env_keys: [], base_url: "https://openrouter.ai/api/v1", ready_env: false, needs_base: false },
         { name: "prime-inference", kind: "openai-compat", note: "Prime Intellect inference", default_model: "z-ai/glm-5.2", env_keys: [], base_url: "https://api.pinference.ai/api/v1", ready_env: false, needs_base: false },
         { name: "groq", kind: "openai-compat", note: "고속 추론", default_model: "openai/gpt-oss-120b", env_keys: [], base_url: "https://api.groq.com/openai/v1", ready_env: false, needs_base: false },
         { name: "cerebras", kind: "openai-compat", note: "Cerebras 초고속 추론", default_model: "gpt-oss-120b", env_keys: [], base_url: "https://api.cerebras.ai/v1", ready_env: false, needs_base: false },

@@ -366,7 +366,7 @@ struct ProviderMeta {
 const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], base_url: "https://api.anthropic.com/v1", needs_base: false },
     ProviderMeta { name: "openai", kind: "openai-compat", note: "GPT 공식 API", default_model: "gpt-5.4", env_keys: &["OPENAI_API_KEY"], base_url: "https://api.openai.com/v1", needs_base: false },
-    ProviderMeta { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이", default_model: "moonshotai/kimi-k2.6", env_keys: &["OPENROUTER_API_KEY"], base_url: "https://openrouter.ai/api/v1", needs_base: false },
+    ProviderMeta { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이 — 무료 모델은 모델란에 `:free`(예: meta-llama/llama-3.3-70b-instruct:free)", default_model: "moonshotai/kimi-k2.6", env_keys: &["OPENROUTER_API_KEY"], base_url: "https://openrouter.ai/api/v1", needs_base: false },
     ProviderMeta { name: "prime-inference", kind: "openai-compat", note: "Prime Intellect inference", default_model: "z-ai/glm-5.2", env_keys: &["PRIME_API_KEY"], base_url: "https://api.pinference.ai/api/v1", needs_base: false },
     ProviderMeta { name: "groq", kind: "openai-compat", note: "고속 추론", default_model: "openai/gpt-oss-120b", env_keys: &["GROQ_API_KEY"], base_url: "https://api.groq.com/openai/v1", needs_base: false },
     ProviderMeta { name: "cerebras", kind: "openai-compat", note: "Cerebras 초고속 추론", default_model: "gpt-oss-120b", env_keys: &["CEREBRAS_API_KEY"], base_url: "https://api.cerebras.ai/v1", needs_base: false },
@@ -559,6 +559,13 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         provider.clone(),
         "--ndjson".into(),
     ];
+    if s.mode == "python" {
+        // pyrun(코드 작성→실행): Windows 등엔 bwrap 이 없어 required 면 fail-closed 로
+        // 전부 거부된다. 데스크톱은 인가 목록·ScopeGuard 브로커로 이미 게이트되어
+        // 있으므로 best-effort 로 내려 실행한다(모든 HTTP 는 계속 브로커 경유).
+        args.push("--isolation".into());
+        args.push("best-effort".into());
+    }
     if let Some(p) = s.port {
         args.push("--port".into());
         args.push(p.to_string());
