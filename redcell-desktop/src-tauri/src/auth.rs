@@ -275,6 +275,57 @@ pub fn remove(path: &PathBuf, target: &str) -> Result<(), String> {
     std::fs::write(path, kept.join("\n")).map_err(|e| format!("목록을 기록할 수 없습니다: {e}"))
 }
 
+/// 사용자 입력(host 란)을 인가 대상으로 정규화한다.
+///   "http://10.0.0.5:8080/path" → "10.0.0.5"
+///   "https://demo.vulnlab.local" → "demo.vulnlab.local"
+///   "10.13.37.5:8080" → "10.13.37.5"
+///   "[::1]:8080" → "::1"
+/// 스킴이 없는 순수 IP/도메인/호스트명은 그대로.
+pub fn normalize_host(host: &str) -> String {
+    let h = host.trim();
+    if h.is_empty() {
+        return h.into();
+    }
+    // URL 형식: 스킴 제거 → 권한 정보(authority)만 추출 → 경로/쿼리/포트 제거
+    if let Some(rest) = h.split_once("://") {
+        let cut = rest
+            .1
+            .find(['/', '?', '#'])
+            .unwrap_or(rest.1.len());
+        let authority = &rest.1[..cut];
+        if let Some(inner) = authority.strip_prefix('[') {
+            // IPv6: [::1]:8080 형태
+            if let Some(end) = inner.find(']') {
+                return inner[..end].to_string();
+            }
+        }
+        if let Some((h2, _p)) = authority.rsplit_once(':') {
+            return h2.to_string();
+        }
+        return authority.to_string();
+    }
+    // "host:port" 형태(스킴 없이) — 포트가 숫자이고 IPv6(: 포함)가 아닐 때만 분리
+    if let Some((h2, p)) = h.rsplit_once(':') {
+        if !h2.contains(':') && !p.is_empty() && p.chars().all(|c| c.is_ascii_digit()) {
+            return h2.to_string();
+        }
+    }
+    h.into()
+}
+
+/// 실행 전 자동 인가: host 입력을 정규화해 허용 목록에 추가한다(중복 시 무시).
+/// 파일이 정식 YAML 이면 Err 대신 Ok(false, yaml=true) 로 알리기 위해 caller 가
+/// load() 로 먼저 확인하고, 여기는 순수 "추가"만 담당한다.
+pub fn ensure_allowed(path: &PathBuf, host: &str) -> Result<(bool, String), String> {
+    let target = normalize_host(host);
+    if target.is_empty() {
+        return Err("대상(host)이 비어 있습니다.".into());
+    }
+    validate_target(&target)?;
+    add(path, &target, false)?; // 중복은 내부에서 무시
+    Ok((true, target))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -373,6 +424,51 @@ mod tests {
         let _ = std::fs::remove_file(&p);
         assert!(add(&p, "999.1.1.1", false).is_err());
         assert!(std::fs::read_to_string(&p).is_err() || std::fs::read_to_string(&p).unwrap().is_empty());
+        std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn normalize_host_cases() {
+        assert_eq!(normalize_host("http://10.0.0.5:8080/path"), "10.0.0.5");
+        assert_eq!(normalize_host("https://demo.vulnlab.local"), "demo.vulnlab.local");
+        assert_eq!(normalize_host("http://x.com:8080"), "x.com");
+        assert_eq!(normalize_host("http://[::1]:8080/"), "::1");
+        assert_eq!(normalize_host("10.13.37.5:8080"), "10.13.37.5");
+        assert_eq!(normalize_host("10.13.37.5"), "10.13.37.5");
+        assert_eq!(normalize_host("::1"), "::1"); // IPv6 는 그대로
+        assert_eq!(normalize_host("demo.vulnlab.local"), "demo.vulnlab.local");
+        assert_eq!(normalize_host("  http://labx.io/a?b#c  "), "labx.io");
+        assert_eq!(normalize_host(""), "");
+    }
+
+    #[test]
+    fn ensure_allowed_auto_adds_url_and_dedupes() {
+        let p = tmp_file("ensure");
+        let _ = std::fs::remove_file(&p);
+
+        // URL → IP 로 정규화되어 추가
+        let (added, target) = ensure_allowed(&p, "http://10.13.37.5:8080/app").unwrap();
+        assert!(added);
+        assert_eq!(target, "10.13.37.5");
+        let out = load(&p);
+        assert_eq!(out.allows, vec!["10.13.37.5"]);
+
+        // 중복 실행 → 이미 있음(추가 무시)
+        let (added2, target2) = ensure_allowed(&p, "10.13.37.5").unwrap();
+        assert!(added2); // 추가 시도 자체는 성공(중복은 내부에서 무시)
+        assert_eq!(target2, "10.13.37.5");
+        let out = load(&p);
+        assert_eq!(out.allows, vec!["10.13.37.5"]);
+
+        // 도메인 URL
+        ensure_allowed(&p, "https://demo.vulnlab.local:8443").unwrap();
+        let out = load(&p);
+        assert_eq!(out.allows, vec!["10.13.37.5", "demo.vulnlab.local"]);
+
+        // 잘못된 대상은 거부 (파일에 기록 없음)
+        assert!(ensure_allowed(&p, "http://999.1.1.1").is_err());
+        assert!(ensure_allowed(&p, "not an ip!").is_err());
+
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
     }
 }

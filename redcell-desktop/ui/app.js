@@ -430,12 +430,19 @@ async function removeSession(id) {
 
 async function persistHeader(overrides = {}) {
   const s = cur(); if (!s) return;
+  // host 란에 URL(http://…) 또는 host:port 를 넣으면 분해해 각 입력란에 반영한다.
+  const norm = normalizeTargetInput($("shHost").value);
+  const hostRaw = $("shHost").value.trim();
+  if (norm.host !== hostRaw) $("shHost").value = norm.host;
+  const portField = $("shPort").value.trim();
+  if (norm.port && !portField) $("shPort").value = norm.port;
   const portRaw = $("shPort").value.trim();
+  const port = portRaw ? parseInt(portRaw, 10) : null;
   const payload = {
     id: s.id,
     name: $("shName").value.trim() || s.name,
-    host: $("shHost").value.trim(),
-    port: portRaw ? parseInt(portRaw, 10) : null,
+    host: norm.host || hostRaw,
+    port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: $("shProvider").value,
     mode: $("shMode") ? $("shMode").value : "tools",
@@ -445,10 +452,47 @@ async function persistHeader(overrides = {}) {
   renderTabs();
 }
 
+// ── 대상 자동 인가: 입력한 host/URL 을 실행 시 인가 목록에 자동 추가 ────────────
+function normalizeTargetInput(raw) {
+  const v = (raw || "").trim();
+  let host = v;
+  let port = null;
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v)) {
+    try {
+      const u = new URL(v);
+      host = (u.hostname || "").replace(/^\[|\]$/g, ""); // IPv6 [::1] → ::1
+      port = u.port || null;
+    } catch { /* URL 아님 — 그대로 */ }
+  } else {
+    const m = /^(.+):(\d{1,5})$/.exec(v); // host:port (스킴 없이)
+    if (m) { host = m[1]; port = m[2]; }
+  }
+  return { host, port };
+}
+
+async function ensureTargetAuthorized() {
+  const s = cur(); if (!s) return;
+  const host = (s.host || "").trim();
+  if (!host) return;
+  try {
+    const r = await invoke("auth_ensure", { host });
+    if (r.yaml) {
+      await pushAssistant(s.id, `인가 파일이 정식 YAML 입니다 — 대상 ${r.host} 을(를) 자동 추가하지 않았습니다. 인가 범위는 엔진(ScopeGuard)이 그대로 강제합니다.`);
+    } else if (r.added) {
+      await pushAssistant(s.id, `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다. 빼려면 🛡 인가 대상 관리에서 제거하세요.`);
+    } else if (r.existed) {
+      await pushAssistant(s.id, `대상 ${r.host} 은(는) 이미 인가된 대상입니다.`);
+    }
+  } catch (e) {
+    await pushAssistant(s.id, `대상 자동 인가 실패: ${e} — 인가 범위는 엔진이 계속 강제합니다.`);
+  }
+}
+
 async function runEngagement() {
   const s = cur(); if (!s) return;
   if (!s.host && !$("shHost").value.trim()) { alert("host 를 먼저 입력하세요."); return; }
   await persistHeader();
+  await ensureTargetAuthorized();
   try {
     setBadge("running");
     await invoke("start_engagement", { id: s.id });

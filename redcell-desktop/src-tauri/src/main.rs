@@ -541,6 +541,54 @@ fn remove_auth(app: AppHandle, target: String) -> Result<auth::AuthList, String>
     Ok(auth::load(&path))
 }
 
+/// 실행 전 자동 인가 — 입력한 host/URL 을 허용 목록에 추가하고 결과를 알린다.
+/// (파일이 정식 YAML 이면 아무것도 건드리지 않고 yaml=true 만 알린다 — 게이트는 엔진이 수행)
+#[derive(serde::Serialize)]
+struct AuthEnsureResult {
+    added: bool,
+    existed: bool,
+    host: String,
+    path: String,
+    yaml: bool,
+    reason: Option<String>,
+}
+
+#[tauri::command]
+fn auth_ensure(app: AppHandle, host: String) -> Result<AuthEnsureResult, String> {
+    let path = resolve_app_auth_path(&app);
+    let normalized = auth::normalize_host(&host);
+    let loaded = auth::load(&path);
+    if loaded.yaml {
+        return Ok(AuthEnsureResult {
+            added: false,
+            existed: false,
+            host: normalized,
+            path: loaded.path,
+            yaml: true,
+            reason: Some("인가 파일이 정식 YAML 입니다 — 자동 추가하지 않습니다.".into()),
+        });
+    }
+    if loaded.allows.iter().any(|a| a == &normalized) {
+        return Ok(AuthEnsureResult {
+            added: false,
+            existed: true,
+            host: normalized,
+            path: loaded.path,
+            yaml: false,
+            reason: None,
+        });
+    }
+    auth::ensure_allowed(&path, &host)?;
+    Ok(AuthEnsureResult {
+        added: true,
+        existed: false,
+        host: normalized,
+        path: loaded.path,
+        yaml: false,
+        reason: None,
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(IoGuard(Mutex::new(())))
@@ -558,7 +606,8 @@ fn main() {
             stop_engagement,
             list_auth,
             add_auth,
-            remove_auth
+            remove_auth,
+            auth_ensure
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");

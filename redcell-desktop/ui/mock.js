@@ -127,6 +127,20 @@
     yaml: false, empty: false, error: null, warn: null,
     default_path: "~/.redcell/authorization.list",
   });
+  // host 입력(URL 허용)을 인가 대상으로 정규화 — Rust auth::normalize_host 와 동일 규칙
+  const mockNormalizeHost = (raw) => {
+    const v = String(raw || "").trim();
+    if (!v) return v;
+    if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(v)) {
+      try {
+        const u = new URL(v);
+        return (u.hostname || "").replace(/^\[|\]$/g, "");
+      } catch { return v; }
+    }
+    const m = /^(.+):(\d{1,5})$/.exec(v);
+    if (m && !m[1].includes(":")) return m[1];
+    return v;
+  };
 
   // 목표 문구가 "backend API·정보 수집"을 향하는지(엔진 MockModel 과 동일 기준).
   const API_INTENT = /(\bapi\b|엔드포인트|endpoint|백엔드|backend|정보|목록|수집|제출|submission|평가|evaluation|채점|score|점수|랭킹|ranking)/i;
@@ -316,6 +330,17 @@
         a.denies = a.denies.filter((x) => x !== args.target);
         saveAuth();
         return authResult();
+      }
+      case "auth_ensure": {
+        const norm = mockNormalizeHost(args.host);
+        assertTarget(norm);
+        const a = getAuth();
+        if (a.allows.includes(norm)) {
+          return { added: false, existed: true, host: norm, path: a.path, yaml: false, reason: null };
+        }
+        a.allows.push(norm);
+        saveAuth();
+        return { added: true, existed: false, host: norm, path: a.path, yaml: false, reason: null };
       }
       default: console.warn("mock invoke: 알 수 없는 명령", cmd); return null;
     }
