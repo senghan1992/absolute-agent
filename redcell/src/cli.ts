@@ -28,11 +28,13 @@ import { ContextualBandit } from "./explore/bandit.js";
 import { BanditStore } from "./explore/bandit-store.js";
 import { DefaultToolBox, DEFAULT_TOOLS, OPT_IN_TOOLS } from "./tools/toolbox.js";
 import { pythonTool } from "./tools/python-tool.js";
+import { OsintAgent } from "./osint/agent.js";
 import { MockModel } from "./core/mock-model.js";
 import { parseTargetMap, argsFromMap, type TargetMap } from "./core/target-map.js";
 import type { Fingerprint } from "./memory/skill-memory.js";
 import { forge, type VulnClass } from "./core/payload-forge.js";
 import { httpRequest } from "./net/http-client.js";
+import type { CookieJar } from "./net/http-client.js";
 import { toMarkdown, type ReportOptions } from "./report/report.js";
 import { toVisualBoard } from "./report/visual.js";
 import { buildProvenance, applyWaivers, checkSeparationOfDuties } from "./report/provenance.js";
@@ -863,6 +865,98 @@ async function cmdPyRun(args: Args): Promise<void> {
   auditFinishRun(audit, activeFindings, { command: "pyrun", isolation });
 }
 
+/**
+ * cmdOsint — OSINT 딥 다이그: 시드 사이트를 샅샅이 뒤져 목표 정보를 가져온다.
+ * 결정적 walker(깊이 크롤 + robots/sitemap + 인텔 추출) + 모델의 frontier 선택.
+ * 모든 요청은 ScopeGuard(인가 호스트 + 해석 IP)를 통과한다. 동일 오리진만, GET 관측 전용.
+ */
+async function cmdOsint(args: Args): Promise<void> {
+  const cfg = await loadConfig();
+  const host = str(args.flags.host);
+  if (!host) throw new Error("redcell osint 에는 --host 가 필요합니다. 예: redcell osint --host example.com --goal '연락처 이메일 모으기'");
+  const port = args.flags.port ? Number(str(args.flags.port)) : undefined;
+  const goal = str(args.flags.goal) ?? "사이트를 샅샅이 뒤져 사용자에게 유용한 정보(연락처·API·기술스택·구성) 수집";
+
+  const authPath = await findAuthPath(str(args.flags.auth), cfg);
+  const loaded = await loadAuthorization(authPath);
+  const guard = loaded.guard;
+  const audit = attachAudit(guard, args, { command: "osint", target: { host, port }, goal, authPath });
+  const allowUnauth = !!args.flags["allow-unauth"];
+  const visual = !args.flags["no-visual"];
+
+  const preflight = guard.check({ host, port, intent: "recon" });
+  if (!preflight.allowed) {
+    const banner = scopeBlockedBanner(host, port, preflight.reason);
+    console.error(banner);
+    if (args.flags.ndjson) process.stdout.write(JSON.stringify({ type: "blocked", text: preflight.reason, target: { host, port } }) + "\n");
+    else console.log("\n" + banner + "\n");
+    audit?.end({ verdict: "scope-blocked", reason: preflight.reason });
+    process.exit(3);
+  }
+
+  const proxy = str(args.flags.proxy) ?? process.env.REDCELL_PROXY;
+
+  // 로그인 플로우(인가 파일 login 블록) — 로그인 뒤 표면까지 샅샅이.
+  let session: { auth?: Record<string, string>; jar?: CookieJar; proxy?: string } | undefined;
+  const loginCfg = guard.loginConfig;
+  if (loginCfg) {
+    const scheme = port === 443 || port === 8443 ? "https" : "http";
+    const base = `${scheme}://${host}${port ? `:${port}` : ""}`;
+    const lr = await performLogin(base, loginCfg, guard.requestsPerSecond, proxy, (h, p) => guard.check({ host: h, port: p, intent: "recon" }).allowed);
+    console.error(`[login] ${lr.detail}`);
+    session = { auth: lr.headers, jar: lr.jar, proxy };
+  } else if (proxy) {
+    session = { proxy };
+  }
+
+  // 모델: --auto 또는 --provider mock 이면 결정적 속도전(모델 없이 전체 다이그).
+  let model: ModelAdapter = new MockModel();
+  let label = "mock";
+  let auto = !!args.flags.auto || str(args.flags.provider) === "mock";
+  if (!auto) {
+    try {
+      const r = resolveModel(registry, cfg, { provider: str(args.flags.provider), model: str(args.flags.model) });
+      model = r.model;
+      label = `${r.provider}:${r.modelId}${r.credentialSource ? ` (${r.credentialSource})` : ""}`;
+    } catch (e) {
+      if (args.flags.mock) {
+        model = new MockModel();
+        label = "mock(fallback)";
+        auto = true;
+      } else {
+        throw new Error(`${(e as Error).message}\n오프라인 검증은 --provider mock 또는 --auto 를 쓰세요.`);
+      }
+    }
+  }
+
+  if (auto) console.error("[모델] auto(결정적 전체 다이그, 모델 불필요)");
+  else console.error(`[모델] osint-agent · ${label}`);
+  console.error(`[scope] ${authPath}${loaded.kind === "ip-list" ? " (간단 IP 목록)" : ""}`);
+
+  const ndjson = !!args.flags.ndjson;
+  if (ndjson) process.stdout.write(JSON.stringify({ type: "meta", model: auto ? "auto" : label, mode: "osint", authPath, target: { host, port }, goal }) + "\n");
+  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+
+  const agent = new OsintAgent(guard, auto ? null : model, {
+    auto,
+    maxIterations: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 4,
+    onEvent: emit,
+    session,
+  });
+  const log = await agent.run({ host, port }, goal);
+
+  let activeFindings = log.findings;
+  if (!ndjson) {
+    const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+    const gov = await governReport(guard, args, root, allowUnauth, { findings: log.findings });
+    activeFindings = gov.activeFindings;
+    log.findings = gov.activeFindings;
+    if (visual) console.log("\n" + toVisualBoard(log, { waived: gov.reportOpts.waived }));
+    console.log("\n" + toMarkdown(log, gov.reportOpts) + "\n");
+  }
+  auditFinishRun(audit, activeFindings, { command: "osint" });
+}
+
 function help(): void {
   console.log(`RedCell — 자기발전형 화이트해커 에이전트 (prime-agent 기반)
 
@@ -892,6 +986,12 @@ Commands:
                  [--isolation required|best-effort|off] OS 격리 정책(기본 required):
                    신뢰불가(라이브 모델) 코드는 격리 백엔드(bwrap) 없으면 실행 거부(fail-closed)
                  대상과의 모든 HTTP 는 ScopeGuard 브로커를 경유(비파괴·RPS·scope 강제)
+  osint        웹 샅샅이 뒤지기(OSINT): 사이트를 깊이 크롤링해 목표 정보를 가져온다
+                 --host <h> [--port <p>] [--goal <g>]  원하는 정보를 구체적으로
+                 [--provider <name>] [--model <id>] [--auth <path>] [--proxy <url>]
+                 [--auto]  모델 없이 결정적 전체 다이그(오프라인/빠른 스윔)
+                 [--max-actions <n>] 모델의 심화 다이그 선택 횟수 [--ndjson] [--no-visual]
+                 같은 오리진만 GET 관측(robots/sitemap 얻어걸림), 전 요청 ScopeGuard 경유
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
   models       프로바이더별 기본 모델 표시
   scope        인가(scope) 상태 확인   [--auth <path>]
@@ -930,6 +1030,7 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "run": return void (await cmdRun(args));
     case "pyrun": return void (await cmdPyRun(args));
+    case "osint": return void (await cmdOsint(args));
     case "providers": return void (await cmdProviders());
     case "models": return void (await cmdModels());
     case "scope": return void (await cmdScope(args));

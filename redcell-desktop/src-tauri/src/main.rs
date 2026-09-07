@@ -575,7 +575,11 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     }
     // mode 에 따라 서브커맨드 선택: python → absolute-agent(RLM, 코드 작성→실행 반복),
     // 그 외 → 고정 툴박스 오케스트레이터.
-    let subcommand = if s.mode == "python" { "pyrun" } else { "run" };
+    let subcommand = match s.mode.as_str() {
+        "python" => "pyrun",
+        "osint" => "osint",
+        _ => "run",
+    };
     let mut args: Vec<String> = vec![
         subcommand.into(),
         "--host".into(),

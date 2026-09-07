@@ -300,6 +300,25 @@ redcell run --full --host 127.0.0.1 --port 8080 --target-map surface.json
 띄울 수 없어 재현 가능한 최강의 대체물로 둔다 — 실제 컨테이너가 있으면 같은 AutoPilot 을 그
 `host:port` 에 그대로 겨누면 된다.
 
+### 웹 샅샅이 뒤지기 (`osint`) — 원하는 정보 가져오기
+
+"prime-agent 처럼 사이트를 막 뒤져 원하는 정보를 가져와 줘" — 목표를 주면 시드 사이트를
+깊이 크롤링하고(같은 오리진 BFS + robots.txt/sitemap.xml 얻어걸림) 이메일·전화·API 경로·
+시크릿(api_key/AKIA 등)·기술 스택·HTML 주석·JSON-LD·폼·JS 스크립트를 추출해 목표와
+맞는 인텔만 추려 보고한다. 모델이 있으면 frontier 를 보고 "어디를 더 파볼지"를 스스로
+정하고(auto 없으면 결정적 전체 다이그):
+
+```bash
+redcell auth add example.com        # 인가(운영자 입력 = 인가)
+redcell osint --host example.com --goal "고객 지원 이메일과 결제 API 키 수집"
+redcell osint --host example.com --auto   # 모델 없이 전체 다이그만(오프라인/빠른 스윔)
+```
+
+- 모든 요청은 ScopeGuard(호스트+해석 IP) 경유, 같은 오리진만 따라간다(외부로 안 나감).
+- 순수 GET 관측 — 폼 제출·상태변경 없음. 페이지 예산으로 폭주 방지.
+- 발견은 보고서 파이프라인(시각 상황판·마크다운·감사)로 흐르고, 목표 키워드 적중 항목은
+  medium 으로 마킹(🎯)된다. 데스크톱: 모드 선택에서 `osint(뒤지기)`.
+
 ### 칼리 대체식 공격 캠페인 (`--max`) — 다 시도·우회·체이닝
 
 `run --max` 는 모델 주도 계획과 **전수 커버리지**를 결합한 공격 최대 모드다. 운영자가 인가
