@@ -415,6 +415,15 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .composer-row { display: flex; align-items: center; justify-content: space-between; margin-top: 10px; }
 .composer-hint { font-size: 10.5px; color: var(--faint); }
 
+/* ── 빠른 지시 칩 + 프로바이더 힌트 ─────────────────────────────────────── */
+.quick-goals { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; padding: 8px 12px 0; }
+.qg-label { font-size: 10.5px; color: var(--faint); margin-right: 2px; }
+.chip { border: 1px solid var(--line-2); background: var(--surface-2); color: var(--text); border-radius: 999px; padding: 4px 11px; font-size: 11.5px; font-family: var(--sans); cursor: pointer; transition: border-color 0.13s, background 0.13s, transform 0.08s; }
+.chip:hover { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 14%, var(--surface-2)); }
+.chip:active { transform: scale(0.96); }
+.provider-hint { padding: 6px 14px 10px; font-size: 10.5px; line-height: 1.5; color: var(--faint); background: var(--surface); }
+.provider-hint:empty { display: none; }
+
 /* ── 빈 상태 / 모달 ── */
 .hidden { display: none !important; }
 .empty-state { position: fixed; inset: 50px 0 0 0; display: grid; place-items: center; background: var(--bg); z-index: 50; }

@@ -339,6 +339,31 @@ fn append_chat(app: AppHandle, id: String, role: String, content: String) -> Opt
     Some(s)
 }
 
+/// 프로바이더 목록 + 자격증명 감지 상태(프론트 ✅ 표시용).
+/// 엔진 레지스트리(redcell providers)와 동일한 이름을 유지한다.
+#[tauri::command]
+fn get_providers() -> Value {
+    let defs: &[(&str, &[&str], &str)] = &[
+        ("mock", &[], "고정 시나리오 — 오프라인 테스트용(LLM 없음)"),
+        ("anthropic", &["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"], "Claude 계열"),
+        ("openai", &["OPENAI_API_KEY"], "GPT 계열"),
+        ("openrouter", &["OPENROUTER_API_KEY"], "다수 모델 게이트웨이"),
+        ("prime-inference", &["PRIME_API_KEY"], "Prime Intellect"),
+        ("groq", &["GROQ_API_KEY"], "고속 추론"),
+        ("ollama", &[], "로컬 실행 — 키 불필요(엔진에 --model 지정 필요)"),
+    ];
+    Value::Array(
+        defs.iter()
+            .map(|(name, keys, note)| {
+                let ready = keys.iter().any(|k| {
+                    std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false)
+                });
+                json!({ "name": name, "ready": ready, "note": note })
+            })
+            .collect(),
+    )
+}
+
 /// 세션 실행 — redcell CLI 를 --ndjson 으로 스폰하고 이벤트를 스트리밍한다.
 /// 즉시 반환하며, 진행은 `engagement-event` / `engagement-status` 이벤트로 전달된다.
 // ── redcell CLI 실행 ─────────────────────────────────────────────────────────
@@ -658,7 +683,8 @@ fn main() {
             list_auth,
             add_auth,
             remove_auth,
-            auth_ensure
+            auth_ensure,
+            get_providers
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");

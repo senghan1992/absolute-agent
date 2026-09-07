@@ -252,15 +252,28 @@ function nextSteps(s) {
   const fs = findingsOf(s);
   const blob = fs.map((f) => `${f.title} ${f.detail} ${f.evidence || ""}`).join(" ").toLowerCase();
   const steps = [];
-  if (/sql|sqli/.test(blob)) steps.push(["SQLi 신호 수동 검증", "탐지된 파라미터를 인가 범위 내에서 오류/부울 기반으로 재현하고 영향 범위를 좁히세요. 데이터 추출은 PoC 최소한으로."]);
-  if (/header|헤더|csp|hsts|x-frame/.test(blob)) steps.push(["보안 헤더 하드닝", "누락된 CSP·HSTS·X-Frame-Options·X-Content-Type-Options 를 서버에 추가하고 재스캔으로 검증."]);
-  if (/dir|경로|enum|디렉터/.test(blob)) steps.push(["노출 경로 점검", "열거된 경로의 접근 통제·인덱싱 여부를 확인하고 불필요한 노출을 차단."]);
+  // 발견 신호 → 구체적 조치 가이드(우선순위 순)
+  const RULES = [
+    [/sql|sqli/, "SQLi 신호 수동 검증", "탐지된 파라미터를 인가 범위 내에서 오류/부울 기반으로 재현해 영향 범위를 좁히세요. 데이터 추출은 PoC 최소한으로."],
+    [/openapi|swagger|api 명세|api-docs/, "API 명세 노출 차단", "/openapi.json·/swagger 등 명세가 외부에 열려 있으면 공격자가 전체 엔드포인트 지도를 얻습니다. 운영 환경에서는 인증 뒤로 옮기거나 비활성화하세요."],
+    [/header|헤더|csp|hsts|x-frame/, "보안 헤더 하드닝", "누락된 CSP·HSTS·X-Frame-Options·X-Content-Type-Options·Referrer-Policy 를 추가하고 재스캔으로 검증하세요. (nginx: add_header <헤더> always;)"],
+    [/graphql/, "GraphQL 노출 점검", "운영 환경에서 인트로스펙션·플레이그라운드를 비활성화하고 쿼리 깊이/비용 제한을 두세요."],
+    [/cors/, "CORS 신뢰 범위 축소", "Access-Control-Allow-Origin 의 와일드카드(*)·과도한 오리진 허용을 제거하고 필요한 도메인만 허용하세요."],
+    [/쿠키|cookie/, "세션 쿠키 플래그 설정", "HttpOnly·Secure·SameSite=Lax/Strict 를 설정하세요. 미설정 시 XSS/중간자 공격으로 세션 탈취가 가능합니다."],
+    [/jwt/, "JWT 검증 강화", "alg=none 거부·알고리즘 혼동(RS256↔HS256) 방지, 짧은 만료(exp), 페이로드에 민감정보 금지."],
+    [/secret|비밀|백업|\.env|credential|키/, "노출 비밀 즉시 폐기", "노출된 키·토큰·설정 파일은 유출로 간주하고 즉시 로테이션한 뒤 접근 로그를 확인하세요."],
+    [/upload|업로드/, "업로드 검증 강화", "확장자/MIME 화이트리스트, 저장 경로 실행 권한 제거, 파일명 재생성, 크기 제한."],
+    [/login|관리자|admin/, "관리자/로그인 인터페이스 보호", "기본 계정·약한 비밀번호를 점검하고 MFA·로그인 시도 제한(rate limit)·IP 허용목록을 적용하세요."],
+    [/열린 포트|port|ssh|redis|postgres|smb|mysql|3306|5432|6379/, "불필요 포트 축소·격리", "DB·캐시(5432/6379/3306) 같은 관리용 포트가 외부에 열려 있으면 방화벽/보안그룹으로 내부 전용으로 격리하세요. SSH 는 키 인증 전용 권장."],
+    [/dir|경로|열거|enum/, "노출 경로 점검", "열거된 경로의 접근 통제·디렉터리 인덱싱 여부를 확인하고 불필요한 노출을 차단하세요."],
+  ];
+  for (const [re, t, d] of RULES) if (re.test(blob)) steps.push([t, d]);
   const fp = fingerprintOf(s);
   if (fp.service && fp.service !== "미상") steps.push([`${fp.service} 심화 열거`, "식별된 스택/버전 기준으로 알려진 이슈를 좁혀 exploit 단계 전 근거를 확보하세요."]);
   if (!steps.length) {
     const ran = eventsOf(s).some((e) => e.type === "tool_result");
     if (ran) steps.push(["정찰 확대", "유의미한 발견이 없었습니다. 목표/포트를 바꾸거나 다른 provider(모델)로 계획을 다양화해 재실행하세요."]);
-    else steps.push(["세션 실행", "오른쪽 에이전트에 목표를 지시해 첫 engagement 를 실행하세요. 대상은 authorization.yaml scope 안이어야 합니다."]);
+    else steps.push(["세션 실행", "오른쪽 에이전트에 목표를 지시해 첫 engagement 를 실행하세요. 대상은 인가 목록(scope) 안이어야 합니다."]);
   }
   const blocked = eventsOf(s).filter((e) => e.type === "blocked");
   if (blocked.length) steps.push(["차단된 액션 확인", `ScopeGuard 가 ${blocked.length}건을 차단했습니다. 인가 범위/기간/포트 설정을 검토하세요.`]);
@@ -393,7 +406,8 @@ async function onFinished(id, status) {
   const sev = {}; fs.forEach((f) => { sev[f.severity] = (sev[f.severity] || 0) + 1; });
   const summary = status === "error"
     ? "실행이 오류로 종료되었습니다. ‘라이브 캡처’에서 원인을 확인하세요."
-    : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`;
+    : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`
+      + ((s && (s.provider || "mock") === "mock") ? " (mock 고정 시나리오 — 지시 기반 분석은 provider 를 실제 모델로 변경)" : "");
   await invoke("append_chat", { id, role: "assistant", content: summary });
   const upd = await invoke("get_session", { id });
   if (upd) { const i = sessions.findIndex((x) => x.id === id); sessions[i] = upd; }
@@ -531,12 +545,45 @@ async function sendChat() {
   input.value = "";
   await persistHeader({ goal: text });
   await invoke("append_chat", { id: s.id, role: "user", content: text });
-  await invoke("append_chat", { id: s.id, role: "assistant", content: `이해했습니다. 대상 ${$("shHost").value.trim()}${$("shPort").value.trim() ? ":" + $("shPort").value.trim() : ""} 에 대해 방법을 강구합니다 — 왼쪽 라이브 캡처에서 진행을 확인하세요.` });
+  const host = $("shHost").value.trim();
+  const port = $("shPort").value.trim();
+  const provider = $("shProvider").value || "mock";
+  const target = host ? `${host}${port ? ":" + port : ""}` : "(대상 미지정 — host 를 입력하세요)";
+  let ack;
+  if (s.status === "running") {
+    ack = `목표 "${text}" 을(를) 저장했습니다. 현재 실행이 진행 중입니다 — 완료 후 이 목표로 다시 실행됩니다.`;
+  } else {
+    const mockNote = provider === "mock"
+      ? "\n⚠ mock 은 LLM 없이 고정 시나리오로만 동작해 지시 내용이 계획에 반영되지 않습니다. 지시 기반 분석은 상단 provider 를 ✅ 표시된 실제 모델로 바꾸세요."
+      : "";
+    ack = `목표 반영: "${text}"\n대상 ${target} · 프로바이더 ${provider} 로 실행합니다 — 왼쪽 라이브 캡처에서 진행을 확인하세요.${mockNote}`;
+  }
+  await invoke("append_chat", { id: s.id, role: "assistant", content: ack });
   const fresh = await invoke("get_session", { id: s.id });
   if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
   renderChat();
   switchView("live");
-  await runEngagement();
+  if (s.status !== "running") await runEngagement();
+}
+
+// ── 프로바이더 가용성 표시: 드롭다운에 ✅(키 감지) + 힌트 문구 ───────────────
+async function refreshProviders() {
+  let list;
+  try { list = await invoke("get_providers"); } catch { return; } // preview/mock 환경
+  if (!Array.isArray(list)) return;
+  const byName = {}; list.forEach((p) => { byName[p.name] = p; });
+  const sel = $("shProvider");
+  if (sel) for (const opt of sel.options) {
+    const p = byName[opt.value];
+    if (p) { opt.textContent = `${opt.value}${p.ready ? " ✅" : ""}`; opt.title = p.note || ""; }
+  }
+  const hint = $("providerHint");
+  if (hint) {
+    const ready = list.filter((p) => p.ready && p.name !== "mock").map((p) => p.name);
+    hint.textContent = ready.length
+      ? `LLM 사용 가능: ${ready.join(", ")} — provider 를 바꾸면 지시가 실제 추론에 반영됩니다`
+      : "LLM 키 미감지 — mock(고정 시나리오)으로만 실행됩니다. ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY 등을 환경변수로 설정하거나 로컬 ollama 를 쓰세요.";
+  }
 }
 
 // ── 뷰 전환 ──────────────────────────────────────────────────────────────────
@@ -731,6 +778,13 @@ function wire() {
       if (b) removeAuth(b.dataset.target);
     });
   });
+  const qg = $("quickGoals");
+  if (qg) qg.addEventListener("click", (e) => {
+    const b = e.target.closest(".chip");
+    if (!b) return;
+    $("chatInput").value = b.dataset.goal || b.textContent.trim();
+    sendChat();
+  });
   ["shName", "shHost", "shPort", "shProvider", "shMode"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }
@@ -766,6 +820,7 @@ async function boot() {
   renderTabs();
   renderActive();
   await listenEngagement();
+  await refreshProviders();
 }
 
 window.addEventListener("DOMContentLoaded", boot);

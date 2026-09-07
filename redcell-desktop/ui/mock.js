@@ -316,6 +316,15 @@
       case "start_engagement": { const s = findById(args.id); if (s) simulate(s); return null; }
       case "stop_engagement": { const s = findById(args.id); if (s) stopSim(s); return null; }
       case "list_auth": return authResult();
+      case "get_providers": return [
+        { name: "mock", ready: true, note: "고정 시나리오 — 오프라인 테스트용(LLM 없음)" },
+        { name: "anthropic", ready: false, note: "Claude 계열" },
+        { name: "openai", ready: false, note: "GPT 계열" },
+        { name: "openrouter", ready: false, note: "다수 모델 게이트웨이" },
+        { name: "prime-inference", ready: false, note: "Prime Intellect" },
+        { name: "groq", ready: false, note: "고속 추론" },
+        { name: "ollama", ready: true, note: "로컬 실행 — 키 불필요" },
+      ];
       case "add_auth": {
         const a = getAuth();
         assertTarget(args.target);

@@ -397,6 +397,14 @@ async function cmdRun(args: Args): Promise<void> {
     process.stdout.write(JSON.stringify({ type: "meta", model: auto ? "autopilot" : label, authPath, target: { host, port }, goal }) + "\n");
   }
   const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+  if (!auto && label.startsWith("mock")) {
+    const warn =
+      "mock 프로바이더는 LLM 없이 고정 시나리오로 동작합니다(오프라인 테스트용) — 지시/목표가 계획에 반영되지 않습니다. " +
+      "지시 기반 공격 루트 생성·추론은 API 키를 설정하고 실제 프로바이더를 선택하세요 " +
+      "(ANTHROPIC_API_KEY / OPENAI_API_KEY / OPENROUTER_API_KEY / PRIME_API_KEY / GROQ_API_KEY, 또는 로컬 ollama).";
+    console.error(`[주의] ${warn}`);
+    emit?.({ type: "note", text: `[model] ${warn}` });
+  }
 
   if (auto) {
     // 게이트 모드: 엔게이지먼트 전에 도달성부터 확인한다. 대상이 죽어 있으면 스캔이

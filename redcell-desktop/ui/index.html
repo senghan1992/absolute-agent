@@ -69,6 +69,7 @@
               <option value="openai">openai</option>
               <option value="openrouter">openrouter</option>
               <option value="prime-inference">prime-inference</option>
+              <option value="groq">groq</option>
               <option value="ollama">ollama</option>
             </select>
             <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스, python=absolute-agent(코드 작성→실행 반복)">
@@ -149,6 +150,13 @@
           <span id="agentState" class="agent-state">대기</span>
         </div>
         <div id="chatMessages" class="chat-messages"></div>
+        <div class="quick-goals" id="quickGoals">
+          <span class="qg-label">빠른 지시</span>
+          <button class="chip" type="button" data-goal="취약점 찾아줘">취약점 찾아줘</button>
+          <button class="chip" type="button" data-goal="정보 노출 가능성 조사해줘">정보 노출 조사</button>
+          <button class="chip" type="button" data-goal="인증 우회 공격 루트 찾아줘">인증 우회 루트</button>
+          <button class="chip" type="button" data-goal="보안 설정 전반 점검해줘">보안 설정 점검</button>
+        </div>
         <div class="composer">
           <textarea id="chatInput" rows="3" placeholder="지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
           <div class="composer-row">
@@ -156,6 +164,7 @@
             <button id="chatSend" class="btn btn-primary">지시<svg class="ic"><use href="#i-send"/></svg></button>
           </div>
         </div>
+        <div id="providerHint" class="provider-hint"></div>
       </aside>
     </main>
 
