@@ -343,12 +343,24 @@ fn append_chat(app: AppHandle, id: String, role: String, content: String) -> Opt
 /// 즉시 반환하며, 진행은 `engagement-event` / `engagement-status` 이벤트로 전달된다.
 // ── redcell CLI 실행 ─────────────────────────────────────────────────────────
 /// redcell CLI 를 실행할 프로세스를 구성한다.
-/// Windows 에서 `npx`(및 *.cmd 배치 파일)는 CreateProcess 로 직접 실행할 수 없어
-/// 실패하므로, node.exe + tsx 진입점(node_modules/tsx)을 직접 사용한다.
-/// tsx 의 실제 bin 경로는 package.json 을 읽어 결정한다(버전 변화 대응).
+/// Windows 에서는 두 가지 문제를 피해야 한다:
+///  1) `npx`/`.cmd` 배치 파일은 CreateProcess 로 직접 실행 불가
+///  2) tsx CLI(cli.mjs)는 내부에서 자식 node 를 다시 띄우는데(cross-spawn +
+///     `--require C:\...` 절대경로), Windows 에서 경로 해석이 꼬여 EISDIR 오류를
+///     내고, 부모만 kill 되면 엔진 자식이 고아로 남아 "중지"가 먹지 않는다.
+/// 따라서 node.exe + `--import tsx`(공식 지원, node ≥ 20.6)로 엔진을
+/// **단일 프로세스**로 직접 실행한다. `--import tsx` 는 cwd 기준으로 해석된다.
 fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String> {
-    let base = PathBuf::from(redcell_dir);
-    // redcell 엔진 경로 검증: 빈 값/잘못된 경로는 즉시 명확한 에러로.
+    // 경로 정규화: 상대/드라이브-상대(\"C:\" 등) 경로를 실제 절대 경로로 고정.
+    let base = fs::canonicalize(redcell_dir).map_err(|_| {
+        format!("redcell 경로를 찾을 수 없습니다: '{redcell_dir}' — ⚙ 설정에서 redcell 프로젝트 폴더를 지정하세요.")
+    })?;
+    // Windows canonicalize 는 \\\?\ 접두사(verbatim)를 붙이는데 CreateProcess 의
+    // current_dir 에서 실패할 수 있으므로 제거한다.
+    let base = {
+        let s = base.to_string_lossy().to_string();
+        PathBuf::from(s.strip_prefix(r"\\?\").map(str::to_string).unwrap_or(s))
+    };
     let cli_path = base.join("src").join("cli.ts");
     if !cli_path.exists() {
         return Err(format!(
@@ -356,34 +368,16 @@ fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String
             base.display()
         ));
     }
-    // tsx bin 경로 해석
-    let mut tsx_bin = "node_modules/tsx/dist/cli.mjs".to_string();
-    let pkg_path = base.join("node_modules").join("tsx").join("package.json");
-    if let Ok(txt) = fs::read_to_string(&pkg_path) {
-        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
-            let entry = match v.get("bin") {
-                Some(Value::String(s)) => Some(s.as_str()),
-                Some(Value::Object(m)) => m.get("tsx").and_then(|b| b.as_str()),
-                _ => None,
-            };
-            if let Some(e) = entry {
-                let trimmed = e.strip_prefix("./").unwrap_or(e);
-                tsx_bin = format!("node_modules/tsx/{trimmed}");
-            }
-        }
-    }
-    let entry_path = base.join(&tsx_bin);
-    if !entry_path.exists() {
+    if !base.join("node_modules").join("tsx").is_dir() {
         return Err(format!(
-            "redcell 엔진 의존성이 설치되지 않았습니다 ({}). redcell 폴더에서 `npm install` 을 실행하세요.",
-            base.join("node_modules").display()
+            "redcell 엔진 의존성이 설치되지 않았습니다. redcell 폴더({})에서 `npm install` 을 실행하세요.",
+            base.display()
         ));
     }
-    // 최종 형태: node <tsx-진입점> src/cli.ts <args...>  (args 는 서브커맨드부터)
-    // Windows 에서 npx 는 .cmd 라서 직접 실행 불가 — node.exe 는 .exe 라서 안전.
+    // 최종 형태: node --import tsx src/cli.ts <args...>  (단일 프로세스, kill 안전)
     let mut cmd = Command::new("node");
     cmd.current_dir(&base);
-    cmd.arg(&entry_path).arg("src/cli.ts");
+    cmd.arg("--import").arg("tsx").arg("src/cli.ts");
     cmd.args(args);
     Ok(cmd)
 }
@@ -434,7 +428,14 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         args.push(settings.auth_path.clone());
     }
 
-    // Windows 안전: node.exe + tsx 진입점 직접 실행(npx 는 .cmd 라서 스폰 불가).
+    // 진단 투명성: 실제 실행 명령을 캡처에 남긴다(실패 시 원인 파악용).
+    {
+        let ev = json!({ "type": "note", "text": format!("[sys] 실행 명령: node --import tsx src/cli.ts {}", args.join(" ")) });
+        let stamped = append_event(&app, &id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped }))
+            .ok();
+    }
+    // 단일 프로세스: node --import tsx src/cli.ts <args...>  (Windows 에서 npx/.cmd 스폰 불가 회피)
     let mut child = redcell_command(&redcell, &args)
         .and_then(|mut c| {
             c.stdout(Stdio::piped())
