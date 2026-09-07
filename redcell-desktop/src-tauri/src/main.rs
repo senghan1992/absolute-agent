@@ -348,6 +348,14 @@ fn append_chat(app: AppHandle, id: String, role: String, content: String) -> Opt
 /// tsx 의 실제 bin 경로는 package.json 을 읽어 결정한다(버전 변화 대응).
 fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String> {
     let base = PathBuf::from(redcell_dir);
+    // redcell 엔진 경로 검증: 빈 값/잘못된 경로는 즉시 명확한 에러로.
+    let cli_path = base.join("src").join("cli.ts");
+    if !cli_path.exists() {
+        return Err(format!(
+            "redcell 경로가 올바르지 않습니다: '{}' — src/cli.ts 가 없습니다. ⚙ 설정에서 redcell 프로젝트 폴더를 지정하세요.",
+            base.display()
+        ));
+    }
     // tsx bin 경로 해석
     let mut tsx_bin = "node_modules/tsx/dist/cli.mjs".to_string();
     let pkg_path = base.join("node_modules").join("tsx").join("package.json");
@@ -371,6 +379,8 @@ fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String
             base.join("node_modules").display()
         ));
     }
+    // 최종 형태: node <tsx-진입점> src/cli.ts <args...>  (args 는 서브커맨드부터)
+    // Windows 에서 npx 는 .cmd 라서 직접 실행 불가 — node.exe 는 .exe 라서 안전.
     let mut cmd = Command::new("node");
     cmd.current_dir(&base);
     cmd.arg(&entry_path).arg("src/cli.ts");
@@ -404,8 +414,6 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     // 그 외 → 고정 툴박스 오케스트레이터.
     let subcommand = if s.mode == "python" { "pyrun" } else { "run" };
     let mut args: Vec<String> = vec![
-        "tsx".into(),
-        "src/cli.ts".into(),
         subcommand.into(),
         "--host".into(),
         s.host.clone(),
