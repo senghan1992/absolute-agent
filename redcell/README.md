@@ -61,6 +61,36 @@ redcell explore  |  redcell mcts     # 자기발전/트리검색 데모
 redcell help
 ```
 
+### 간단 인가: 내가 입력한 IP = 인가 (ip-list)
+
+정식 Rules of Engagement(YAML) 작성을 부담스러워할 때, **IP 목록 한 장**으로 시작한다.
+사람(운영자)이 직접 목록을 관리하고, 목록에 있는 대상만 인가된다:
+
+```bash
+redcell auth add 10.13.37.5            # 허용 IP 추가 (CIDR·도메인도 가능)
+redcell auth add 10.13.37.0/24
+redcell auth add 10.13.37.1 --deny     # 제외 — deny 가 항상 allow 를 이긴다
+redcell auth rm 10.13.37.5             # 제거
+redcell auth list                      # 현재 목록 확인
+```
+
+기본 파일은 `~/.redcell/authorization.list`(`--auth <파일>` 로 변경)이며, `run`/`pyrun`/`scope`는
+`authorization.yaml`보다 **ip-list 를 우선** 감지한다. 직접 편집도 가능(한 줄에 하나):
+
+```
+# 주석
+10.13.37.5
+10.13.37.0/24
+*.vulnlab.local          # 와일드카드 도메인
+!10.13.37.1              # 제외 (allow 에 있어도 최우선 차단)
+until: 2027-12-31        # (선택) 유효기간 — 없으면 실행 시점 +365일
+ports: 80,443,8080       # (선택) 허용 포트 — 없으면 전체
+```
+
+안전 기본값은 그대로 유지된다: 파괴/DoS 차단, RPS 기본 제한, 내부대역 측면이동 차단,
+DNS rebinding 차단, 감사 추적, deny>allow. 정식 게이트(waiver·서명·직무분리)가 필요할 때만
+기존 `authorization.yaml`을 쓰면 된다.
+
 ### absolute-agent 모드 (`pyrun`) — 에이전트가 파이썬을 스스로 써서 공략 (prime-agent RLM)
 
 고정 툴박스에서 고르는 대신, **모델이 파이썬 코드를 직접 작성 → 실행 → 결과 관찰 →

@@ -26,10 +26,17 @@ import { Type } from "@sinclair/typebox";
 
 import { ScopeGuard, type Target } from "../src/scope/scope-guard.js";
 import { loadAuthorization } from "../src/scope/load-auth.js";
+import { DEFAULT_LIST_FILE } from "../src/scope/ip-list.js";
+import { redcellHome } from "../src/config.js";
 import { httpProbe } from "../src/tools/http-probe.js";
 import { extractHosts, classifyIntent } from "./inspect.js";
 
-const AUTH_PATH = process.env.REDCELL_AUTH ?? ".prime/agent/redcell/authorization.yaml";
+const AUTH_CANDIDATES = [
+  process.env.REDCELL_AUTH,
+  // 간단 IP 목록(redcell auth add)이 있으면 그것을 먼저 쓴다.
+  path.join(redcellHome(), DEFAULT_LIST_FILE),
+  ".prime/agent/redcell/authorization.yaml",
+].filter(Boolean) as string[];
 
 const METHODOLOGY = `
 # RedCell — 인가된 화이트해커 모드
@@ -50,11 +57,16 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
 
   const ensureGuard = async (): Promise<void> => {
     if (guard || authError) return;
-    try {
-      guard = await loadAuthorization(AUTH_PATH);
-    } catch (e) {
-      authError = (e as Error).message;
+    for (const p of AUTH_CANDIDATES) {
+      try {
+        const loaded = await loadAuthorization(p);
+        guard = loaded.guard;
+        return;
+      } catch {
+        /* 다음 후보 */
+      }
     }
+    authError = `인가 파일을 찾을 수 없습니다 (시도: ${AUTH_CANDIDATES.join(", ")})`;
   };
 
   // 1) 방법론 시스템 프롬프트 주입.
@@ -127,7 +139,7 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
       await ensureGuard();
       const msg = authError
         ? `⛔ 인가 파일 없음/오류: ${authError}`
-        : `✅ 인가 로드됨: ${AUTH_PATH}\nRPS 제한: ${guard!.requestsPerSecond}/s`;
+        : `✅ 인가 로드됨 (간단 IP 목록 우선: ${AUTH_CANDIDATES.join(" > ")})\nRPS 제한: ${guard!.requestsPerSecond}/s`;
       ctx.ui?.info?.(msg) ?? console.log(msg);
     },
   });

@@ -518,6 +518,90 @@ async function saveSettings() {
   $("settingsModal").classList.add("hidden");
 }
 
+// ── 인가 대상 관리 (ip-list) — UI 에서 IP 추가/제거 ─────────────────────────
+let authState = null;
+
+function showAuthError(msg) {
+  const el = $("authError");
+  el.textContent = msg || "";
+  el.classList.toggle("hidden", !msg);
+}
+
+async function loadAuth() {
+  showAuthError(null);
+  try {
+    authState = await invoke("list_auth");
+    renderAuth();
+  } catch (e) {
+    showAuthError(String(e));
+  }
+}
+
+function renderAuth() {
+  const a = authState || {};
+  $("authPathInfo").textContent = "파일: " + (a.path || "(미지정)");
+
+  const yamlWarn = $("authYamlWarn");
+  if (a.yaml) {
+    yamlWarn.classList.remove("hidden");
+    yamlWarn.innerHTML = `<b>정식 YAML 인가 파일입니다.</b> IP 추가/제거는 이 파일을 편집하지 않습니다.<br/>⚙ 설정에서 auth 경로를 비우면 기본 IP 목록(<code>${esc(a.default_path || "~/.redcell/authorization.list")}</code>)을 관리합니다.`;
+  } else {
+    yamlWarn.classList.add("hidden");
+  }
+
+  const allowList = a.allows || [];
+  const denyList = a.denies || [];
+  $("authAllowList").innerHTML = allowList.map((x) => authItemHtml(x)).join("");
+  $("authDenyList").innerHTML = denyList.map((x) => authItemHtml(x)).join("");
+  $("authAllowCnt").textContent = allowList.length;
+  $("authDenyCnt").textContent = denyList.length;
+
+  const meta = [];
+  meta.push(`유효기간: ${a.until || "기본(실행 시점 +365일)"}`);
+  meta.push(`허용 포트: ${a.ports && a.ports.length ? a.ports.join(", ") : "전체"}`);
+  meta.push("RPS: 기본(10/s)");
+  $("authMeta").textContent = meta.join("   ·   ");
+
+  if (a.empty) showAuthError("인가 목록이 비어 있습니다 — 아래에서 IP를 추가하세요. 목록에 들어간 대상만 인가됩니다.");
+  else if (a.error) showAuthError(a.error);
+  else if (a.warn) showAuthError(a.warn);
+}
+
+function authItemHtml(target) {
+  return `<li><span class="mono">${esc(target)}</span><button class="btn btn-icon auth-rm" title="제거" data-target="${esc(target)}" aria-label="제거"><svg class="ic ic-sm"><use href="#i-x"/></svg></button></li>`;
+}
+
+async function addAuth() {
+  const input = $("authTarget");
+  const target = input.value.trim();
+  if (!target) return;
+  const deny = $("authDeny").checked;
+  try {
+    authState = await invoke("add_auth", { target, deny });
+    input.value = "";
+    $("authDeny").checked = false;
+    renderAuth();
+    input.focus();
+  } catch (e) {
+    showAuthError(String(e));
+  }
+}
+
+async function removeAuth(target) {
+  if (!confirm(`"${target}" 을(를) 인가 목록에서 제거할까요?`)) return;
+  try {
+    authState = await invoke("remove_auth", { target });
+    renderAuth();
+  } catch (e) {
+    showAuthError(String(e));
+  }
+}
+
+function openAuth() {
+  $("authModal").classList.remove("hidden");
+  loadAuth();
+}
+
 // ── 배선 ─────────────────────────────────────────────────────────────────────
 function wire() {
   $("newSessionBtn").onclick = newSession;
@@ -528,6 +612,17 @@ function wire() {
   $("runBtn").onclick = onRunButton;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
+  $("scopeBtn").onclick = openAuth;
+  $("authClose").onclick = () => $("authModal").classList.add("hidden");
+  $("authRefresh").onclick = loadAuth;
+  $("authAdd").onclick = addAuth;
+  $("authTarget").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addAuth(); } });
+  ["authAllowList", "authDenyList"].forEach((id) => {
+    $(id).addEventListener("click", (e) => {
+      const b = e.target.closest(".auth-rm");
+      if (b) removeAuth(b.dataset.target);
+    });
+  });
   ["shName", "shHost", "shPort", "shProvider", "shMode"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }

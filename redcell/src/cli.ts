@@ -6,6 +6,7 @@
  *   redcell providers                 연결 가능한 프로바이더 + 자격증명 상태
  *   redcell models                    프로바이더별 기본 모델
  *   redcell scope [--auth <path>]     인가(scope) 상태
+ *   redcell auth add|rm|list <대상>   간단 인가 목록 관리 — 내가 입력한 IP = 인가
  *   redcell explore [episodes] [ucb1|thompson]
  *   redcell mcts [depth] [branching]
  *   redcell config get|set [key] [value]
@@ -16,6 +17,7 @@ import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadAuthorization } from "./scope/load-auth.js";
+import { parseIpList, classifyTarget, DEFAULT_LIST_FILE, DEFAULT_VALIDITY_DAYS } from "./scope/ip-list.js";
 import { SkillMemory } from "./memory/skill-memory.js";
 import { Orchestrator, type OrchestratorEvent, type SessionContext } from "./core/orchestrator.js";
 import { performLogin } from "./net/login.js";
@@ -113,6 +115,7 @@ async function findAuthPath(explicit: string | undefined, cfg: RedcellConfig): P
   const candidates = [
     explicit,
     cfg.authPath,
+    path.join(redcellHome(), DEFAULT_LIST_FILE),   // 간단 IP 목록 (redcell auth 로 관리 — 우선)
     path.join(redcellHome(), "authorization.yaml"),
     ".prime/agent/redcell/authorization.yaml",
     "config/authorization.yaml",
@@ -183,9 +186,111 @@ async function cmdAudit(args: Args): Promise<void> {
 async function cmdScope(args: Args): Promise<void> {
   const cfg = await loadConfig();
   const authPath = await findAuthPath(str(args.flags.auth), cfg);
-  const guard = await loadAuthorization(authPath);
-  console.log(`✅ 인가 로드됨: ${authPath}`);
-  console.log(`   RPS 제한: ${guard.requestsPerSecond}/s`);
+  const { guard, kind, summary } = await loadAuthorization(authPath);
+  console.log(`✅ 인가 로드됨: ${authPath}  (${kind === "ip-list" ? "간단 IP 목록" : "authorization.yaml"})`);
+  if (kind === "ip-list") {
+    try {
+      const parsed = parseIpList(await fs.readFile(authPath, "utf8"));
+      const allows = parsed.entries.filter((e) => e.kind === "allow");
+      const denies = parsed.entries.filter((e) => e.kind === "deny");
+      console.log(`허용 (${allows.length}):`);
+      for (const e of allows) console.log(`   ${e.raw}`);
+      if (denies.length) {
+        console.log(`제외 (${denies.length}):`);
+        for (const e of denies) console.log(`   !${e.raw}`);
+      }
+      console.log(`유효기간: ${parsed.until ?? `기본(실행 시점 +${DEFAULT_VALIDITY_DAYS}일)`}   허용 포트: ${parsed.ports?.join(",") ?? "전체"}`);
+    } catch {
+      /* 요약만으로 충분 */
+    }
+  }
+  console.log(`   허용 ${summary.allows}개 · 제외 ${summary.denies}개 · 인가 만료 ${summary.until} · RPS ${guard.requestsPerSecond}/s`);
+}
+
+// ── 간단 인가 목록(auth) — 내가 입력한 IP = 인가 ───────────────────────────────
+const IP_LIST_HEADER = `# RedCell 인가 목록 — 아래에 적힌 대상만 인가됩니다.
+# 한 줄에 하나: IP / CIDR / 도메인  ·  ! 접두사 = 제외(allow 를 이김)  ·  # 주석
+# 선택 지시자:  until: YYYY-MM-DD  ·  ports: 80,443,8080
+`;
+
+async function cmdAuth(args: Args): Promise<void> {
+  const sub = str(args._[0]) ?? "list";
+  const file = str(args.flags.auth) ?? path.join(redcellHome(), DEFAULT_LIST_FILE);
+  const read = async (): Promise<string> => {
+    try {
+      return await fs.readFile(file, "utf8");
+    } catch {
+      return "";
+    }
+  };
+
+  const show = (parsed: { entries: { kind: string; raw: string }[]; until?: string; ports?: number[] }): void => {
+    const allows = parsed.entries.filter((e) => e.kind === "allow");
+    const denies = parsed.entries.filter((e) => e.kind === "deny");
+    console.log(`허용 (${allows.length}):`);
+    for (const e of allows) console.log(`   ${e.raw}`);
+    if (denies.length) {
+      console.log(`제외 (${denies.length}):`);
+      for (const e of denies) console.log(`   !${e.raw}`);
+    }
+    console.log(`유효기간: ${parsed.until ?? `기본(실행 시점 +${DEFAULT_VALIDITY_DAYS}일)`}   허용 포트: ${parsed.ports?.join(",") ?? "전체"}`);
+  };
+
+  if (sub === "add") {
+    const target = str(args._[1]);
+    if (!target) throw new Error("사용법: redcell auth add <ip|cidr|도메인> [--deny]");
+    if (target.startsWith("!")) throw new Error("add 에는 ! 접두사를 쓰지 마세요. --deny 플래그를 사용하세요.");
+    // 형식 검증: 잘못된 대상이면 여기서 즉시 실패(목록에 기록되지 않음).
+    classifyTarget(target);
+
+    let raw = await read();
+    const line = (args.flags.deny ? "!" : "") + target;
+    if (raw.split(/\r?\n/).map((l) => l.trim()).includes(line)) {
+      console.log(`ℹ️  이미 목록에 있음: ${target}`);
+    } else {
+      await fs.mkdir(path.dirname(file), { recursive: true });
+      if (raw.trim() === "") raw = IP_LIST_HEADER;
+      await fs.appendFile(file, (raw.endsWith("\n") ? "" : "\n") + line + "\n", "utf8");
+      console.log(`✅ 추가됨 (${args.flags.deny ? "제외" : "허용"}): ${target}`);
+    }
+    console.log(`   파일: ${file}\n`);
+    show(parseIpList(await read()));
+    return;
+  }
+
+  if (sub === "rm") {
+    const target = str(args._[1]);
+    if (!target) throw new Error("사용법: redcell auth rm <ip|cidr|도메인>");
+    const raw = await read();
+    const before = raw.split(/\r?\n/).length;
+    const kept = raw.split(/\r?\n/).filter((l) => {
+      const t = l.trim();
+      return t !== target && t !== "!" + target;
+    });
+    await fs.mkdir(path.dirname(file), { recursive: true });
+    await fs.writeFile(file, kept.join("\n"), "utf8");
+    const removed = before - kept.length;
+    console.log(removed > 0 ? `✅ 제거됨 (${removed}줄): ${target}` : `ℹ️  목록에 없음: ${target}`);
+    console.log(`   파일: ${file}\n`);
+    const after = (await read()).trim();
+    if (after) show(parseIpList(after));
+    else console.log("ℹ️  목록이 비어 있습니다. redcell auth add <ip> 로 추가하세요.");
+    return;
+  }
+
+  if (sub === "list") {
+    const raw = (await read()).trim();
+    if (!raw) {
+      console.log(`ℹ️  인가 목록이 비어 있습니다: ${file}`);
+      console.log(`   redcell auth add 10.13.37.5   (CIDR·도메인 가능, --deny 로 제외)`);
+      return;
+    }
+    console.log(`✅ 인가 목록: ${file}\n`);
+    show(parseIpList(raw));
+    return;
+  }
+
+  throw new Error("사용법: redcell auth add <대상> [--deny] | rm <대상> | list   (파일: --auth <path>, 기본 ~/.redcell/authorization.list)");
 }
 
 async function cmdRun(args: Args): Promise<void> {
@@ -196,7 +301,8 @@ async function cmdRun(args: Args): Promise<void> {
   const goal = str(args.flags.goal) ?? "인가된 대상의 취약점 식별 및 방어 권고 보고";
 
   const authPath = await findAuthPath(str(args.flags.auth), cfg);
-  const guard = await loadAuthorization(authPath);
+  const loaded = await loadAuthorization(authPath);
+  const guard = loaded.guard;
   const audit = attachAudit(guard, args, { command: "run", target: { host, port }, goal, authPath });
 
   // --full/--gate: 결정적 전수(게이트) 모드. 밴딧을 쓰지 않고 각 단계 모든 툴을 1회씩
@@ -282,7 +388,7 @@ async function cmdRun(args: Args): Promise<void> {
   await memory.load();
 
   console.error(`[model] ${auto ? "autopilot(bandit, 모델 없음)" : label}`);
-  console.error(`[scope] ${authPath}`);
+  console.error(`[scope] ${authPath}${loaded.kind === "ip-list" ? " (간단 IP 목록)" : ""}`);
 
   // --ndjson: 각 이벤트를 한 줄 JSON 으로 stdout 에 흘린다(데스크톱 앱 연동).
   //           이때 사람이 읽는 Markdown 리포트는 출력하지 않는다.
@@ -649,7 +755,8 @@ async function cmdPyRun(args: Args): Promise<void> {
   const goal = str(args.flags.goal) ?? "인가된 대상의 취약점을 파이썬으로 직접 탐색하고 방어 권고 보고";
 
   const authPath = await findAuthPath(str(args.flags.auth), cfg);
-  const guard = await loadAuthorization(authPath);
+  const loaded = await loadAuthorization(authPath);
+  const guard = loaded.guard;
   const audit = attachAudit(guard, args, { command: "pyrun", target: { host, port }, goal, authPath });
   const allowUnauth = !!args.flags["allow-unauth"];
   const visual = !args.flags["no-visual"];
@@ -699,7 +806,7 @@ async function cmdPyRun(args: Args): Promise<void> {
 
   const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
   console.error(`[model] python-agent · ${label}`);
-  console.error(`[scope] ${authPath}`);
+  console.error(`[scope] ${authPath}${loaded.kind === "ip-list" ? " (간단 IP 목록)" : ""}`);
 
   const ndjson = !!args.flags.ndjson;
   if (ndjson) process.stdout.write(JSON.stringify({ type: "meta", model: label, mode: "python-agent", authPath, target: { host, port }, goal }) + "\n");
@@ -761,6 +868,11 @@ Commands:
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
   models       프로바이더별 기본 모델 표시
   scope        인가(scope) 상태 확인   [--auth <path>]
+  auth         간단 인가 목록 관리 — 내가 입력한 IP 가 곧 인가
+                 add <ip|cidr|도메인> [--deny]  허용 추가(제외는 --deny)
+                 rm <대상>                     목록에서 제거
+                 list                          현재 목록 확인
+                 (기본 파일 ~/.redcell/authorization.list, --auth <파일> 로 변경)
   audit        감사 추적 무결성 검증     verify <감사파일.jsonl>
                  (run/pyrun 은 기본으로 변조탐지 감사 추적을 남긴다: --no-audit 로 끄고,
                   --audit-dir <경로> 로 위치 지정. 기본 ~/.redcell/audit)
@@ -794,6 +906,7 @@ async function main(): Promise<void> {
     case "providers": return void (await cmdProviders());
     case "models": return void (await cmdModels());
     case "scope": return void (await cmdScope(args));
+    case "auth": return void (await cmdAuth(args));
     case "audit": return void (await cmdAudit(args));
     case "explore": return void (await cmdExplore(args));
     case "mcts": return void (await cmdMcts(args));

@@ -432,6 +432,20 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .modal-card label .sh-input { width: 100%; margin-top: 7px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 11px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; margin-top: 6px; }
 
+/* 인가 대상 관리 패널 */
+.auth-card { width: 580px; }
+.auth-input-row { display: flex; gap: 9px; align-items: center; margin: 12px 0 4px; }
+.auth-input-row .sh-input { flex: 1; min-width: 0; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 11px; color: var(--fg); }
+.auth-deny-check { display: flex; align-items: center; gap: 5px; white-space: nowrap; font-size: 12px; color: var(--faint); cursor: pointer; user-select: none; padding: 6px 8px; border: 1px solid var(--line-2); border-radius: 9px; background: var(--surface-2); }
+.auth-lists { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 10px; }
+.auth-col h4 { margin: 0 0 8px; font-size: 11px; color: var(--faint); text-transform: uppercase; letter-spacing: 0.5px; font-weight: 600; display: flex; align-items: center; gap: 6px; }
+.auth-items { list-style: none; margin: 0; padding: 0; max-height: 230px; overflow: auto; display: flex; flex-direction: column; gap: 5px; }
+.auth-items li { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 6px 8px 6px 11px; border: 1px solid var(--line-2); border-radius: 8px; background: var(--surface-2); font-size: 12.5px; }
+.auth-items .mono { font-family: var(--mono); word-break: break-all; }
+.auth-rm { width: 24px; height: 24px; flex: 0 0 auto; }
+.auth-warn { background: color-mix(in srgb, var(--warn) 14%, transparent); color: var(--warn-fg); border: 1px solid color-mix(in srgb, var(--warn) 35%, transparent); border-radius: 9px; padding: 9px 11px; margin: 6px 0; font-size: 12px; line-height: 1.5; }
+.auth-error { background: color-mix(in srgb, #ff5d5d 13%, transparent); color: #ff7b7b; border: 1px solid color-mix(in srgb, #ff5d5d 35%, transparent); border-radius: 9px; padding: 9px 11px; margin: 10px 0 0; font-size: 12px; line-height: 1.5; white-space: pre-wrap; }
+
 /* 스크롤바 */
 ::-webkit-scrollbar { width: 11px; height: 11px; }
 ::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 7px; border: 3px solid transparent; background-clip: padding-box; }

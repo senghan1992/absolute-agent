@@ -80,6 +80,54 @@
   const findById = (id) => store.sessions.find((s) => s.id === id);
   const clone = (o) => JSON.parse(JSON.stringify(o));
 
+  // ── 인가 목록(ip-list) mock — localStorage 로 브라우저 새로고침에도 유지 ───────
+  const AUTH_KEY = "redcell-auth-mock";
+  const defaultAuth = () => ({
+    path: "~/.redcell/authorization.list (preview)",
+    allows: ["127.0.0.1", "10.13.37.0/24", "*.vulnlab.local"],
+    denies: ["10.13.37.1"],
+    until: null,
+    ports: null,
+  });
+  let mockAuth = null;
+  const getAuth = () => {
+    if (mockAuth) return mockAuth;
+    try { mockAuth = JSON.parse(localStorage.getItem(AUTH_KEY) || "null") || defaultAuth(); }
+    catch { mockAuth = defaultAuth(); }
+    return mockAuth;
+  };
+  const saveAuth = () => { try { localStorage.setItem(AUTH_KEY, JSON.stringify(mockAuth)); } catch (e) {} };
+  // 엔진(ip-list.ts)과 같은 대상 검증(브라우저 미리보기용 근사)
+  const HOSTNAME_TARGET = /^(\*\.)?[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$/;
+  const assertTarget = (t) => {
+    const v = t.trim();
+    if (!v) throw new Error("대상을 입력하세요 (IP / CIDR / 도메인)");
+    if (v.startsWith("!")) throw new Error("add 에는 ! 접두사를 쓰지 마세요. 제외는 토글을 사용하세요.");
+    if (v.includes("/")) {
+      const [ip, bits] = v.split("/");
+      if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(ip) || !/^\d{1,2}$/.test(bits) || Number(bits) > 32 || ip.split(".").some((o) => Number(o) > 255)) {
+        throw new Error(`잘못된 CIDR: '${v}' — IPv4/CIDR 형식(예: 10.0.0.0/24)이어야 합니다.`);
+      }
+      return;
+    }
+    const isIpLike = /^[\d.]+$/.test(v) || /:/.test(v);
+    if (isIpLike) {
+      const isIp4 = /^\d{1,3}(\.\d{1,3}){3}$/.test(v) && v.split(".").every((o) => Number(o) <= 255);
+      if (!isIp4 && !/^[0-9a-fA-F:]+$/.test(v.split("%")[0])) {
+        throw new Error(`잘못된 IP: '${v}'`);
+      }
+      return;
+    }
+    if (!HOSTNAME_TARGET.test(v)) {
+      throw new Error(`인식할 수 없는 대상: '${v}' — IP, CIDR(10.0.0.0/24), 또는 도메인(*.example.com)만 허용합니다.`);
+    }
+  };
+  const authResult = () => clone({
+    ...getAuth(),
+    yaml: false, empty: false, error: null, warn: null,
+    default_path: "~/.redcell/authorization.list",
+  });
+
   // 목표 문구가 "backend API·정보 수집"을 향하는지(엔진 MockModel 과 동일 기준).
   const API_INTENT = /(\bapi\b|엔드포인트|endpoint|백엔드|backend|정보|목록|수집|제출|submission|평가|evaluation|채점|score|점수|랭킹|ranking)/i;
 
@@ -253,6 +301,22 @@
       }
       case "start_engagement": { const s = findById(args.id); if (s) simulate(s); return null; }
       case "stop_engagement": { const s = findById(args.id); if (s) stopSim(s); return null; }
+      case "list_auth": return authResult();
+      case "add_auth": {
+        const a = getAuth();
+        assertTarget(args.target);
+        const list = args.deny ? a.denies : a.allows;
+        if (!list.includes(args.target.trim())) list.push(args.target.trim());
+        saveAuth();
+        return authResult();
+      }
+      case "remove_auth": {
+        const a = getAuth();
+        a.allows = a.allows.filter((x) => x !== args.target);
+        a.denies = a.denies.filter((x) => x !== args.target);
+        saveAuth();
+        return authResult();
+      }
       default: console.warn("mock invoke: 알 수 없는 명령", cmd); return null;
     }
   }

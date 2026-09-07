@@ -24,6 +24,8 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+mod auth;
+
 /// 세션 파일 read-modify-write 직렬화용 락(stdout/stderr 스레드 경합 방지).
 struct IoGuard(Mutex<()>);
 
@@ -498,6 +500,47 @@ fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
     Ok(())
 }
 
+// ── 인가 목록(ip-list) — UI 에서 IP 추가/제거 ──────────────────────────────────
+// 경로 해석: ⚙ 설정의 auth_path(상대 경로는 redcell_dir 기준) → 없으면 기본
+// ~/.redcell/authorization.list. redcell CLI 의 findAuthPath 우선순위와 일치한다.
+fn resolve_app_auth_path(app: &AppHandle) -> std::path::PathBuf {
+    let s = get_settings(app.clone());
+    let p = s.auth_path.trim();
+    if p.is_empty() {
+        return auth::default_list_path();
+    }
+    let pb = std::path::PathBuf::from(p);
+    if pb.is_absolute() {
+        return pb;
+    }
+    if !s.redcell_dir.trim().is_empty() {
+        let d = std::path::PathBuf::from(s.redcell_dir.trim());
+        if d.is_absolute() {
+            return d.join(pb);
+        }
+    }
+    std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")).join(pb)
+}
+
+#[tauri::command]
+fn list_auth(app: AppHandle) -> auth::AuthList {
+    auth::load(&resolve_app_auth_path(&app))
+}
+
+#[tauri::command]
+fn add_auth(app: AppHandle, target: String, deny: bool) -> Result<auth::AuthList, String> {
+    let path = resolve_app_auth_path(&app);
+    auth::add(&path, &target, deny)?;
+    Ok(auth::load(&path))
+}
+
+#[tauri::command]
+fn remove_auth(app: AppHandle, target: String) -> Result<auth::AuthList, String> {
+    let path = resolve_app_auth_path(&app);
+    auth::remove(&path, &target)?;
+    Ok(auth::load(&path))
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(IoGuard(Mutex::new(())))
@@ -512,7 +555,10 @@ fn main() {
             delete_session,
             append_chat,
             start_engagement,
-            stop_engagement
+            stop_engagement,
+            list_auth,
+            add_auth,
+            remove_auth
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");
