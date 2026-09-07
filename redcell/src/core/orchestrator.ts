@@ -15,6 +15,7 @@ import type {
   EngagementFinding,
   ModelAdapter,
   ProposedAction,
+  Tool,
   ToolBox,
 } from "./types.js";
 import { harvestFromResult } from "./credential-harvest.js";
@@ -65,6 +66,13 @@ export interface OrchestratorOpts {
    * OPT_IN_TOOLS 를 제안하면 실행을 차단한다(대상별 동의 없이는 부작용성 프로브 금지).
    */
   enabledOptIns?: string[];
+  /**
+   * 커버리지 전수 모드(--max). 모델 계획이 끝난 뒤 해당 phase 의 아직 안 쓴 툴을 전부 1회씩
+   * 추가 실행한다(모델이 몰라서 놓친 표면까지 뒤짐). argsFor 로 기본 인자를 생성한다.
+   */
+  coverage?: boolean;
+  /** 툴별 기본 인자 생성기(보통 cli 의 autoArgsFor). coverage 모드에서 사용. */
+  argsFor?: (tool: string, fp: Fingerprint) => Record<string, unknown>;
 }
 
 /** 로그인·프록시로 확립된 세션(모든 툴 요청 공유). */
@@ -115,6 +123,103 @@ export class Orchestrator {
     // 발견 체이닝: 실행 중 대상이 흘린 자격증명을 모아 이후 요청에 실어 보낸다.
     const harvested: Record<string, string> = {};
 
+    /** 하나의 툴 액션을 실행한다(모델 제안·커버리지 전수 공용). 안전 게이트는 동일하게 적용. */
+    const runOne = async (
+      phase: Phase,
+      tool: Tool,
+      toolName: string,
+      args: Record<string, unknown>,
+      rationale: string,
+      fromPlaybook: string | undefined,
+    ): Promise<void> => {
+      // opt-in 게이트: 대상별로 켜지지 않은 부작용성 프로브는 제안돼도 실행하지 않는다.
+      if (OPT_IN_TOOLS.has(tool.name) && !(this.opts.enabledOptIns ?? []).includes(tool.name)) {
+        emit({
+          type: "blocked",
+          phase,
+          tool: tool.name,
+          text: `[차단] ${tool.name}: opt-in 프로브 미승인 — authorization.yaml optional_probes 또는 --enable 로 대상별 승인이 필요합니다.`,
+        });
+        return;
+      }
+
+      emit({
+        type: "action",
+        phase,
+        tool: tool.name,
+        rationale,
+        args,
+        text: `[${phase}] → ${toolName}(${JSON.stringify(args)})${rationale ? " · " + rationale : ""}`,
+      });
+
+      // 핵심: 실행 직전 ScopeGuard 재확인(툴의 intent 기준).
+      const decision = this.guard.check({ ...target, intent: tool.intent });
+      if (!decision.allowed) {
+        emit({ type: "blocked", phase, tool: tool.name, text: `[차단] ${toolName}: ${decision.reason}` });
+        return;
+      }
+
+      const auth = mergeAuth(this.guard.authHeaders, harvested, this.opts.session?.auth);
+      const res = await tool.run(args, {
+        target,
+        rps: this.guard.requestsPerSecond,
+        auth,
+        jar: this.opts.session?.jar,
+        proxy: this.opts.session?.proxy,
+        validateIp: (h, ip) => this.guard.checkResolvedIp(h, ip).allowed,
+      });
+
+      // 발견 체이닝: 결과에서 노출된 자격증명을 이후 요청용으로 수집.
+      const hv = harvestFromResult(res);
+      for (const [k, v] of Object.entries(hv.headers)) {
+        if (!(k in harvested)) {
+          harvested[k] = v;
+          emit({ type: "note", text: `[체이닝] ${toolName} 노출 자격증명 재사용: ${hv.notes.join(", ")}` });
+        }
+      }
+
+      if (res.fingerprint) log.fingerprint = mergeFingerprint(log.fingerprint, res.fingerprint);
+
+      // 이 액션이 playbook 기반이었다면 성공/실패를 학습에 반영.
+      if (fromPlaybook) {
+        await this.memory.record(fromPlaybook, res.ok ? "success" : "failure");
+        if (!log.usedPlaybooks.includes(fromPlaybook)) log.usedPlaybooks.push(fromPlaybook);
+      }
+
+      // 단일 발견(기존 툴 규약: data.title) + 다중 발견(python_exec: data.findings) 통합 수집.
+      const finding = this.toFinding(phase, { tool: toolName, args, rationale }, res);
+      emit({
+        type: "tool_result",
+        phase,
+        tool: tool.name,
+        ok: res.ok,
+        summary: res.summary,
+        severity: finding?.severity,
+        text: `[${phase}] ${toolName}: ${res.summary}`,
+      });
+      if (finding) {
+        log.findings.push(finding);
+        emit({ type: "finding", finding, text: `[발견] (${finding.severity}) ${finding.title}` });
+      }
+      const multi = (res.data as { findings?: EngagementFinding[] } | undefined)?.findings;
+      if (Array.isArray(multi)) {
+        for (const f of multi) {
+          if (!f?.title || log.findings.some((x) => x.title === f.title)) continue;
+          const ff: EngagementFinding = {
+            phase,
+            severity: f.severity ?? "info",
+            title: f.title,
+            detail: rationale,
+            evidence: f.evidence,
+            impact: f.impact,
+          };
+          log.findings.push(ff);
+          emit({ type: "finding", finding: ff, text: `[발견] (${ff.severity}) ${ff.title}` });
+        }
+      }
+    };
+
+
     for (const phase of PHASES) {
       if ((phase === "exploit" || phase === "post") && this.opts.allowActivePhases === false) {
         emit({ type: "note", text: `[건너뜀] active phase(${phase}) 비활성화됨(dry-run).` });
@@ -147,74 +252,18 @@ export class Orchestrator {
           emit({ type: "note", text: `[${phase}] 알 수 없는 툴: ${action.tool} — 건너뜀.` });
           continue;
         }
+        await runOne(phase, tool, action.tool, action.args, action.rationale, action.fromPlaybook);
+      }
 
-        // opt-in 게이트: 대상별로 켜지지 않은 부작용성 프로브는 모델이 제안해도 실행하지 않는다.
-        if (OPT_IN_TOOLS.has(tool.name) && !(this.opts.enabledOptIns ?? []).includes(tool.name)) {
-          emit({
-            type: "blocked",
-            phase,
-            tool: tool.name,
-            text: `[차단] ${tool.name}: opt-in 프로브 미승인 — authorization.yaml optional_probes 또는 --enable 로 대상별 승인이 필요합니다.`,
-          });
-          continue;
-        }
-
-        emit({
-          type: "action",
-          phase,
-          tool: tool.name,
-          rationale: action.rationale,
-          args: action.args,
-          text: `[${phase}] → ${tool.name}(${JSON.stringify(action.args)})${action.rationale ? " · " + action.rationale : ""}`,
-        });
-
-        // 핵심: 실행 직전 ScopeGuard 재확인(툴의 intent 기준).
-        const decision = this.guard.check({ ...target, intent: tool.intent });
-        if (!decision.allowed) {
-          emit({ type: "blocked", phase, tool: tool.name, text: `[차단] ${tool.name}: ${decision.reason}` });
-          continue;
-        }
-
-        const auth = mergeAuth(this.guard.authHeaders, harvested, this.opts.session?.auth);
-        const res = await tool.run(action.args, {
-          target,
-          rps: this.guard.requestsPerSecond,
-          auth,
-          jar: this.opts.session?.jar,
-          proxy: this.opts.session?.proxy,
-          validateIp: (h, ip) => this.guard.checkResolvedIp(h, ip).allowed,
-        });
-
-        // 발견 체이닝: 결과에서 노출된 자격증명을 이후 요청용으로 수집.
-        const hv = harvestFromResult(res);
-        for (const [k, v] of Object.entries(hv.headers)) {
-          if (!(k in harvested)) {
-            harvested[k] = v;
-            emit({ type: "note", text: `[체이닝] ${tool.name} 노출 자격증명 재사용: ${hv.notes.join(", ")}` });
-          }
-        }
-
-        if (res.fingerprint) log.fingerprint = mergeFingerprint(log.fingerprint, res.fingerprint);
-
-        // 이 액션이 playbook 기반이었다면 성공/실패를 학습에 반영.
-        if (action.fromPlaybook) {
-          await this.memory.record(action.fromPlaybook, res.ok ? "success" : "failure");
-          if (!log.usedPlaybooks.includes(action.fromPlaybook)) log.usedPlaybooks.push(action.fromPlaybook);
-        }
-
-        const finding = this.toFinding(phase, action, res);
-        emit({
-          type: "tool_result",
-          phase,
-          tool: tool.name,
-          ok: res.ok,
-          summary: res.summary,
-          severity: finding?.severity,
-          text: `[${phase}] ${tool.name}: ${res.summary}`,
-        });
-        if (finding) {
-          log.findings.push(finding);
-          emit({ type: "finding", finding, text: `[발견] (${finding.severity}) ${finding.title}` });
+      // 커버리지 전수(--max 공격 모드): 모델 계획이 소진된 뒤, 이번 phase 의 아직 안 쓴 툴을
+      // 전부 1회씩 돌려 '모델이 몰라서 놓친 표면'까지 뒤진다. opt-in 게이트는 동일 적용.
+      if (this.opts.coverage) {
+        const tried = new Set(triedTools(log.transcript, phase));
+        for (const t of this.tools.list()) {
+          // python_exec 는 목표 지향(모델 제안)일 때만 — 기본 인자로는 실행 의미가 없다.
+          if (t.name === "python_exec" || t.intent !== phase || tried.has(t.name)) continue;
+          const args = (this.opts.argsFor ? this.opts.argsFor(t.name, log.fingerprint) : {}) ?? {};
+          await runOne(phase, t, t.name, args, "커버리지(전수 시도)", undefined);
         }
       }
     }

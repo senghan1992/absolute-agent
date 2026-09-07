@@ -26,7 +26,8 @@ import { PythonAgent } from "./py/python-agent.js";
 import { MockCoder } from "./py/mock-coder.js";
 import { ContextualBandit } from "./explore/bandit.js";
 import { BanditStore } from "./explore/bandit-store.js";
-import { DefaultToolBox, OPT_IN_TOOLS } from "./tools/toolbox.js";
+import { DefaultToolBox, DEFAULT_TOOLS, OPT_IN_TOOLS } from "./tools/toolbox.js";
+import { pythonTool } from "./tools/python-tool.js";
 import { MockModel } from "./core/mock-model.js";
 import { parseTargetMap, argsFromMap, type TargetMap } from "./core/target-map.js";
 import type { Fingerprint } from "./memory/skill-memory.js";
@@ -311,9 +312,20 @@ async function cmdRun(args: Args): Promise<void> {
   const gate = !!args.flags.full || !!args.flags.gate;
   const fresh = !!args.flags.fresh || gate;
   const allowUnauth = !!args.flags["allow-unauth"];
-  // --enable <tool[,tool]>: 부작용성 opt-in 프로브를 대상별로 켠다(authorization.yaml optional_probes 와 합쳐짐).
+  // --max: 공격 최대 모드 — 모델 계획 뒤 남은 툴을 phase 별 전수 시도(커버리지) + opt-in
+  //   프로브 전체 + python_exec(파이썬 심화/정보추출) 활성. 칼리 대체식 '다 시도' 캠페인.
+  const maxAttack = !!args.flags.max;
   const enabledOptIns = resolveEnabledOptIns(guard.enabledOptIns, str(args.flags.enable));
-  if (enabledOptIns.length) console.error(`[opt-in] 활성 프로브: ${enabledOptIns.join(", ")}`);
+  const allOptIns = new Set([...enabledOptIns, ...(maxAttack ? [...OPT_IN_TOOLS] : [])]);
+  const enabledOptInsFinal = [...allOptIns];
+  if (enabledOptInsFinal.length) console.error(`[opt-in] 활성 프로브: ${enabledOptInsFinal.join(", ")}`);
+  if (maxAttack) {
+    console.error(
+      "[모드] 공격 최대(--max): phase 별 전수 커버리지 + opt-in 전체 + python_exec(파이썬 심화·정보추출) 활성. " +
+      "인가된 대상 외 요청은 ScopeGuard 가 전부 차단합니다.",
+    );
+  }
+  const toolbox = new DefaultToolBox(maxAttack ? [...DEFAULT_TOOLS, pythonTool(guard)] : DEFAULT_TOOLS);
   // --no-visual: 초보자용 시각 상황판(ASCII)을 끄고 상세 리포트만 낸다(기본은 켜짐).
   const visual = !args.flags["no-visual"];
   // --auto: 밴딧 자율 드라이버(모델 불필요). 게이트 모드는 자동으로 auto 경로를 탄다.
@@ -425,7 +437,7 @@ async function cmdRun(args: Args): Promise<void> {
     const storePath = path.join(redcellHome(), "bandit.json");
     const store = new BanditStore(storePath);
     const bandit = fresh ? new ContextualBandit("ucb1") : await store.load("ucb1");
-    const autopilot = new AutoPilot(guard, memory, bandit, new DefaultToolBox(), {
+    const autopilot = new AutoPilot(guard, memory, bandit, toolbox, {
       maxStepsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 8,
       globalBudget: gate ? 200 : 60,
       banditStore: fresh ? undefined : store,
@@ -470,12 +482,15 @@ async function cmdRun(args: Args): Promise<void> {
     return;
   }
 
-  const orch = new Orchestrator(guard, memory, model, new DefaultToolBox(), {
-    maxActionsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 4,
+  const orch = new Orchestrator(guard, memory, model, toolbox, {
+    maxActionsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : maxAttack ? 10 : 4,
     allowActivePhases: !args.flags["dry-run"],
     onEvent: emit,
     session,
-    enabledOptIns,
+    enabledOptIns: enabledOptInsFinal,
+    // --max: 모델 계획 소진 후 남은 툴을 전수 1회씩(놓친 표면 보강).
+    coverage: maxAttack,
+    argsFor: argsForFn,
   });
   const log = await orch.run({ host, port }, goal);
   let activeFindings = log.findings;
@@ -865,6 +880,8 @@ Commands:
                  [--fresh]  영속 밴딧 상태를 로드·저장하지 않음(표적 간 오염 제거·재현성)
                  [--allow-unauth]  공개 서비스로 간주해 인증 표면 미점검을 허용(게이트 판정)
                  [--enable <t[,t]>]  부작용성 opt-in 프로브를 대상별로 켠다(logic_probe,cache_poison_probe|all)
+                 [--max]  공격 최대 모드: 모델 계획 후 phase 별 남은 툴 전수 1회씩 + opt-in 전체 +
+                          python_exec(파이썬 심화 공격·정보추출) 활성 — 칼리 대체식 캠페인
                  [--target-ref <ref>]  검사 대상의 커밋/빌드 참조(서명 리포트 출처에 기록)
                  [--target-map <file.json>]  아는 경로/파라미터를 직접 주입(정찰 크롤 보강)
                  [--no-visual]  초보자용 시각 상황판(ASCII 그림)을 끄고 상세 리포트만 출력

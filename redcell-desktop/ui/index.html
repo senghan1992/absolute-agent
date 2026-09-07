@@ -79,6 +79,11 @@
               <option value="tools">tools</option>
               <option value="python">python(RLM)</option>
             </select>
+            <label class="sh-max" title="공격 최대 모드(tools 전용): 모델 계획 후 남은 툴을 단계별 전수 1회씩 + opt-in 프로브 전체 + 파이썬 심화 실행 활성 — 칼리 대체식 다각 공격">
+              <input type="checkbox" id="shMax" />
+              <svg class="ic" style="width:13px;height:13px"><use href="#i-crosshair"/></svg>
+              <span>최대 공격</span>
+            </label>
           </div>
           <span id="statusBadge" class="badge badge-idle">idle</span>
           <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>

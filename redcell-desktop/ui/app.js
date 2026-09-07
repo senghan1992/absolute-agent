@@ -91,6 +91,7 @@ function renderActive() {
   $("shGoal") && ($("shGoal").value = s.goal || "");
   $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
   $("shMode") && ($("shMode").value = s.mode || "tools");
+  $("shMax") && ($("shMax").checked = !!s.max);
   setBadge(s.status);
 
   renderCapture(s);
@@ -424,7 +425,7 @@ async function selectSession(id) {
 }
 
 async function newSession() {
-  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools" });
+  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools", max: false });
   sessions.unshift(s);
   activeId = s.id;
   renderTabs();
@@ -459,6 +460,7 @@ async function persistHeader(overrides = {}) {
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: $("shProvider").value,
     mode: $("shMode") ? $("shMode").value : "tools",
+    max: $("shMax") ? $("shMax").checked : false,
   };
   const updated = await invoke("update_session", payload);
   if (updated) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = updated; }

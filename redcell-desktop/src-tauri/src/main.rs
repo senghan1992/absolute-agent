@@ -52,6 +52,8 @@ struct Session {
     provider: String,
     #[serde(default = "default_mode")]
     mode: String, // tools(고정 툴박스 오케스트레이터) | python(absolute-agent RLM)
+    #[serde(default)]
+    max: bool, // 공격 최대 모드(tools) — 전수 커버리지 + opt-in 전체 + python_exec
     #[serde(default = "status_idle")]
     status: String, // idle | running | done | error
     created_at: String,
@@ -270,6 +272,7 @@ fn create_session(
     goal: String,
     provider: String,
     mode: Option<String>,
+    max: Option<bool>,
 ) -> Session {
     let id = Uuid::new_v4().to_string();
     let s = Session {
@@ -290,6 +293,7 @@ fn create_session(
             Some(m) if !m.trim().is_empty() => m,
             _ => default_mode(),
         },
+        max: max.unwrap_or(false),
         status: "idle".into(),
         created_at: now(),
         updated_at: now(),
@@ -311,6 +315,7 @@ fn update_session(
     goal: String,
     provider: String,
     mode: Option<String>,
+    max: Option<bool>,
 ) -> Option<Session> {
     let mut s = read_session(&app, &id)?;
     s.name = name;
@@ -322,6 +327,9 @@ fn update_session(
         if !m.trim().is_empty() {
             s.mode = m;
         }
+    }
+    if let Some(mx) = max {
+        s.max = mx;
     }
     s.updated_at = now();
     write_session_locked(&app, &s);
@@ -582,6 +590,9 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         // 있으므로 best-effort 로 내려 실행한다(모든 HTTP 는 계속 브로커 경유).
         args.push("--isolation".into());
         args.push("best-effort".into());
+    } else if s.max {
+        // 최대 공격 모드(tools): 모델 계획 후 남은 툴 전수 1회씩 + opt-in 전체 + python_exec.
+        args.push("--max".into());
     }
     if let Some(p) = s.port {
         args.push("--port".into());
