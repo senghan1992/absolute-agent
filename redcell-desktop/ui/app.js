@@ -92,6 +92,12 @@ function renderActive() {
   $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
   $("shMode") && ($("shMode").value = s.mode || "tools");
   $("shMax") && ($("shMax").checked = !!s.max);
+  const chatInput = $("chatInput");
+  if (chatInput) {
+    chatInput.placeholder = s.mode === "prime"
+      ? "pi 프롬프트를 입력하세요 — 이전 대화와 이어집니다 (Enter 전송 · Shift+Enter 줄바꿈)"
+      : "지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)";
+  }
   setBadge(s.status);
 
   renderCapture(s);
@@ -404,11 +410,18 @@ async function onFinished(id, status) {
   if (fresh) { const i = sessions.findIndex((x) => x.id === id); if (i >= 0) sessions[i] = fresh; }
   const s = sessions.find((x) => x.id === id);
   const fs = findingsOf(s);
-  const sev = {}; fs.forEach((f) => { sev[f.severity] = (sev[f.severity] || 0) + 1; });
-  const summary = status === "error"
-    ? "실행이 오류로 종료되었습니다. ‘라이브 캡처’에서 원인을 확인하세요."
-    : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`;
-  await invoke("append_chat", { id, role: "assistant", content: summary });
+  if (s && s.mode === "prime") {
+    const summary = status === "error"
+      ? "pi 가 오류로 종료되었습니다. 라이브 캡처의 [sys]/[오류] 노트를 확인하세요."
+      : "완료 — 아래에서 이어서 질문할 수 있습니다(같은 pi 세션으로 이어집니다).";
+    await invoke("append_chat", { id, role: "assistant", content: summary });
+  } else {
+    const sev = {}; fs.forEach((f) => { sev[f.severity] = (sev[f.severity] || 0) + 1; });
+    const summary = status === "error"
+      ? "실행이 오류로 종료되었습니다. ‘라이브 캡처’에서 원인을 확인하세요."
+      : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`;
+    await invoke("append_chat", { id, role: "assistant", content: summary });
+  }
   const upd = await invoke("get_session", { id });
   if (upd) { const i = sessions.findIndex((x) => x.id === id); sessions[i] = upd; }
   if (id === activeId) { renderChat(); renderNext(cur()); renderStepper(cur()); }

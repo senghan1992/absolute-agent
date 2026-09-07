@@ -54,6 +54,8 @@ struct Session {
     mode: String, // tools(고정 툴박스 오케스트레이터) | python(absolute-agent RLM)
     #[serde(default)]
     max: bool, // 공격 최대 모드(tools) — 전수 커버리지 + opt-in 전체 + python_exec
+    #[serde(default)]
+    piq: String, // prime 모드: pi 세션 id(연속 대화 유지)
     #[serde(default = "status_idle")]
     status: String, // idle | running | done | error
     created_at: String,
@@ -294,6 +296,7 @@ fn create_session(
             _ => default_mode(),
         },
         max: max.unwrap_or(false),
+        piq: String::new(),
         status: "idle".into(),
         created_at: now(),
         updated_at: now(),
@@ -610,25 +613,47 @@ fn run_prime(
         "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정)".to_string(),
     )?;
 
-    let port = s.port;
+    // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
+    // CLI 처럼 이전 대화를 이어간다(첫 턴에 생성·저장, 이후 턴은 재사용).
+    let mut s2 = s.clone();
+    if s2.piq.trim().is_empty() {
+        let id8 = s2.id.chars().take(8).collect::<String>();
+        s2.piq = format!("rc-{id8}");
+        write_session_locked(app, &s2);
+    }
+    let piq = s2.piq.clone();
+
+    let port = s2.port;
     let target = match port {
-        Some(p) if p == 443 || p == 8443 => format!("https://{}/", s.host),
-        Some(p) => format!("http://{}:{}/", s.host, p),
-        None => format!("http://{}/", s.host),
+        Some(p) if p == 443 || p == 8443 => format!("https://{}/", s2.host),
+        Some(p) => format!("http://{}:{}/", s2.host, p),
+        None => format!("http://{}/", s2.host),
     };
-    let mut goal = s.goal.trim().to_string();
+    let mut goal = s2.goal.trim().to_string();
     if goal.is_empty() {
         goal = "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string();
     }
-    let https_hint = match port {
-        Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s.host, p),
-        _ => String::new(),
+    let instruction = if s2.host.trim().is_empty() {
+        // 대상 미지정: 순수 pi CLI 대화(인가 게이트는 대상 없는 로컬 작업만 통과).
+        goal
+    } else {
+        let https_hint = match port {
+            Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s2.host, p),
+            _ => String::new(),
+        };
+        format!(
+            "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘."
+        )
     };
-    let instruction = format!(
-        "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘."
-    );
 
-    let mut args: Vec<String> = vec!["--mode".into(), "json".into(), "-p".into(), instruction];
+    let mut args: Vec<String> = vec![
+        "--mode".into(),
+        "json".into(),
+        "--session-id".into(),
+        piq.clone(),
+        "-p".into(),
+        instruction,
+    ];
     args.push("--provider".into());
     args.push(provider.to_string());
     if provider != "custom" {
@@ -646,9 +671,7 @@ fn run_prime(
     }
 
     {
-        let ev = json!({ "type": "note", "text": format!("[sys] prime-agent(pi) 실행: node {} {}", cli.display(), args.iter().map(|a| {
-            if a.len() > 80 { format!("{}…", &a[..80]) } else { a.clone() }
-        }).collect::<Vec<_>>().join(" ")) });
+        let ev = json!({ "type": "note", "text": format!("[sys] prime-agent(pi) 턴 — session {piq}: node {} {}…", cli.display(), args.get(5).map(|a| a.chars().take(60).collect::<String>()).unwrap_or_default()) });
         let stamped = append_event(app, id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
