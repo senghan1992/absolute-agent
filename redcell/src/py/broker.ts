@@ -468,8 +468,14 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
           NO_PROXY: "127.0.0.1,localhost",
           PYTHONUNBUFFERED: "1",
           PYTHONDONTWRITEBYTECODE: "1",
+          // Windows: 한국어/중국어 로케일에서 stdout 이 cp949/cp936 로 나가 한글이
+          // 깨지는 현상 방지 — 항상 UTF-8 로 출력한다.
+          PYTHONIOENCODING: "utf-8",
+          PYTHONUTF8: "1",
         },
         stdio: ["ignore", "pipe", "pipe"],
+        // Windows: python 이 별도 콘솔 창을 새로 띄워 깜빡이는 현상 방지(CREATE_NO_WINDOW)
+        windowsHide: true,
       });
 
       let stdout = "";
@@ -534,7 +540,8 @@ function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; c
   const logs: string[] = [];
   const rest: string[] = [];
   let danger: string | undefined;
-  for (const line of stdout.split("\n")) {
+  for (const raw of stdout.split("\n")) {
+    const line = raw.replace(/\r$/, ""); // Windows CRLF 정리
     if (line.startsWith("##RC_FINDING## ")) {
       try {
         const o = JSON.parse(line.slice("##RC_FINDING## ".length));

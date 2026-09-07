@@ -442,13 +442,16 @@ fn test_provider(provider: String, api_key: String, base_url: String) -> Result<
     let path = if provider == "ollama" { "/tags" } else { "/models" };
     let url = format!("{}{}", base.trim_end_matches('/'), path);
     let script = r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"";try{const r=await fetch(u,{headers:k?{Authorization:"Bearer "+k,"x-api-key":k,"anthropic-version":"2023-06-01"}:{}});console.log("OK "+r.status+" "+r.statusText)}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#;
-    let mut child = Command::new("node")
+    let mut probe = Command::new("node");
+    probe
         .arg("-e")
         .arg(script)
         .env("RC_TEST_URL", url)
         .env("RC_TEST_KEY", api_key.trim())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    hide_window(&mut probe);
+    let mut child = probe
         .spawn()
         .map_err(|e| format!("node 실행 실패: {e}"))?;
     use std::io::Read;
@@ -486,6 +489,19 @@ fn test_provider(provider: String, api_key: String, base_url: String) -> Result<
 /// 세션 실행 — redcell CLI 를 --ndjson 으로 스폰하고 이벤트를 스트리밍한다.
 /// 즉시 반환하며, 진행은 `engagement-event` / `engagement-status` 이벤트로 전달된다.
 // ── redcell CLI 실행 ─────────────────────────────────────────────────────────
+/// Windows 콘솔 창이 떴다 사라지는 현상 방지: 자식 프로세스에 CREATE_NO_WINDOW 를 준다.
+fn hide_window(cmd: &mut Command) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = cmd; // 비 Windows 에서는 무연산
+    }
+}
+
 /// redcell CLI 를 실행할 프로세스를 구성한다.
 /// Windows 에서는 두 가지 문제를 피해야 한다:
 ///  1) `npx`/`.cmd` 배치 파일은 CreateProcess 로 직접 실행 불가
@@ -523,6 +539,7 @@ fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String
     cmd.current_dir(&base);
     cmd.arg("--import").arg("tsx").arg("src/cli.ts");
     cmd.args(args);
+    hide_window(&mut cmd);
     Ok(cmd)
 }
 
