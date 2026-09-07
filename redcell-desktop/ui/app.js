@@ -8,8 +8,9 @@ const listen = TAURI ? TAURI.event.listen : async () => {};
 
 let sessions = [];
 let activeId = null;
-let settings = { redcell_dir: "", auth_path: "", default_provider: "mock" };
+let settings = { redcell_dir: "", auth_path: "", default_provider: "" };
 let selectedSeq = null;
+let providerList = []; // 연결 정보 없으면 리스트에 나타내지 않는다
 
 const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
@@ -89,7 +90,7 @@ function renderActive() {
   $("shHost").value = s.host || "";
   $("shPort").value = s.port ?? "";
   $("shGoal") && ($("shGoal").value = s.goal || "");
-  $("shProvider").value = s.provider || "mock";
+  $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
   $("shMode") && ($("shMode").value = s.mode || "tools");
   setBadge(s.status);
 
@@ -406,8 +407,7 @@ async function onFinished(id, status) {
   const sev = {}; fs.forEach((f) => { sev[f.severity] = (sev[f.severity] || 0) + 1; });
   const summary = status === "error"
     ? "실행이 오류로 종료되었습니다. ‘라이브 캡처’에서 원인을 확인하세요."
-    : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`
-      + ((s && (s.provider || "mock") === "mock") ? " (mock 고정 시나리오 — 지시 기반 분석은 provider 를 실제 모델로 변경)" : "");
+    : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`;
   await invoke("append_chat", { id, role: "assistant", content: summary });
   const upd = await invoke("get_session", { id });
   if (upd) { const i = sessions.findIndex((x) => x.id === id); sessions[i] = upd; }
@@ -425,7 +425,7 @@ async function selectSession(id) {
 }
 
 async function newSession() {
-  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "mock", mode: "tools" });
+  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools" });
   sessions.unshift(s);
   activeId = s.id;
   renderTabs();
@@ -506,6 +506,7 @@ async function runEngagement() {
   const s = cur(); if (!s) return;
   if (!s.host && !$("shHost").value.trim()) { alert("host 를 먼저 입력하세요."); return; }
   await persistHeader();
+  if (!activeProvider()) { showProviderModal(); return; } // 미설정 → 모달로 설정 유도
   await ensureTargetAuthorized();
   try {
     setBadge("running");
@@ -542,21 +543,19 @@ async function sendChat() {
   const input = $("chatInput");
   const text = input.value.trim();
   if (!text) return;
+  if (!activeProvider()) { showProviderModal(); return; } // 입력 보존 + 설정 유도
   input.value = "";
   await persistHeader({ goal: text });
   await invoke("append_chat", { id: s.id, role: "user", content: text });
   const host = $("shHost").value.trim();
   const port = $("shPort").value.trim();
-  const provider = $("shProvider").value || "mock";
+  const provider = activeProvider();
   const target = host ? `${host}${port ? ":" + port : ""}` : "(대상 미지정 — host 를 입력하세요)";
   let ack;
   if (s.status === "running") {
     ack = `목표 "${text}" 을(를) 저장했습니다. 현재 실행이 진행 중입니다 — 완료 후 이 목표로 다시 실행됩니다.`;
   } else {
-    const mockNote = provider === "mock"
-      ? "\n⚠ mock 은 LLM 없이 고정 시나리오로만 동작해 지시 내용이 계획에 반영되지 않습니다. 지시 기반 분석은 상단 provider 를 ✅ 표시된 실제 모델로 바꾸세요."
-      : "";
-    ack = `목표 반영: "${text}"\n대상 ${target} · 프로바이더 ${provider} 로 실행합니다 — 왼쪽 라이브 캡처에서 진행을 확인하세요.${mockNote}`;
+    ack = `목표 반영: "${text}"\n대상 ${target} · 프로바이더 ${provider} 로 실행합니다 — 왼쪽 라이브 캡처에서 진행을 확인하세요.`;
   }
   await invoke("append_chat", { id: s.id, role: "assistant", content: ack });
   const fresh = await invoke("get_session", { id: s.id });
@@ -566,23 +565,36 @@ async function sendChat() {
   if (s.status !== "running") await runEngagement();
 }
 
-// ── 프로바이더 가용성 표시: 드롭다운에 ✅(키 감지) + 힌트 문구 ───────────────
+// ── 프로바이더: 연결된 것만 리스트에 노출, 미설정 시 모달 유도 ────────────────
+function activeProvider() {
+  const sel = $("shProvider");
+  const v = sel && sel.value ? sel.value.trim() : "";
+  return v && v !== "mock" ? v : "";
+}
+function showProviderModal() {
+  $("providerModal").classList.remove("hidden");
+}
+
 async function refreshProviders() {
   let list;
   try { list = await invoke("get_providers"); } catch { return; } // preview/mock 환경
   if (!Array.isArray(list)) return;
-  const byName = {}; list.forEach((p) => { byName[p.name] = p; });
+  providerList = list.filter((p) => p && p.ready && p.name !== "mock"); // 연결 정보 있는 것만
   const sel = $("shProvider");
-  if (sel) for (const opt of sel.options) {
-    const p = byName[opt.value];
-    if (p) { opt.textContent = `${opt.value}${p.ready ? " ✅" : ""}`; opt.title = p.note || ""; }
+  if (sel) {
+    const prev = sel.value;
+    sel.innerHTML = `<option value="">— provider 선택 —</option>`
+      + providerList.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+    const want = (cur() && cur().provider && cur().provider !== "mock") ? cur().provider : "";
+    sel.value = providerList.some((p) => p.name === want) ? want
+      : (prev !== "mock" && providerList.some((p) => p.name === prev) ? prev : "");
   }
   const hint = $("providerHint");
   if (hint) {
-    const ready = list.filter((p) => p.ready && p.name !== "mock").map((p) => p.name);
-    hint.textContent = ready.length
-      ? `LLM 사용 가능: ${ready.join(", ")} — provider 를 바꾸면 지시가 실제 추론에 반영됩니다`
-      : "LLM 키 미감지 — mock(고정 시나리오)으로만 실행됩니다. ANTHROPIC_API_KEY / OPENAI_API_KEY / GROQ_API_KEY 등을 환경변수로 설정하거나 로컬 ollama 를 쓰세요.";
+    const names = providerList.map((p) => p.name);
+    hint.textContent = names.length
+      ? `연결됨: ${names.join(", ")} — 상단 드롭다운에서 선택하세요. 지시가 실제 LLM 추론에 반영됩니다.`
+      : "연결된 프로바이더가 없습니다 — 설정(⚙) > 기본 provider 에 사용할 이름을 저장하세요. API 키는 환경변수(ANTHROPIC_API_KEY 등)로 감지되며, 로컬 ollama 도 연결됩니다.";
   }
 }
 
@@ -599,16 +611,17 @@ function switchView(name) {
 function openSettings() {
   $("setRedcellDir").value = settings.redcell_dir || "";
   $("setAuthPath").value = settings.auth_path || "";
-  $("setProvider").value = settings.default_provider || "mock";
+  $("setProvider").value = settings.default_provider || "";
   $("settingsModal").classList.remove("hidden");
 }
 async function saveSettings() {
   settings = await invoke("save_settings", { settings: {
     redcell_dir: $("setRedcellDir").value.trim(),
     auth_path: $("setAuthPath").value.trim(),
-    default_provider: $("setProvider").value.trim() || "mock",
+    default_provider: $("setProvider").value.trim(),
   }});
   $("settingsModal").classList.add("hidden");
+  await refreshProviders(); // 저장된 기본값 즉시 반영
 }
 
 // ── 인가 대상 관리 (ip-list) — UI 에서 IP 추가/제거 ─────────────────────────
@@ -762,6 +775,8 @@ function wire() {
   $("settingsBtn").onclick = openSettings;
   $("settingsCancel").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsSave").onclick = saveSettings;
+  $("providerGoto").onclick = () => { $("providerModal").classList.add("hidden"); openSettings(); };
+  $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   $("runBtn").onclick = onRunButton;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });

@@ -410,6 +410,12 @@ fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String
 #[tauri::command]
 fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let s = read_session(&app, &id).ok_or("세션을 찾을 수 없습니다")?;
+    // 프로바이더 설정 없으면 거부 — mock 은 제거됨(데스크톱은 명시적 설정만).
+    let provider = s.provider.trim();
+    if provider.is_empty() || provider == "mock" {
+        return Err("provider 가 설정되지 않았습니다 — 설정(⚙) > 프로바이더에서 API 키/연결을 설정하세요.".into());
+    }
+    let provider = provider.to_string();
     // 앱이 죽었다 다시 켜진 경우 등: 상태가 running 이어도 실제 실행 프로세스가 없으면
     // 재실행을 허용한다(레지스트리 기준 — 스트림 종료 시 항목이 제거되므로 정확하다).
     let truly_running = app.state::<Procs>().0.lock().unwrap().contains_key(&id);
@@ -423,12 +429,6 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
             "redcell 경로를 찾을 수 없습니다: '{redcell}'. 설정(⚙)에서 redcell_dir 을 지정하세요."
         ));
     }
-
-    let provider = if s.provider.trim().is_empty() {
-        "mock".to_string()
-    } else {
-        s.provider.clone()
-    };
     // mode 에 따라 서브커맨드 선택: python → absolute-agent(RLM, 코드 작성→실행 반복),
     // 그 외 → 고정 툴박스 오케스트레이터.
     let subcommand = if s.mode == "python" { "pyrun" } else { "run" };

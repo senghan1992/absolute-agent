@@ -825,6 +825,14 @@ async function cmdPyRun(args: Args): Promise<void> {
   const isolation: "required" | "best-effort" | "off" =
     isoFlag === "off" || isoFlag === "best-effort" || isoFlag === "required" ? isoFlag : "required";
   if (isoFlag && isoFlag !== isolation) throw new Error(`--isolation 값은 required|best-effort|off 중 하나여야 합니다(받은 값: ${isoFlag}).`);
+  if (process.platform === "win32" && isolation === "required") {
+    console.error("[iso] Windows — 격리 백엔드 없음: required → best-effort 로 조정합니다 (ScopeGuard 는 그대로 적용).");
+  }
+  if (process.platform === "win32" && isolation === "required") {
+    // Windows: bwrap 없음 → 내부 격리 백엔드 없음. SharePointGuard 가 코드 실행을 가드하므로
+    // best-effort 로 낮춰 실행(명시적으로 required 를 요청한 경우에도 Windows 에선 best-effort).
+    console.error("[iso] Windows — 격리 백엔드 없음: required → best-effort 로 조정합니다 (ScopeGuard 는 그대로 적용).");
+  }
 
   const agent = new PythonAgent(guard, model, {
     maxIterations: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 8,
