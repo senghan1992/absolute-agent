@@ -20,6 +20,28 @@ pi 의 bash/웹 툴이 자유롭게 조사한 결과를 그대로 스트리밍�
 (`prime-agent/`, `./prime-agent/install.sh` 로 `.pi/agent` + 전역 `~/.pi/agent` 에 설치)이
 여전히 모든 tool_call 을 인가 목록으로 게이팅한다.
 
+## RLM 모드 (`rlm`) — 재귀 언어 모델(Recursive Language Model) 방식 에이전트
+
+[RLM(arXiv 2512.24601)](https://arxiv.org/abs/2512.24601) 패러다임을 엔진 안에 이식한 모드다
+(prime-agent 는 이 RLM 위에 지어진 harness — 패널의 `rlm(재귀 REPL)` 모드가 이것):
+
+1. **영구 Python REPL** — JSON 툴콜 대신 모델이 코드를 쓰고, 같은 파이썬 프로세스 globals 에
+   계속 실행된다. 변수와 `ctx`(prompt-as-a-variable)가 스텝을 넘어 유지된다.
+2. **재귀 서브콜** — 파이썬에서 `rlm('하위 작업', 8)` 호출 시 하위 에이전트가 실행되고 **값으로** 답이
+   돌아온다(프로그래매틱 subagent calling). 깊이 상한(기본 3)·공유 요청 예산(기본 240).
+3. **자기발전 기억** — `rc.memo('키','내용')` 로 배운 전략을 `~/.redcell/memories/<호스트>.md` 에
+   남기고, 다음 실행 시작 시 `ctx.memories`+프롬프트로 재주입된다(continual harness).
+4. **FINAL: 계약** — `print('FINAL: ...')` 로 최종 답을 내면 그 텍스트가 이 에이전트(와 재귀 값)의 답이 된다.
+
+```bash
+redcell rlm --host 127.0.0.1 --port 8080 \
+  --goal "관리자 세션 탈취 경로를 찾아라" --provider anthropic
+# --depth 3  재귀 깊이 상한  ·  --budget 240  전체 요청 예산  ·  --mem <파일>  기억 파일
+```
+
+안전은 엔진과 동일하다: 모든 대상 통신은 ReplSession 브로커(ScopeGuard·공유 예산·RPS·
+비파괴)를 통과하고, 재귀 하위 에이전트도 같은 게이트를 공유한다.
+
 ## 무엇이 "자기발전"인가 — 탐색 엔진이 핵심
 
 RedCell 의 심장은 **스스로 여러 방법을 시도하고, 결과로 배우고, 발전하는 탐색 엔진**이다.
@@ -455,7 +477,7 @@ npx tsx src/cli.ts run --host 127.0.0.1 --port 8080 --auto --goal "웹 취약점
 ```bash
 cd redcell
 npm install
-npm test                     # 261개 테스트: scope(+연결시점 IP검증·rebinding)/메모리/탐색/MCTS/32개 툴/웹벡터/페이로드생성/인증스캔/체이닝/발산플래너/프로바이더/정확도벤치+적대적미끼/탐지심화 FN-트랩/피해반경/정찰→공격 자동배선(+target-map 오버라이드)/중복요청 억제/역직렬화·세션강도·캐시포이즈닝·로직결함 신규툴/scope차단/게이트 신뢰성/서명리포트·waiver·직무분리/변조탐지 감사추적/초보자 시각 상황판/외부 취약앱 블라인드 검증/absolute-agent(pyrun 코드실행 안전·OS격리 fail-closed·scope 강제)/e2e
+npm test                     # 299개 테스트: scope(+연결시점 IP검증·rebinding)/메모리/탐색/MCTS/32개 툴/웹벡터/페이로드생성/인증스캔/체이닝/발산플래너/프로바이더/정확도벤치+적대적미끼/탐지심화 FN-트랩/피해반경/정찰→공격 자동배선(+target-map 오버라이드)/중복요청 억제/역직렬화·세션강도·캐시포이즈닝·로직결함 신규툴/scope차단/게이트 신뢰성/서명리포트·waiver·직무분리/변조탐지 감사추적/초보자 시각 상황판/외부 취약앱 블라인드 검증/absolute-agent(pyrun 코드실행 안전·OS격리 fail-closed·scope 강제)/e2e
 
 # 인가 파일 준비 후 로컬 대상에 실행
 cp config/authorization.example.yaml config/authorization.yaml

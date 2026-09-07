@@ -33,7 +33,8 @@
  */
 
 import http from "node:http";
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
+import readline from "node:readline";
 import { promises as fs } from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -59,6 +60,8 @@ export interface PyRunOpts {
   timeoutMs?: number;
   /** 브로커가 허용하는 대상 요청 총량(폭주 방지). 기본 80. */
   maxRequests?: number;
+  /** 재귀 세션끼리 공유하는 요청 예산(budget.max 절대 한도). 주어지면 maxRequests 대신 쓴다. */
+  budget?: { used: number; max: number };
   /** stdout/stderr 각각의 문자 상한. 기본 20000. */
   outputCap?: number;
   /** 브로커를 통과한 요청마다 호출(실시간 이벤트/감사용). */
@@ -108,6 +111,14 @@ export interface PyResult {
   danger?: string;
   /** runner 의 문법(ast.parse) 오류 — 정책 위반이 아니라 실행 불가 코드. */
   syntax?: string;
+  /** rc.memo(...) 로 저장된 기억(REPL 세션). */
+  memos?: ReplMem[];
+}
+
+/** rc.memo(key, text) 로 저장된 자기발전 기억 한 건. */
+export interface ReplMem {
+  key: string;
+  text: string;
 }
 
 const SEVERITIES = new Set(["info", "low", "medium", "high", "critical"]);
@@ -200,7 +211,11 @@ function runnerScript(): string {
   return [
     "import os as _os, sys as _sys, json as _json, base64 as _b64, ast as _ast, builtins as _builtins, re as _re",
     "import urllib.request as _u",
-    '_B = _os.environ["RC_BROKER"]; _TK = _os.environ["RC_TOKEN"]',
+    "# python -I(격리)는 PYTHON* 환경변수를 무시하므로 한국어/중국어 깨짐(cp949/cp936)과",
+    "# 블록 버퍼링에 의한 출력 순서 꼬임(재귀 rlm/로그 유실)을 **코드에서** 강제로 해결한다.",
+    "_sys.stdout.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)",
+    "_sys.stderr.reconfigure(encoding='utf-8', errors='replace', line_buffering=True)",
+    "_B = _os.environ[\"RC_BROKER\"]; _TK = _os.environ[\"RC_TOKEN\"]",
     "",
     "# ── rc 헬퍼(신뢰 코드, full builtins) : 대상 통신은 전부 로컬 브로커에 위임 ──",
     "class ScopeError(Exception): pass",
@@ -255,7 +270,35 @@ function runnerScript(): string {
     "        print('##RC_FINDING## ' + _json.dumps({'title': title, 'severity': severity, 'evidence': evidence, 'impact': impact}), flush=True)",
     "    def log(self, *a):",
     "        print('##RC_LOG## ' + ' '.join(str(x) for x in a), flush=True)",
+    "    def ctx_get(self, key, default=None):",
+    "        return _CTX.get(key, default)",
+    "    def ctx_set(self, key, value):",
+    "        # prompt-as-variable: REPL 의 영구 ctx 변수 갱신(스텝을 넘어 유지됨).",
+    "        _CTX[key] = value",
+    "    def memo(self, key, text):",
+    "        # 자기발전 기억: 엔진이 세션 메모리 파일에 기록해 다음 실행에서 재주입한다.",
+    "        print('##RC_MEMO## ' + _b64.b64encode(_json.dumps({'key': key, 'text': text}).encode()).decode(), flush=True)",
+    "    def rlm(self, prompt, max_steps=8):",
+    "        # RLM 재귀 서브콜: 하위 에이전트를 코드 함수처럼 호출하고 결과를 값을 받는다.",
+    "        _req = _b64.b64encode(_json.dumps({'prompt': prompt, 'max_steps': max_steps}).encode()).decode()",
+    "        print('##RC_RLM## ' + _req, flush=True)",
+    "        _l = _sys.stdin.readline()",
+    "        if not _l or not _l.startswith('##RC_RLM_RESULT## '):",
+    "            return '[rlm] 엔진으로부터 결과를 받지 못했습니다'",
+    "        try:",
+    "            return _b64.b64decode(_l[len('##RC_RLM_RESULT## '):].strip()).decode('utf-8')",
+    "        except Exception:",
+    "            return '[rlm] 결과 디코딩 실패'",
     "rc = _RC()",
+    "",
+    "# ── ctx(prompt-as-variable): 엔진이 주입한 영구 맥락 변수 ──",
+    "_CTX = {}",
+    "try:",
+    "    _ctx_raw = _os.environ.get('RC_CTX', '')",
+    "    if _ctx_raw:",
+    "        _CTX = _json.loads(_b64.b64decode(_ctx_raw).decode('utf-8'))",
+    "except Exception:",
+    "    _CTX = {}",
     "",
     "# ── AST 허용목록 검증 ────────────────────────────────────────────────────",
     `_ALLOWED_MODULES = set(${allowed})`,
@@ -316,7 +359,38 @@ function runnerScript(): string {
     "    if hasattr(_builtins, _n): _safe_builtins[_n] = getattr(_builtins, _n)",
     "_safe_builtins['__import__'] = _guarded_import",
     "",
-    "# ── payload 로드 → 검증 → 제한 exec ──────────────────────────────────────",
+    "# ── RLM 영구 REPL 모드(RC_REPL=1): stdin 으로 코드를 받아 같은 globals 에 실행 ──",
+    "#    스텝을 넘어 변수·ctx 가 지속된다. AST 검증/DANGER 는 1회성과 동일한 심층방어.",
+    "if _os.environ.get('RC_REPL') == '1':",
+    "    _sandbox = {'__builtins__': _safe_builtins, 'rc': rc, 'rlm': rc.rlm, 'ctx': _CTX, '__name__': '__rc_repl__', '__doc__': None}",
+    "    while True:",
+    "        _line = _sys.stdin.readline()",
+    "        if not _line:",
+    "            break",
+    "        if not _line.startswith('##RC_RUN## '):",
+    "            continue",
+    "        try:",
+    "            _src = _b64.b64decode(_line[len('##RC_RUN## '):].strip()).decode('utf-8')",
+    "        except Exception as _e:",
+    "            print('##RC_SYNTAX## base64 디코딩 실패: ' + repr(_e), flush=True)",
+    "            print('##RC_RESULT##', flush=True)",
+    "            continue",
+    "        _bad = _validate(_src)",
+    "        if _bad is not None:",
+    "            print('##RC_DANGER## ' + _bad, flush=True)",
+    "            print('##RC_RESULT##', flush=True)",
+    "            continue",
+    "        try:",
+    "            _code = compile(_src, 'payload.py', 'exec')",
+    "            exec(_code, _sandbox)",
+    "        except SystemExit:",
+    "            pass",
+    "        except BaseException as _e:",
+    "            print('##RC_EXC## ' + repr(_e)[:400], flush=True)",
+    "        print('##RC_RESULT##', flush=True)",
+    "    _sys.exit(0)",
+    "",
+    "# ── payload 로드 → 검증 → 제한 exec(1회성 모드) ──────────────────────────",
     "_payload_path = _sys.argv[1]",
     "with open(_payload_path, 'r', encoding='utf-8') as _f:",
     "    _src = _f.read()",
@@ -324,11 +398,438 @@ function runnerScript(): string {
     "if _bad is not None:",
     "    print('##RC_DANGER## ' + _bad, flush=True)",
     "    _sys.exit(0)",
-    "_sandbox = {'__builtins__': _safe_builtins, 'rc': rc, '__name__': '__rc_payload__', '__doc__': None}",
+    "_sandbox = {'__builtins__': _safe_builtins, 'rc': rc, 'rlm': rc.rlm, '__name__': '__rc_payload__', '__doc__': None}",
     "_code = compile(_src, 'payload.py', 'exec')",
     "exec(_code, _sandbox)",
     "",
   ].join("\n");
+}
+
+/** 브로커 공유 문맥 — runPython(1회성) 과 ReplSession(영구 REPL) 이 **동일한 게이트**를 쓴다. */
+interface BrokerCtx {
+  token: string;
+  guard: ScopeGuard;
+  base: string;
+  maxRequests: number;
+  /** 재귀 세션끼리 공유하는 절대 요청 예산. 있으면 maxRequests 대신 쓴다. */
+  budget?: { used: number; max: number };
+  jar: CookieJar;
+  proxy?: string;
+  limiter: RateLimiter;
+  auth?: Record<string, string>;
+  counters: { requests: number; blockedRequests: number };
+  onRequest?: (info: { method: string; url: string; status?: number; blocked?: string }) => void;
+}
+
+/** 예산 소진 여부: 공유 budget 이 있으면 그 한도, 없으면 세션 maxRequests. */
+function brokerBudgetExceeded(ctx: BrokerCtx): boolean {
+  return ctx.budget ? ctx.budget.used >= ctx.budget.max : ctx.counters.requests >= ctx.maxRequests;
+}
+
+function brokerCountRequest(ctx: BrokerCtx): void {
+  ctx.counters.requests++;
+  if (ctx.budget) ctx.budget.used++;
+}
+
+/** 로컬 scope-가드 브로커의 HTTP 요청 처리 — 파이썬이 직접 나가지 못하고 반드시 이 게이트를 통과한다. */
+async function handleBrokerRequest(ctx: BrokerCtx, req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  const reply = (obj: unknown, status = 200) => {
+    res.writeHead(status, { "content-type": "application/json" });
+    res.end(JSON.stringify(obj));
+  };
+  if (req.method !== "POST" || !["/req", "/tcp"].includes(req.url ?? "") || req.headers["x-rc-token"] !== ctx.token) {
+    reply({ scopeError: "브로커 인증 실패" }, 403);
+    return;
+  }
+  let raw = "";
+  for await (const chunk of req) raw += chunk;
+  let msg: { method?: string; path?: string; url?: string; headers?: Record<string, string>; body?: string; cap?: number; redirect?: "manual" | "follow" };
+  try {
+    msg = JSON.parse(raw || "{}");
+  } catch {
+    reply({ scopeError: "잘못된 요청(JSON 파싱 실패)" });
+    return;
+  }
+
+  if (req.url === "/tcp") {
+    await handleTcp(ctx, msg as { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply);
+    return;
+  }
+
+  if (brokerBudgetExceeded(ctx)) {
+    ctx.counters.blockedRequests++;
+    reply({ scopeError: `요청 예산 초과(${ctx.budget ? ctx.budget.max : ctx.maxRequests}) — 무한/폭주 루프 방지` });
+    return;
+  }
+
+  // 대상 URL 확정: path 면 대상 base 에 붙이고, 절대 url 이면 그 호스트로.
+  let targetUrl: URL;
+  try {
+    targetUrl = msg.url ? new URL(msg.url) : new URL((msg.path ?? "/").startsWith("/") ? ctx.base + (msg.path ?? "/") : ctx.base + "/" + (msg.path ?? ""));
+  } catch {
+    reply({ scopeError: "잘못된 URL" });
+    return;
+  }
+  const port = targetUrl.port ? Number(targetUrl.port) : targetUrl.protocol === "https:" ? 443 : 80;
+
+  // ★ 안전 핵심: 실제 요청 직전 ScopeGuard 재확인(우회 불가). exploit intent 로 판정.
+  const decision = ctx.guard.check({ host: targetUrl.hostname, port, intent: "exploit" });
+  if (!decision.allowed) {
+    ctx.counters.blockedRequests++;
+    ctx.onRequest?.({ method: msg.method ?? "GET", url: targetUrl.toString(), blocked: decision.reason });
+    reply({ scopeError: `scope 차단: ${decision.reason}` });
+    return;
+  }
+
+  try {
+    const headers = { ...(ctx.auth ?? {}), ...(msg.headers ?? {}) };
+    const r = await httpRequest(targetUrl.toString(), {
+      method: msg.method ?? "GET",
+      headers,
+      body: msg.body,
+      cap: Math.min(msg.cap ?? 6000, 20000),
+      redirect: msg.redirect ?? "manual",
+      // ★ 안전 핵심: redirect='follow' 로 cross-origin 3xx 를 따라갈 때, 각 다음 홉을
+      // ScopeGuard 로 재검증한다(우회 불가). 최초 URL 만 검사하고 내부에서 리다이렉트를
+      // 따라가면 scope 밖 호스트(내부/메타데이터)에 도달할 수 있으므로, per-hop 게이트를 건다.
+      scopeCheck: (host, port) => ctx.guard.check({ host, port, intent: "exploit" }).allowed,
+      // 연결 시점 IP 검증: 호스트명이 내부/사설 IP 로 해석되거나 rebinding 되면 차단.
+      validateIp: (host, ip) => ctx.guard.checkResolvedIp(host, ip).allowed,
+      proxy: ctx.proxy,
+      jar: ctx.jar,
+      limiter: ctx.limiter,
+      timeoutMs: 8000,
+      retries: 1,
+    });
+    brokerCountRequest(ctx);
+    ctx.onRequest?.({ method: msg.method ?? "GET", url: targetUrl.toString(), status: r.status });
+    reply({ status: r.status, headers: r.headers, body: r.body, url: r.url });
+  } catch (e) {
+    brokerCountRequest(ctx);
+    reply({ status: 0, headers: {}, body: "", url: targetUrl.toString(), error: String((e as Error).message) });
+  }
+}
+
+/** /tcp: 인가 대상에 대한 원시 TCP one-shot 조사(banner/맞춤 프로토콜). HTTP 와 동일 게이트. */
+async function handleTcp(ctx: BrokerCtx, msg: { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply: (obj: unknown, status?: number) => void): Promise<void> {
+  const host = String(msg.host ?? "");
+  const port = Number(msg.port);
+  if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+    reply({ scopeError: "잘못된 host/port" });
+    return;
+  }
+  const timeoutMs = Math.min(Math.max(Number(msg.timeout) || 5, 1), 30) * 1000;
+  const readCap = Math.min(Math.max(Number(msg.read) || 4096, 1), 16384);
+  if (brokerBudgetExceeded(ctx)) {
+    ctx.counters.blockedRequests++;
+    reply({ scopeError: `요청 예산 초과(${ctx.budget ? ctx.budget.max : ctx.maxRequests}) — 무한/폭주 루프 방지` });
+    return;
+  }
+
+  // ★ 안전 핵심: HTTP 와 동일하게 실제 연결 직전 ScopeGuard 재확인(우회 불가).
+  const decision = ctx.guard.check({ host, port, intent: "exploit" });
+  if (!decision.allowed) {
+    ctx.counters.blockedRequests++;
+    ctx.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, blocked: decision.reason });
+    reply({ scopeError: `scope 차단: ${decision.reason}` });
+    return;
+  }
+
+  let address: string;
+  try {
+    const ips = await new Promise<Array<{ address: string; family: number }>>((resolve, reject) =>
+      dnsLookup(host, { all: true }, (err, addrs) => (err ? reject(err) : resolve(addrs))),
+    );
+    const ok = ips.find((a) => ctx.guard.checkResolvedIp(host, a.address).allowed);
+    if (!ok) {
+      ctx.counters.blockedRequests++;
+      reply({ scopeError: `scope 차단: ${host} 가 인가 IP 로 해석되지 않습니다` });
+      return;
+    }
+    address = ok.address;
+  } catch (e) {
+    reply({ error: `DNS 실패: ${(e as Error).message}` });
+    return;
+  }
+
+  // one-shot 프로브: payload 있으면 half-close(end) 로 전송 후 응답 대기, 없으면 banner 대기.
+  const data = typeof msg.b64data === "string" ? Buffer.from(msg.b64data, "base64") : Buffer.alloc(0);
+  const sock = net.connect({ host: address, port });
+  const chunks: Buffer[] = [];
+  let settled = false;
+  let drain: NodeJS.Timeout | null = null;
+  const killer = setTimeout(() => finish(new Error("timeout")), timeoutMs);
+  sock.on("connect", () => {
+    if (data.length) sock.end(data);
+    else sock.write(Buffer.alloc(0));
+  });
+  sock.on("data", (c: Buffer) => {
+    if (settled) return;
+    chunks.push(c);
+    const total = chunks.reduce((n, b) => n + b.length, 0);
+    if (total >= readCap) return finish();
+    if (drain) clearTimeout(drain);
+    drain = setTimeout(() => finish(), 250); // 첫 응답 이후 250ms 여유 수신
+  });
+  sock.on("error", (e) => finish(e));
+  sock.on("close", () => finish());
+  function finish(err?: Error) {
+    if (settled) return;
+    settled = true;
+    clearTimeout(killer);
+    if (drain) clearTimeout(drain);
+    sock.destroy();
+    brokerCountRequest(ctx);
+    ctx.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, status: err ? 0 : 200 });
+    if (err) reply({ error: String(err.message) });
+    else reply({ b64reply: Buffer.concat(chunks).toString("base64") });
+  }
+}
+
+/** OS 격리 정책 해석 — runPython/ReplSession 공용. fail-closed 판정은 호출자가 한다. */
+async function resolveIsolation(opts: {
+  isolation?: "required" | "best-effort" | "off";
+  trusted?: boolean;
+}): Promise<{ backend: IsolationBackend | null; warning?: string }> {
+  const isolationMode = opts.isolation ?? "required";
+  if (opts.trusted || isolationMode === "off") return { backend: null };
+  const backend = await detectIsolation();
+  if (!backend && isolationMode === "best-effort") {
+    return {
+      backend: null,
+      warning: "OS 격리 백엔드 없음 — in-process AST 샌드박스만으로 실행합니다(best-effort). 신뢰불가 코드에는 권장하지 않습니다.",
+    };
+  }
+  return { backend };
+}
+
+/** ReplSession.step() 결과 — 1회성 PyResult 에 REPL 전용 필드 추가. */
+export interface ReplStepResult extends PyResult {
+  /** 코드가 예외로 죽었을 때의 예외 요약(print 가 아니고 crash). */
+  exc?: string;
+  /** REPL 이 타임아웃으로 재시작되어 변수가 초기화됐는가. */
+  reset?: boolean;
+}
+
+export interface ReplSessionOpts extends PyRunOpts {
+  /** 영구 REPL 변수 ctx(prompt-as-variable). 모델이 ctx_get/ctx_set 으로 읽고 쓴다. */
+  ctx?: Record<string, unknown>;
+  /** 파이썬의 rlm(prompt, max_steps) 재귀 서브콜마다 호출된다 → 결과 문자열을 돌려주면 값으로 반환된다. */
+  onRlm?: (req: { prompt: string; max_steps: number }) => Promise<string>;
+  /** rc.memo(key, text) 마다 호출된다(자기발전 기억 수집). */
+  onMemo?: (m: ReplMem) => void;
+}
+
+/**
+ * ReplSession — RLM(Recursive Language Model) 방식의 **영구 파이썬 REPL**.
+ *
+ * runPython(1회성) 과 달리 파이썬 프로세스가 살아 있어 globals(변수·ctx) 가 스텝을 넘어
+ * 지속된다(prompt-as-variable). 파이썬 코드는 rlm() 재귀 서브콜(##RC_RLM## → 엔진이 하위
+ * 에이전트 실행 → 결과를 stdin 으로 회신)과 rc.memo()(##RC_MEMO##) 를 쓸 수 있다.
+ * 모든 대상 통신은 runPython 과 **동일한 BrokerCtx 게이트**를 강제한다(우회 불가).
+ */
+export class ReplSession {
+  private child: ChildProcess | null = null;
+  private stepBuf: string[] = [];
+  private stepResolve: ((lines: string[]) => void) | null = null;
+  private stepTimer: NodeJS.Timeout | null = null;
+  private closed = false;
+  private stderrTail = "";
+
+  private constructor(
+    private readonly opts: ReplSessionOpts,
+    private readonly backend: IsolationBackend | null,
+    private readonly dir: string,
+    private readonly runnerFile: string,
+    private readonly server: http.Server,
+    private readonly ctxBroker: BrokerCtx,
+    private readonly brokerUrl: string,
+  ) {}
+
+  static async create(opts: ReplSessionOpts): Promise<ReplSession> {
+    const maxRequests = opts.maxRequests ?? 80;
+    const token = randomBytes(24).toString("hex");
+    const limiter = new RateLimiter(opts.guard.requestsPerSecond);
+    const jar: CookieJar = opts.jar ?? newJar();
+    const scheme = opts.target.port === 443 || opts.target.port === 8443 ? "https" : "http";
+    const base = `${scheme}://${opts.target.host}${opts.target.port ? `:${opts.target.port}` : ""}`;
+    const counters = { requests: 0, blockedRequests: 0 };
+    const ctxBroker: BrokerCtx = {
+      token,
+      guard: opts.guard,
+      base,
+      maxRequests,
+      budget: opts.budget,
+      jar,
+      proxy: opts.proxy,
+      limiter,
+      auth: opts.auth,
+      onRequest: opts.onRequest,
+      counters,
+    };
+    const server = http.createServer((req, res) => void handleBrokerRequest(ctxBroker, req, res));
+    await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
+    const brokerPort = (server.address() as AddressInfo).port;
+    const brokerUrl = `http://127.0.0.1:${brokerPort}`;
+    const iso = await resolveIsolation(opts);
+    const dir = await fs.mkdtemp(path.join(os.tmpdir(), "rc-repl-"));
+    const runnerFile = path.join(dir, "runner.py");
+    await fs.writeFile(runnerFile, runnerScript(), "utf8");
+    const session = new ReplSession(opts, iso.backend, dir, runnerFile, server, ctxBroker, brokerUrl);
+    session.spawnChild();
+    return session;
+  }
+
+  private spawnChild(): void {
+    const baseArgv = [this.opts.python ?? "python3", "-I", this.runnerFile];
+    const argv = this.backend ? this.backend.wrap(baseArgv, this.dir) : baseArgv;
+    const child = spawn(argv[0], argv.slice(1), {
+      cwd: this.dir,
+      env: {
+        // 최소 환경 + 브로커 접속 정보. accidental egress 는 죽은 프록시로 fail-closed,
+        // 단 루프백(브로커)은 no_proxy 로 직결.
+        PATH: process.env.PATH,
+        RC_BROKER: this.brokerUrl,
+        RC_TOKEN: this.ctxBroker.token,
+        RC_TARGET: `${this.opts.target.host}:${this.opts.target.port ?? ""}`,
+        RC_REPL: "1",
+        RC_CTX: Buffer.from(JSON.stringify(this.opts.ctx ?? {})).toString("base64"),
+        HTTP_PROXY: "http://127.0.0.1:1",
+        HTTPS_PROXY: "http://127.0.0.1:1",
+        NO_PROXY: "127.0.0.1,localhost",
+        PYTHONUNBUFFERED: "1",
+        PYTHONDONTWRITEBYTECODE: "1",
+        // Windows: 한국어/중국어 로케일에서 stdout 이 cp949/cp936 로 나가 한글이
+        // 깨지는 현상 방지 — 항상 UTF-8 로 출력한다.
+        PYTHONIOENCODING: "utf-8",
+        PYTHONUTF8: "1",
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+      // Windows: python 이 별도 콘솔 창을 새로 띄워 깜빡이는 현상 방지(CREATE_NO_WINDOW)
+      windowsHide: true,
+    });
+    this.child = child;
+    const rl = readline.createInterface({ input: child.stdout });
+    rl.on("line", (line) => this.onStdoutLine(line));
+    child.stderr.on("data", (c) => {
+      this.stderrTail = (this.stderrTail + c.toString()).slice(-4000);
+    });
+    child.on("error", (err) => {
+      this.stderrTail += `\n[REPL] python 실행 실패: ${err.message}`;
+      this.child = null;
+    });
+  }
+
+  private onStdoutLine(line: string): void {
+    if (this.closed) return;
+    const l = line.replace(/\r$/, ""); // Windows CRLF 정리
+    if (l.startsWith("##RC_RLM## ")) {
+      void this.handleRlm(l);
+      return;
+    }
+    this.stepBuf.push(l);
+    if (l === "##RC_RESULT##") {
+      if (this.stepTimer) clearTimeout(this.stepTimer);
+      const lines = this.stepBuf;
+      this.stepBuf = [];
+      const resolve = this.stepResolve;
+      this.stepResolve = null;
+      resolve?.(lines);
+    }
+  }
+
+  /** ##RC_RLM## 요청을 처리: 하위 에이전트 실행 후 결과를 파이썬 stdin 으로 회신. */
+  private async handleRlm(line: string): Promise<void> {
+    let text = "[rlm] 하위 에이전트 결과 없음";
+    try {
+      const body = Buffer.from(line.slice("##RC_RLM## ".length).trim(), "base64").toString("utf8");
+      const req = JSON.parse(body);
+      if (this.opts.onRlm) {
+        text = await this.opts.onRlm({ prompt: String(req.prompt ?? ""), max_steps: Number(req.max_steps) || 8 });
+      }
+    } catch (e) {
+      text = `[rlm] 하위 에이전트 오류: ${(e as Error).message}`;
+    }
+    if (!this.child?.stdin?.writable) return;
+    this.child.stdin.write("##RC_RLM_RESULT## " + Buffer.from(text, "utf8").toString("base64") + "\n");
+  }
+
+  /** REPL 에 코드 한 스텝을 보내고 결과를 기다린다(순차 실행 전용). */
+  async step(code: string): Promise<ReplStepResult> {
+    if (this.closed || !this.child) throw new Error("REPL 세션이 닫혔습니다");
+    if (this.stepResolve) throw new Error("이전 스텝이 아직 실행 중입니다(순차 실행만 지원)");
+    const timeoutMs = this.opts.timeoutMs ?? 20000;
+    const counters = this.ctxBroker.counters;
+    const isoInfo = { backend: this.backend?.name ?? null };
+
+    // 1차 정적 스캔 — 브로커 게이트와 동일하게 모든 실행 경로에서 fail-closed.
+    const danger = scanDanger(code);
+    if (danger) {
+      return { ok: false, stdout: "", stderr: "", exitCode: null, timedOut: false, requests: counters.requests, blockedRequests: counters.blockedRequests, findings: [], logs: [], danger };
+    }
+
+    return await new Promise<ReplStepResult>((resolve) => {
+      let done = false;
+      const finish = (r: ReplStepResult) => {
+        if (done) return;
+        done = true;
+        if (this.stepTimer) clearTimeout(this.stepTimer);
+        resolve(r);
+      };
+      this.stepResolve = (lines) => {
+        const raw = lines.join("\n");
+        const { findings, logs, clean, danger, syntax, memos, exc } = parseOutput(raw);
+        for (const m of memos ?? []) this.opts.onMemo?.(m);
+        finish({
+          ok: !danger && !syntax && !exc,
+          stdout: clean,
+          stderr: this.stderrTail,
+          exitCode: null,
+          timedOut: false,
+          requests: counters.requests,
+          blockedRequests: counters.blockedRequests,
+          findings,
+          logs,
+          ...(memos?.length ? { memos } : {}),
+          isolation: isoInfo,
+          ...(danger ? { danger } : {}),
+          ...(syntax ? { syntax } : {}),
+          ...(exc ? { exc } : {}),
+        });
+      };
+      this.stepTimer = setTimeout(() => {
+        this.stderrTail += "\n[REPL] 스텝 타임아웃 — 프로세스 재시작(변수 초기화됨)";
+        this.killChild();
+        this.spawnChild();
+        const partial = this.stepBuf.join("\n");
+        this.stepBuf = [];
+        finish({
+          ok: false, stdout: partial, stderr: this.stderrTail, exitCode: null, timedOut: true,
+          requests: counters.requests, blockedRequests: counters.blockedRequests,
+          findings: [], logs: [], isolation: isoInfo, reset: true,
+        });
+      }, timeoutMs);
+      this.child!.stdin!.write("##RC_RUN## " + Buffer.from(code, "utf8").toString("base64") + "\n");
+    });
+  }
+
+  private killChild(): void {
+    if (this.child) {
+      try {
+        this.child.kill("SIGKILL");
+      } catch {
+        /* 이미 종료 */
+      }
+      this.child = null;
+    }
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    this.killChild();
+    this.server.close();
+    await fs.rm(this.dir, { recursive: true, force: true }).catch(() => {});
+  }
 }
 
 /**
@@ -349,24 +850,19 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
   //      프롬프트 인젝션으로 흘러들 수 있음). in-process AST 샌드박스가 탈출되면 호스트 RCE 가
   //      되므로, 신뢰불가 코드는 "동작이 검증된" OS 격리 백엔드가 있어야만 실행한다.
   const isolationMode = opts.isolation ?? "required";
-  const trusted = opts.trusted ?? false;
   let backend: IsolationBackend | null = null;
   let isolationWarning: string | undefined;
-  if (!trusted && isolationMode !== "off") {
-    backend = await detectIsolation();
-    if (!backend) {
-      if (isolationMode === "required") {
-        return {
-          ok: false, stdout: "", stderr: "", exitCode: null, timedOut: false, requests: 0, blockedRequests: 0, findings: [], logs: [],
-          danger:
-            "OS 격리 백엔드(bwrap 등)를 사용할 수 없어 신뢰불가(라이브 모델) 코드 실행을 거부합니다(fail-closed). " +
-            "비특권 네임스페이스가 허용된 호스트에서 실행하거나, 신뢰되는 오프라인 코드에 한해 isolation:'off' 를 명시하세요.",
-          isolation: { backend: null },
-        };
-      }
-      isolationWarning =
-        "OS 격리 백엔드 없음 — in-process AST 샌드박스만으로 실행합니다(best-effort). 신뢰불가 코드에는 권장하지 않습니다.";
-    }
+  const iso = await resolveIsolation({ isolation: isolationMode, trusted: opts.trusted });
+  backend = iso.backend;
+  isolationWarning = iso.warning;
+  if (!backend && !opts.trusted && isolationMode === "required") {
+    return {
+      ok: false, stdout: "", stderr: "", exitCode: null, timedOut: false, requests: 0, blockedRequests: 0, findings: [], logs: [],
+      danger:
+        "OS 격리 백엔드(bwrap 등)를 사용할 수 없어 신뢰불가(라이브 모델) 코드 실행을 거부합니다(fail-closed). " +
+        "비특권 네임스페이스가 허용된 호스트에서 실행하거나, 신뢰되는 오프라인 코드에 한해 isolation:'off' 를 명시하세요.",
+      isolation: { backend: null },
+    };
   }
 
   const token = randomBytes(24).toString("hex");
@@ -376,169 +872,26 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
   const jar: CookieJar = opts.jar ?? newJar();
   const scheme = opts.target.port === 443 || opts.target.port === 8443 ? "https" : "http";
   const base = `${scheme}://${opts.target.host}${opts.target.port ? `:${opts.target.port}` : ""}`;
-  let requests = 0;
-  let blockedRequests = 0;
+  const counters = { requests: 0, blockedRequests: 0 };
 
   // 2) 로컬 scope-가드 브로커 — 파이썬의 모든 대상 요청을 대신 수행한다.
+  //    공유 BrokerCtx: 1회성 실행과 REPL 세션이 **동일한 게이트 경로**를 강제한다.
+  const ctx: BrokerCtx = {
+    token,
+    guard: opts.guard,
+    base,
+    maxRequests,
+    budget: opts.budget,
+    jar,
+    proxy: opts.proxy,
+    limiter,
+    auth: opts.auth,
+    onRequest: opts.onRequest,
+    counters,
+  };
   const server = http.createServer((req, res) => {
-    void handleBrokerRequest(req, res);
+    void handleBrokerRequest(ctx, req, res);
   });
-
-  async function handleBrokerRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
-    const reply = (obj: unknown, status = 200) => {
-      res.writeHead(status, { "content-type": "application/json" });
-      res.end(JSON.stringify(obj));
-    };
-    if (req.method !== "POST" || !["/req", "/tcp"].includes(req.url ?? "") || req.headers["x-rc-token"] !== token) {
-      reply({ scopeError: "브로커 인증 실패" }, 403);
-      return;
-    }
-    let raw = "";
-    for await (const chunk of req) raw += chunk;
-    let msg: { method?: string; path?: string; url?: string; headers?: Record<string, string>; body?: string; cap?: number; redirect?: "manual" | "follow" };
-    try {
-      msg = JSON.parse(raw || "{}");
-    } catch {
-      reply({ scopeError: "잘못된 요청(JSON 파싱 실패)" });
-      return;
-    }
-
-    if (req.url === "/tcp") {
-      await handleTcp(msg as { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply);
-      return;
-    }
-
-    if (requests >= maxRequests) {
-      blockedRequests++;
-      reply({ scopeError: `요청 예산 초과(${maxRequests}) — 무한/폭주 루프 방지` });
-      return;
-    }
-
-    // 대상 URL 확정: path 면 대상 base 에 붙이고, 절대 url 이면 그 호스트로.
-    let targetUrl: URL;
-    try {
-      targetUrl = msg.url ? new URL(msg.url) : new URL((msg.path ?? "/").startsWith("/") ? base + (msg.path ?? "/") : base + "/" + (msg.path ?? ""));
-    } catch {
-      reply({ scopeError: "잘못된 URL" });
-      return;
-    }
-    const port = targetUrl.port ? Number(targetUrl.port) : targetUrl.protocol === "https:" ? 443 : 80;
-
-    // ★ 안전 핵심: 실제 요청 직전 ScopeGuard 재확인(우회 불가). exploit intent 로 판정.
-    const decision = opts.guard.check({ host: targetUrl.hostname, port, intent: "exploit" });
-    if (!decision.allowed) {
-      blockedRequests++;
-      opts.onRequest?.({ method: msg.method ?? "GET", url: targetUrl.toString(), blocked: decision.reason });
-      reply({ scopeError: `scope 차단: ${decision.reason}` });
-      return;
-    }
-
-    try {
-      const headers = { ...(opts.auth ?? {}), ...(msg.headers ?? {}) };
-      const r = await httpRequest(targetUrl.toString(), {
-        method: msg.method ?? "GET",
-        headers,
-        body: msg.body,
-        cap: Math.min(msg.cap ?? 6000, 20000),
-        redirect: msg.redirect ?? "manual",
-        // ★ 안전 핵심: redirect='follow' 로 cross-origin 3xx 를 따라갈 때, 각 다음 홉을
-        // ScopeGuard 로 재검증한다(우회 불가). 최초 URL 만 검사하고 내부에서 리다이렉트를
-        // 따라가면 scope 밖 호스트(내부/메타데이터)에 도달할 수 있으므로, per-hop 게이트를 건다.
-        scopeCheck: (host, port) => opts.guard.check({ host, port, intent: "exploit" }).allowed,
-        // 연결 시점 IP 검증: 호스트명이 내부/사설 IP 로 해석되거나 rebinding 되면 차단.
-        validateIp: (host, ip) => opts.guard.checkResolvedIp(host, ip).allowed,
-        proxy: opts.proxy,
-        jar,
-        limiter,
-        timeoutMs: 8000,
-        retries: 1,
-      });
-      requests++;
-      opts.onRequest?.({ method: msg.method ?? "GET", url: targetUrl.toString(), status: r.status });
-      reply({ status: r.status, headers: r.headers, body: r.body, url: r.url });
-    } catch (e) {
-      requests++;
-      reply({ status: 0, headers: {}, body: "", url: targetUrl.toString(), error: String((e as Error).message) });
-    }
-  }
-
-  // ── /tcp: 인가 대상에 대한 원시 TCP one-shot 조사(banner/맞춤 프로토콜) ──
-  // HTTP 와 동일하게 ScopeGuard 로 host:port 를 검증하고, 호스트명이 실제 인가 IP 로
-  // 해석되는지(rebinding/SSRF 방지)까지 확인한 뒤에만 연결한다.
-  async function handleTcp(msg: { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply: (obj: unknown, status?: number) => void): Promise<void> {
-    const host = String(msg.host ?? "");
-    const port = Number(msg.port);
-    if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
-      reply({ scopeError: "잘못된 host/port" });
-      return;
-    }
-    const timeoutMs = Math.min(Math.max(Number(msg.timeout) || 5, 1), 30) * 1000;
-    const readCap = Math.min(Math.max(Number(msg.read) || 4096, 1), 16384);
-    if (requests >= maxRequests) {
-      blockedRequests++;
-      reply({ scopeError: `요청 예산 초과(${maxRequests}) — 무한/폭주 루프 방지` });
-      return;
-    }
-
-    // ★ 안전 핵심: HTTP 와 동일하게 실제 연결 직전 ScopeGuard 재확인(우회 불가).
-    const decision = opts.guard.check({ host, port, intent: "exploit" });
-    if (!decision.allowed) {
-      blockedRequests++;
-      opts.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, blocked: decision.reason });
-      reply({ scopeError: `scope 차단: ${decision.reason}` });
-      return;
-    }
-
-    let address: string;
-    try {
-      const ips = await new Promise<Array<{ address: string; family: number }>>((resolve, reject) =>
-        dnsLookup(host, { all: true }, (err, addrs) => (err ? reject(err) : resolve(addrs))),
-      );
-      const ok = ips.find((a) => opts.guard.checkResolvedIp(host, a.address).allowed);
-      if (!ok) {
-        blockedRequests++;
-        reply({ scopeError: `scope 차단: ${host} 가 인가 IP 로 해석되지 않습니다` });
-        return;
-      }
-      address = ok.address;
-    } catch (e) {
-      reply({ error: `DNS 실패: ${(e as Error).message}` });
-      return;
-    }
-
-    // one-shot 프로브: payload 있으면 half-close(end) 로 전송 후 응답 대기, 없으면 banner 대기.
-    const data = typeof msg.b64data === "string" ? Buffer.from(msg.b64data, "base64") : Buffer.alloc(0);
-    const sock = net.connect({ host: address, port });
-    const chunks: Buffer[] = [];
-    let settled = false;
-    let drain: NodeJS.Timeout | null = null;
-    const killer = setTimeout(() => finish(new Error("timeout")), timeoutMs);
-    sock.on("connect", () => {
-      if (data.length) sock.end(data);
-      else sock.write(Buffer.alloc(0));
-    });
-    sock.on("data", (c: Buffer) => {
-      if (settled) return;
-      chunks.push(c);
-      const total = chunks.reduce((n, b) => n + b.length, 0);
-      if (total >= readCap) return finish();
-      if (drain) clearTimeout(drain);
-      drain = setTimeout(() => finish(), 250); // 첫 응답 이후 250ms 여유 수신
-    });
-    sock.on("error", (e) => finish(e));
-    sock.on("close", () => finish());
-    function finish(err?: Error) {
-      if (settled) return;
-      settled = true;
-      clearTimeout(killer);
-      if (drain) clearTimeout(drain);
-      sock.destroy();
-      requests++;
-      opts.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, status: err ? 0 : 200 });
-      if (err) reply({ error: String(err.message) });
-      else reply({ b64reply: Buffer.concat(chunks).toString("base64") });
-    }
-  }
 
   await new Promise<void>((r) => server.listen(0, "127.0.0.1", r));
   const brokerPort = (server.address() as AddressInfo).port;
@@ -604,8 +957,8 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
           stderr: `python 실행 실패: ${err.message}`,
           exitCode: null,
           timedOut,
-          requests,
-          blockedRequests,
+          requests: counters.requests,
+          blockedRequests: counters.blockedRequests,
           findings: [],
           logs: [],
           isolation: { backend: backend?.name ?? null, warning: isolationWarning },
@@ -623,8 +976,8 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
           stderr,
           exitCode: codeExit,
           timedOut,
-          requests,
-          blockedRequests,
+          requests: counters.requests,
+          blockedRequests: counters.blockedRequests,
           findings,
           logs,
           isolation: { backend: backend?.name ?? null, warning: isolationWarning },
@@ -639,14 +992,24 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
   }
 }
 
-/** stdout 에서 ##RC_FINDING##/##RC_LOG##/##RC_DANGER##/##RC_SYNTAX## 라인을 구조화하고,
- * 나머지는 표시용으로. */
-function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; clean: string; danger?: string; syntax?: string } {
+/** stdout 에서 ##RC_FINDING##/##RC_LOG##/##RC_DANGER##/##RC_SYNTAX##/##RC_MEMO##/##RC_EXC##
+ * 라인을 구조화하고, 나머지는 표시용으로. */
+function parseOutput(stdout: string): {
+  findings: PyFinding[];
+  logs: string[];
+  clean: string;
+  danger?: string;
+  syntax?: string;
+  memos?: ReplMem[];
+  exc?: string;
+} {
   const findings: PyFinding[] = [];
   const logs: string[] = [];
+  const memos: ReplMem[] = [];
   const rest: string[] = [];
   let danger: string | undefined;
   let syntax: string | undefined;
+  let exc: string | undefined;
   for (const raw of stdout.split("\n")) {
     const line = raw.replace(/\r$/, ""); // Windows CRLF 정리
     if (line.startsWith("##RC_FINDING## ")) {
@@ -665,9 +1028,22 @@ function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; c
     } else if (line.startsWith("##RC_DANGER## ")) {
       // runner 의 AST 허용목록 검증이 실행을 거부한 사유(심층방어 2차 계층).
       danger = danger ?? line.slice("##RC_DANGER## ".length);
+    } else if (line.startsWith("##RC_MEMO## ")) {
+      // self-improving 기억(REPL 전용).
+      try {
+        const o = JSON.parse(Buffer.from(line.slice("##RC_MEMO## ".length).trim(), "base64").toString("utf8"));
+        if (o.key) memos.push({ key: String(o.key), text: String(o.text ?? "") });
+      } catch {
+        /* 손상된 라인은 무시 */
+      }
+    } else if (line.startsWith("##RC_EXC## ")) {
+      // REPL 스텝 중 코드 예외(정책 위반 아님 — 실행은 됐지만 crash).
+      exc = exc ?? line.slice("##RC_EXC## ".length);
+    } else if (line === "##RC_RESULT##") {
+      // REPL 스텝 경계 마커(프로토콜) — stdout 에 포함하지 않는다.
     } else {
       rest.push(line);
     }
   }
-  return { findings, logs, clean: rest.join("\n").trim(), danger, syntax };
+  return { findings, logs, clean: rest.join("\n").trim(), danger, syntax, ...(memos.length ? { memos } : {}), ...(exc ? { exc } : {}) };
 }

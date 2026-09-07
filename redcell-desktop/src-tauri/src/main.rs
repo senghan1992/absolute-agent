@@ -836,6 +836,7 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let subcommand = match s.mode.as_str() {
         "python" => "pyrun",
         "osint" => "osint",
+        "rlm" => "rlm",
         _ => "run",
     };
     let mut args: Vec<String> = vec![
@@ -846,8 +847,8 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         provider.clone(),
         "--ndjson".into(),
     ];
-    if s.mode == "python" {
-        // pyrun(코드 작성→실행): Windows 등엔 bwrap 이 없어 required 면 fail-closed 로
+    if s.mode == "python" || s.mode == "rlm" {
+        // pyrun/rlm(코드 작성→실행): Windows 등엔 bwrap 이 없어 required 면 fail-closed 로
         // 전부 거부된다. 데스크톱은 인가 목록·ScopeGuard 브로커로 이미 게이트되어
         // 있으므로 best-effort 로 내려 실행한다(모든 HTTP 는 계속 브로커 경유).
         args.push("--isolation".into());
@@ -863,6 +864,13 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     if !s.goal.trim().is_empty() {
         args.push("--goal".into());
         args.push(s.goal.clone());
+    }
+    // rlm: 자기발전 기억 파일(rc.memo) — 세션별 파일로 다음 실행에 재주입된다.
+    if s.mode == "rlm" {
+        let mem_dir = auth::home_dir().join("memories");
+        let _ = std::fs::create_dir_all(&mem_dir);
+        args.push("--mem".into());
+        args.push(mem_dir.join(format!("{}.md", s.id)).to_string_lossy().into_owned());
     }
     if !settings.auth_path.trim().is_empty() {
         args.push("--auth".into());

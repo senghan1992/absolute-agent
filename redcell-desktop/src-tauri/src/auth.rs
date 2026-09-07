@@ -30,9 +30,9 @@ pub struct AuthList {
 
 const HEADER: &str = "# RedCell 인가 목록 — 아래에 적힌 대상만 인가됩니다.\n# 한 줄에 하나: IP / CIDR / 도메인  ·  ! 접두사 = 제외(allow 를 이김)  ·  # 주석\n# 선택 지시자:  until: YYYY-MM-DD  ·  ports: 80,443,8080\n";
 
-/// CLI 와 동일한 기본 경로: $REDCELL_HOME/authorization.list (기본 ~/.redcell/authorization.list)
-pub fn default_list_path() -> PathBuf {
-    let home = std::env::var("REDCELL_HOME")
+/// CLI 와 동일한 기본 redcell 홈: $REDCELL_HOME (기본 ~/.redcell).
+pub fn home_dir() -> PathBuf {
+    std::env::var("REDCELL_HOME")
         .ok()
         .filter(|h| !h.trim().is_empty())
         .map(PathBuf::from)
@@ -43,8 +43,12 @@ pub fn default_list_path() -> PathBuf {
                 .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
                 .map(|h| h.join(".redcell"))
         })
-        .unwrap_or_else(|| PathBuf::from("."));
-    home.join("authorization.list")
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// CLI 와 동일한 기본 경로: $REDCELL_HOME/authorization.list (기본 ~/.redcell/authorization.list)
+pub fn default_list_path() -> PathBuf {
+    home_dir().join("authorization.list")
 }
 
 /// 대상 문자열 검증 — ip-list.ts 의 classifyTarget 과 동일 규칙.

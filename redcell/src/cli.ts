@@ -29,6 +29,7 @@ import { BanditStore } from "./explore/bandit-store.js";
 import { DefaultToolBox, DEFAULT_TOOLS, OPT_IN_TOOLS } from "./tools/toolbox.js";
 import { pythonTool } from "./tools/python-tool.js";
 import { OsintAgent } from "./osint/agent.js";
+import { RlmAgent } from "./rlm/rlm-agent.js";
 import { MockModel } from "./core/mock-model.js";
 import { parseTargetMap, argsFromMap, type TargetMap } from "./core/target-map.js";
 import type { Fingerprint } from "./memory/skill-memory.js";
@@ -957,6 +958,132 @@ async function cmdOsint(args: Args): Promise<void> {
   auditFinishRun(audit, activeFindings, { command: "osint" });
 }
 
+/** 직전 세션의 RLM 기억 파일(rc.memo) 로드 — 없으면 빈 배열. */
+async function loadMemories(memPath: string | undefined): Promise<string[]> {
+  if (!memPath) return [];
+  try {
+    const md = await fs.readFile(memPath, "utf8");
+    const out: string[] = [];
+    for (const block of md.split(/\n## /)) {
+      const lines = block.split("\n");
+      const key = lines[0].trim();
+      const text = lines.slice(1).join(" ").trim();
+      if (key && text) out.push(`${key}: ${text}`);
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * cmdRlm — RLM 모드: 영구 파이썬 REPL + 재귀 서브콜(rlm()) + 자기발전 기억(rc.memo).
+ * 모든 대상 통신은 runPython 과 동일한 브로커 게이트(ScopeGuard·공유 예산·RPS)를 통과한다.
+ */
+async function cmdRlm(args: Args): Promise<void> {
+  const cfg = await loadConfig();
+  const host = str(args.flags.host);
+  if (!host) throw new Error("redcell rlm 에는 --host 가 필요합니다. 예: redcell rlm --host 127.0.0.1 --port 8080");
+  const port = args.flags.port ? Number(str(args.flags.port)) : undefined;
+  const goal = str(args.flags.goal) ?? "인가된 대상을 영구 REPL 로 재귀 탐색하고 취약점을 발견해 정리해줘";
+
+  const authPath = await findAuthPath(str(args.flags.auth), cfg);
+  const loaded = await loadAuthorization(authPath);
+  const guard = loaded.guard;
+  const audit = attachAudit(guard, args, { command: "rlm", target: { host, port }, goal, authPath });
+  const allowUnauth = !!args.flags["allow-unauth"];
+  const visual = !args.flags["no-visual"];
+
+  // 사전 scope 게이트(로그인·실행 이전) — 미인가면 종료코드 3.
+  const preflight = guard.check({ host, port, intent: "recon" });
+  if (!preflight.allowed) {
+    const banner = scopeBlockedBanner(host, port, preflight.reason);
+    console.error(banner);
+    if (args.flags.ndjson) process.stdout.write(JSON.stringify({ type: "blocked", text: preflight.reason, target: { host, port } }) + "\n");
+    else console.log("\n" + banner + "\n");
+    audit?.end({ verdict: "scope-blocked", reason: preflight.reason });
+    process.exit(3);
+  }
+
+  const proxy = str(args.flags.proxy) ?? process.env.REDCELL_PROXY;
+  let session: SessionContext | undefined;
+  const loginCfg = guard.loginConfig;
+  if (loginCfg) {
+    const scheme = port === 443 || port === 8443 ? "https" : "http";
+    const base = `${scheme}://${host}${port ? `:${port}` : ""}`;
+    const lr = await performLogin(base, loginCfg, guard.requestsPerSecond, proxy, (h, p) => guard.check({ host: h, port: p, intent: "recon" }).allowed);
+    console.error(`[login] ${lr.detail}`);
+    session = { auth: lr.headers, jar: lr.jar, proxy };
+  } else if (proxy) {
+    session = { proxy };
+  }
+
+  let model: ModelAdapter = new MockCoder();
+  let label = "mock-coder";
+  const provider = str(args.flags.provider);
+  if (provider !== "mock") {
+    try {
+      const r = resolveModel(registry, cfg, { provider, model: str(args.flags.model) });
+      model = r.model;
+      label = `${r.provider}:${r.modelId}${r.credentialSource ? ` (${r.credentialSource})` : ""}`;
+    } catch (e) {
+      if (args.flags.mock) {
+        model = new MockCoder();
+        label = "mock-coder(fallback)";
+      } else {
+        throw new Error(`${(e as Error).message}\n오프라인 검증은 --provider mock 또는 --mock 를 쓰세요.`);
+      }
+    }
+  }
+
+  // 자기발전 기억 파일(rc.memo) — 기본 ~/.redcell/memories/<호스트>.md
+  const memPath = str(args.flags.mem) ?? path.join(redcellHome(), "memories", `${host.replace(/[^\w.-]/g, "_")}.md`);
+  const memories = await loadMemories(memPath);
+
+  const root = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
+  console.error(`[model] rlm-agent · ${label}`);
+  console.error(`[scope] ${authPath}${loaded.kind === "ip-list" ? " (간단 IP 목록)" : ""}`);
+  if (memories.length) console.error(`[기억] 이전 세션 기억 ${memories.length}건 재주입 (${memPath})`);
+
+  const ndjson = !!args.flags.ndjson;
+  if (ndjson) process.stdout.write(JSON.stringify({ type: "meta", model: label, mode: "rlm", authPath, target: { host, port }, goal, memories: memories.length }) + "\n");
+  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+
+  const isoFlag = str(args.flags.isolation);
+  const isolation: "required" | "best-effort" | "off" =
+    isoFlag === "off" || isoFlag === "best-effort" || isoFlag === "required" ? isoFlag : "required";
+  if (isoFlag && isoFlag !== isolation) throw new Error(`--isolation 값은 required|best-effort|off 중 하나여야 합니다(받은 값: ${isoFlag}).`);
+
+  try {
+    await fs.mkdir(path.dirname(memPath), { recursive: true });
+  } catch {
+    /* 메모리 디렉터리 생성 실패는 무시(기록만 안 됨) */
+  }
+
+  const agent = new RlmAgent(guard, model, {
+    maxIterations: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : 10,
+    maxDepth: args.flags.depth ? Number(str(args.flags.depth)) : 3,
+    stepTimeoutMs: args.flags["step-timeout"] ? Number(str(args.flags["step-timeout"])) : 20000,
+    budget: { used: 0, max: args.flags.budget ? Number(str(args.flags.budget)) : 240 },
+    memories,
+    memoryFile: memPath,
+    onEvent: emit,
+    session,
+    isolation,
+  });
+  const log = await agent.run({ host, port }, goal);
+
+  let activeFindings = log.findings;
+  if (!ndjson) {
+    const gov = await governReport(guard, args, root, allowUnauth, { findings: log.findings });
+    activeFindings = gov.activeFindings;
+    log.findings = gov.activeFindings;
+    if (visual) console.log("\n" + toVisualBoard(log, { waived: gov.reportOpts.waived }));
+    console.log("\n" + toMarkdown(log, gov.reportOpts) + "\n");
+  }
+  auditFinishRun(audit, activeFindings, { command: "rlm", isolation });
+}
+
 function help(): void {
   console.log(`RedCell — 자기발전형 화이트해커 에이전트 (prime-agent 기반)
 
@@ -992,6 +1119,16 @@ Commands:
                  [--auto]  모델 없이 결정적 전체 다이그(오프라인/빠른 스윔)
                  [--max-actions <n>] 모델의 심화 다이그 선택 횟수 [--ndjson] [--no-visual]
                  같은 오리진만 GET 관측(robots/sitemap 얻어걸림), 전 요청 ScopeGuard 경유
+  rlm          RLM(재귀 언어 모델) 모드: 영구 파이썬 REPL + 재귀 서브콜 + 자기발전 기억
+                 --host <h> [--port <p>] [--goal <g>]  작업/목표를 자연어로
+                 [--provider <name>] [--model <id>] [--auth <path>] [--proxy <url>]
+                 [--mem <path>]  rc.memo() 기억 파일(기본 ~/.redcell/memories/<호스트>.md,
+                                 이전 세션 기억이 자동 재주입 — continual harness)
+                 [--depth <n>]  rlm() 재귀 깊이 상한(기본 3) [--budget <n>] 전체 요청 예산(기본 240)
+                 [--max-actions <n>] REPL 스텝 수(기본 10) [--step-timeout <ms>]
+                 [--isolation required|best-effort|off] OS 격리 정책(기본 required)
+                 [--ndjson] [--no-visual]
+                 REPL 변수 ctx(prompt-as-variable) 지속 · rlm('지시') 함수처럼 재귀 위임
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
   models       프로바이더별 기본 모델 표시
   scope        인가(scope) 상태 확인   [--auth <path>]
@@ -1031,6 +1168,7 @@ async function main(): Promise<void> {
     case "run": return void (await cmdRun(args));
     case "pyrun": return void (await cmdPyRun(args));
     case "osint": return void (await cmdOsint(args));
+    case "rlm": return void (await cmdRlm(args));
     case "providers": return void (await cmdProviders());
     case "models": return void (await cmdModels());
     case "scope": return void (await cmdScope(args));

@@ -75,9 +75,10 @@
             <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더">
               <option value="">— provider 선택 —</option>
             </select>
-            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스, python=absolute-agent(코드 작성→실행 반복), osint=웹 뒤지기(정보 수집), prime=prime-agent(pi) 직접 실행 — 인가 목록은 동일하게 적용">
+            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스, python=absolute-agent(코드 작성→실행 반복), rlm=RLM(영구 REPL + 재귀 서브콜 + 기억), osint=웹 뒤지기(정보 수집), prime=prime-agent(pi) 직접 실행 — 인가 목록은 동일하게 적용">
               <option value="tools">tools</option>
               <option value="python">python(RLM)</option>
+              <option value="rlm">rlm(재귀 REPL)</option>
               <option value="osint">osint(뒤지기)</option>
               <option value="prime">prime(pi)</option>
             </select>
