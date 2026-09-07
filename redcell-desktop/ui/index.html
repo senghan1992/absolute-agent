@@ -31,6 +31,7 @@
         <symbol id="i-send" viewBox="0 0 24 24"><path d="M4 12h14M12 5l7 7-7 7"/></symbol>
         <symbol id="i-x" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
         <symbol id="i-shield" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 7.6-7 9-4-1.4-7-4.5-7-9V6z"/><path d="M9.2 12l2 2 3.6-4"/></symbol>
+        <symbol id="i-folder" viewBox="0 0 24 24"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></symbol>
       </defs>
     </svg>
 
@@ -183,32 +184,59 @@
     </div>
 
     <!-- 인가 대상 관리 -->
-    <div id="authModal" class="modal hidden">
+    <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="인가 대상 관리">
       <div class="modal-card auth-card">
-        <h3>인가 대상 관리 <span class="lbl-dim" style="font-size:12px;font-weight:500">— 내가 입력한 IP = 인가 (ip-list)</span></h3>
-        <p class="lbl-dim" style="font-size:12px;word-break:break-all;margin:0 0 4px" id="authPathInfo"></p>
+        <header class="auth-head">
+          <span class="auth-head-ico"><svg class="ic"><use href="#i-shield"/></svg></span>
+          <div class="auth-head-text">
+            <h3>인가 대상 관리</h3>
+            <p class="auth-head-sub">이 목록에 있는 대상만 스캔됩니다 — 입력한 IP·URL이 곧 인가입니다.</p>
+          </div>
+          <span id="authPill" class="auth-pill">…</span>
+        </header>
+
         <div id="authYamlWarn" class="auth-warn hidden"></div>
-        <div class="auth-input-row">
-          <input id="authTarget" class="sh-input" placeholder="IP / CIDR / 도메인 (예: 10.13.37.5, 10.0.0.0/24, *.lab.local)" spellcheck="false" />
-          <label class="auth-deny-check" title="제외(!) — 허용 목록에 있어도 최우선 차단"><input type="checkbox" id="authDeny" /> 제외</label>
-          <button id="authAdd" class="btn btn-primary">추가</button>
+
+        <div class="auth-path">
+          <svg class="ic ic-sm"><use href="#i-folder"/></svg>
+          <code id="authPathInfo" class="auth-path-code"></code>
         </div>
-        <div class="auth-lists">
-          <div class="auth-col">
-            <h4>허용 <span id="authAllowCnt" class="count">0</span></h4>
+
+        <div class="auth-add">
+          <div class="auth-input-wrap">
+            <input id="authTarget" class="auth-input" placeholder="IP · CIDR · 도메인 · URL" spellcheck="false" autocomplete="off" />
+            <div class="auth-seg" role="group" aria-label="추가 방식">
+              <button id="segAllow" class="seg-btn allow active" aria-pressed="true">허용</button>
+              <button id="segDeny" class="seg-btn deny" aria-pressed="false">제외</button>
+            </div>
+            <button id="authAdd" class="btn btn-primary auth-add-btn"><svg class="ic ic-sm"><use href="#i-plus"/></svg>추가</button>
+          </div>
+          <p class="auth-hint">예: 10.13.37.5 · 10.0.0.0/24 · *.lab.local · http://host:8080</p>
+        </div>
+
+        <div class="auth-cols">
+          <section class="auth-col allow">
+            <header class="auth-col-head"><span class="auth-col-dot"></span>허용 대상<span id="authAllowCnt" class="auth-cnt">0</span></header>
             <ul id="authAllowList" class="auth-items"></ul>
-          </div>
-          <div class="auth-col">
-            <h4>제외 <span id="authDenyCnt" class="count">0</span></h4>
+            <div id="authAllowEmpty" class="auth-empty">아직 없음</div>
+          </section>
+          <section class="auth-col deny">
+            <header class="auth-col-head"><span class="auth-col-dot"></span>제외 대상<span id="authDenyCnt" class="auth-cnt">0</span></header>
             <ul id="authDenyList" class="auth-items"></ul>
-          </div>
+            <div id="authDenyEmpty" class="auth-empty">아직 없음</div>
+          </section>
         </div>
-        <div id="authMeta" class="lbl-dim" style="font-size:11.5px;margin-top:10px"></div>
+
+        <div id="authMeta" class="auth-meta"></div>
         <div id="authError" class="auth-error hidden"></div>
-        <div class="modal-actions">
-          <button id="authRefresh" class="btn btn-ghost">새로고침</button>
-          <button id="authClose" class="btn btn-ghost">닫기</button>
-        </div>
+
+        <footer class="auth-foot">
+          <span class="auth-foot-note">실행 시 host 란의 대상은 자동 추가됩니다</span>
+          <div class="modal-actions">
+            <button id="authRefresh" class="btn btn-ghost">새로고침</button>
+            <button id="authClose" class="btn btn-primary">닫기</button>
+          </div>
+        </footer>
       </div>
     </div>
 

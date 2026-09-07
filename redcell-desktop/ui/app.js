@@ -564,6 +564,7 @@ async function saveSettings() {
 
 // ── 인가 대상 관리 (ip-list) — UI 에서 IP 추가/제거 ─────────────────────────
 let authState = null;
+let authDenyMode = false; // 추가 방식: false=허용, true=제외
 
 function showAuthError(msg) {
   const el = $("authError");
@@ -571,60 +572,112 @@ function showAuthError(msg) {
   el.classList.toggle("hidden", !msg);
 }
 
+function setAuthPill(kind, text) {
+  const p = $("authPill");
+  p.className = "auth-pill" + (kind ? " " + kind : "");
+  p.textContent = text;
+}
+
+function setSeg(deny) {
+  authDenyMode = deny;
+  $("segAllow").classList.toggle("active", !deny);
+  $("segDeny").classList.toggle("active", deny);
+  $("segAllow").setAttribute("aria-pressed", String(!deny));
+  $("segDeny").setAttribute("aria-pressed", String(deny));
+}
+
+// 대상 문자열 → 유형 태그 (IP / CIDR / IPv6 / 도메인 / 호스트)
+function kindOf(t) {
+  if (t.includes("/")) return "CIDR";
+  if (/^\d{1,3}(\.\d{1,3}){3}$/.test(t)) return "IP";
+  if (t.includes(":")) return "IPv6";
+  if (t.startsWith("*.")) return "도메인";
+  return "호스트";
+}
+
 async function loadAuth() {
   showAuthError(null);
   try {
     authState = await invoke("list_auth");
     renderAuth();
+    $("authTarget").focus();
   } catch (e) {
+    setAuthPill("err", "읽기 오류");
     showAuthError(String(e));
   }
 }
 
 function renderAuth() {
   const a = authState || {};
-  $("authPathInfo").textContent = "파일: " + (a.path || "(미지정)");
+  $("authPathInfo").textContent = a.path || "(미지정)";
 
+  // 상태 필(pill)
+  const allowList = a.allows || [];
+  if (a.yaml) setAuthPill("warn", "YAML 인가 파일");
+  else if (a.error) setAuthPill("err", "읽기 오류");
+  else if (a.empty) setAuthPill("warn", "목록 비어 있음");
+  else if (a.warn) setAuthPill("warn", "허용 0건");
+  else setAuthPill("ok", `허용 ${allowList.length}개`);
+
+  // YAML/경고 안내
   const yamlWarn = $("authYamlWarn");
   if (a.yaml) {
     yamlWarn.classList.remove("hidden");
-    yamlWarn.innerHTML = `<b>정식 YAML 인가 파일입니다.</b> IP 추가/제거는 이 파일을 편집하지 않습니다.<br/>⚙ 설정에서 auth 경로를 비우면 기본 IP 목록(<code>${esc(a.default_path || "~/.redcell/authorization.list")}</code>)을 관리합니다.`;
+    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>정식 YAML 인가 파일입니다.</b> IP 추가/제거는 이 파일을 편집하지 않습니다.<br/>⚙ 설정에서 auth 경로를 비우면 기본 IP 목록(<code>${esc(a.default_path || "~/.redcell/authorization.list")}</code>)을 관리합니다.</div>`;
+  } else if (a.warn) {
+    yamlWarn.classList.remove("hidden");
+    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>허용 대상이 없습니다.</b> 아래에서 IP를 추가하세요 — 추가하는 순간 인가된 대상이 됩니다.</div>`;
   } else {
     yamlWarn.classList.add("hidden");
   }
 
-  const allowList = a.allows || [];
-  const denyList = a.denies || [];
-  $("authAllowList").innerHTML = allowList.map((x) => authItemHtml(x)).join("");
-  $("authDenyList").innerHTML = denyList.map((x) => authItemHtml(x)).join("");
+  // 목록
+  $("authAllowList").innerHTML = allowList.map(authItemHtml).join("");
+  $("authDenyList").innerHTML = (a.denies || []).map(authItemHtml).join("");
   $("authAllowCnt").textContent = allowList.length;
-  $("authDenyCnt").textContent = denyList.length;
+  $("authDenyCnt").textContent = (a.denies || []).length;
+  $("authAllowEmpty").classList.toggle("hidden", allowList.length > 0);
+  $("authDenyEmpty").classList.toggle("hidden", (a.denies || []).length > 0);
 
-  const meta = [];
-  meta.push(`유효기간: ${a.until || "기본(실행 시점 +365일)"}`);
-  meta.push(`허용 포트: ${a.ports && a.ports.length ? a.ports.join(", ") : "전체"}`);
-  meta.push("RPS: 기본(10/s)");
-  $("authMeta").textContent = meta.join("   ·   ");
+  // 메타 칩
+  $("authMeta").innerHTML = [
+    `<span class="auth-chip">유효기간 <b>${esc(a.until || "기본 +365일")}</b></span>`,
+    `<span class="auth-chip">허용 포트 <b>${a.ports && a.ports.length ? esc(a.ports.join(", ")) : "전체"}</b></span>`,
+    `<span class="auth-chip">RPS <b>10/s</b></span>`,
+  ].join("");
 
   if (a.empty) showAuthError("인가 목록이 비어 있습니다 — 아래에서 IP를 추가하세요. 목록에 들어간 대상만 인가됩니다.");
   else if (a.error) showAuthError(a.error);
-  else if (a.warn) showAuthError(a.warn);
 }
 
 function authItemHtml(target) {
-  return `<li><span class="mono">${esc(target)}</span><button class="btn btn-icon auth-rm" title="제거" data-target="${esc(target)}" aria-label="제거"><svg class="ic ic-sm"><use href="#i-x"/></svg></button></li>`;
+  const tag = kindOf(target);
+  return `<li class="auth-item" data-target="${esc(target)}">
+    <span class="auth-kind">${tag}</span>
+    <span class="auth-target">${esc(target)}</span>
+    <button class="btn btn-icon auth-rm" title="제거" aria-label="${esc(target)} 제거"><svg class="ic ic-sm"><use href="#i-x"/></svg></button>
+  </li>`;
+}
+
+function findAuthItem(target) {
+  return [...document.querySelectorAll("#authAllowList .auth-item, #authDenyList .auth-item")]
+    .find((li) => li.dataset.target === target) || null;
 }
 
 async function addAuth() {
   const input = $("authTarget");
   const target = input.value.trim();
   if (!target) return;
-  const deny = $("authDeny").checked;
   try {
-    authState = await invoke("add_auth", { target, deny });
+    authState = await invoke("add_auth", { target, deny: authDenyMode });
     input.value = "";
-    $("authDeny").checked = false;
     renderAuth();
+    // 방금 추가된 항목에 짧은 플래시(성공 피드백)
+    const li = findAuthItem(target);
+    if (li) {
+      li.classList.add("flash");
+      setTimeout(() => li.classList.remove("flash"), 950);
+    }
     input.focus();
   } catch (e) {
     showAuthError(String(e));
@@ -633,15 +686,22 @@ async function addAuth() {
 
 async function removeAuth(target) {
   if (!confirm(`"${target}" 을(를) 인가 목록에서 제거할까요?`)) return;
+  const li = findAuthItem(target);
+  if (li) {
+    li.classList.add("removing"); // 페이드아웃 후 반영
+    await new Promise((r) => setTimeout(r, 190));
+  }
   try {
     authState = await invoke("remove_auth", { target });
     renderAuth();
   } catch (e) {
     showAuthError(String(e));
+    if (li) li.classList.remove("removing");
   }
 }
 
 function openAuth() {
+  setSeg(false);
   $("authModal").classList.remove("hidden");
   loadAuth();
 }
@@ -660,6 +720,8 @@ function wire() {
   $("authClose").onclick = () => $("authModal").classList.add("hidden");
   $("authRefresh").onclick = loadAuth;
   $("authAdd").onclick = addAuth;
+  $("segAllow").onclick = () => setSeg(false);
+  $("segDeny").onclick = () => setSeg(true);
   $("authTarget").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addAuth(); } });
   ["authAllowList", "authDenyList"].forEach((id) => {
     $(id).addEventListener("click", (e) => {
