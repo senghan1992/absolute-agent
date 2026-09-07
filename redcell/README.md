@@ -6,10 +6,19 @@ RedCell 는 "잘 뚫는 법"을 **합법적인 인가 환경**(CTF, 취약점 �
 학습하고, 성공한 공략 전술을 스스로 축적해 다음엔 더 빠르게 뚫도록 발전한다.
 prime-agent 의 자기발전 패러다임(Continual Harness)을 보안 도메인에 이식한 것이다.
 
-> ⚠️ **RedCell 는 인가 없이는 동작하지 않는다.** `authorization.yaml` 에 명시적으로
-> 허용된 대상만 다루며, prime-agent 의 `tool_call` 훅에서 scope 밖 요청은 자동 차단된다.
+> ⚠️ **RedCell 는 인가 없이는 동작하지 않는다.** `authorization.yaml`(또는 간단 IP 목록
+> `~/.redcell/authorization.list` — `redcell auth add`) 에 명시적으로 허용된 대상만 다루며,
+> prime-agent 의 `tool_call` 훅에서 scope 밖 요청은 자동 차단된다.
 > 권한 없는 실제 서비스를 대상으로 사용하는 것은 불법이며, 이 도구의 목적이 아니다.
 > 자세한 내용은 [`labs/README.md`](labs/README.md) 참조.
+
+## 데스크톱 패널 = prime-agent 셸
+
+`redcell-desktop` 의 모드 선택에서 `prime(pi)` 를 고르면 패널이 곧바로 prime-agent(pi) 를
+실행한다(`pi --mode json -p "<지시문>"`) — 지시문에 인가된 대상 URL 을 붙여 보내고,
+pi 의 bash/웹 툴이 자유롭게 조사한 결과를 그대로 스트리밍한다. RedCell 확장
+(`prime-agent/`, `./prime-agent/install.sh` 로 `.pi/agent` + 전역 `~/.pi/agent` 에 설치)이
+여전히 모든 tool_call 을 인가 목록으로 게이팅한다.
 
 ## 무엇이 "자기발전"인가 — 탐색 엔진이 핵심
 

@@ -551,6 +551,234 @@ fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String
     Ok(cmd)
 }
 
+/** prime-agent(pi) CLI 위치 탐색 — Windows .cmd 전환 문제 회피를 위해 dist/cli.js 를 직접 node 로. */
+fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
+    let mut cands: Vec<PathBuf> = Vec::new();
+    if let Some(d) = std::env::var_os("PI_PACKAGE_DIR") {
+        cands.push(PathBuf::from(d).join("dist").join("cli.js"));
+    }
+    cands.push(
+        PathBuf::from(redcell_dir)
+            .join("node_modules")
+            .join("@earendil-works")
+            .join("pi-coding-agent")
+            .join("dist")
+            .join("cli.js"),
+    );
+    if let Some(apd) = std::env::var_os("APPDATA") {
+        cands.push(
+            PathBuf::from(apd)
+                .join("npm")
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("cli.js"),
+        );
+    }
+    for p in [
+        "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+        "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+        "/opt/homebrew/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
+    ] {
+        cands.push(PathBuf::from(p));
+    }
+    cands.into_iter().find(|p| p.is_file())
+}
+
+/** prime 모드 cwd: .pi/agent/extensions/redcell 이 있으면 프로젝트 루트(확장 로드), 아니면 redcell_dir. */
+fn prime_cwd(redcell_dir: &str) -> PathBuf {
+    let root = Path::new(redcell_dir)
+        .parent()
+        .unwrap_or_else(|| Path::new(redcell_dir));
+    if root.join(".pi").join("agent").join("extensions").join("redcell").exists() {
+        return root.to_path_buf();
+    }
+    PathBuf::from(redcell_dir)
+}
+
+/** prime 모드 실행: node <pi cli.js> --mode json -p "<목표>" — json 이벤트를 패널로 스트리밍. */
+fn run_prime(
+    app: &AppHandle,
+    id: &str,
+    s: &Session,
+    settings: &Settings,
+    redcell: &str,
+    provider: &str,
+) -> Result<(), String> {
+    let cli = prime_cli_path(redcell).ok_or(
+        "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정)".to_string(),
+    )?;
+
+    let port = s.port;
+    let target = match port {
+        Some(p) if p == 443 || p == 8443 => format!("https://{}/", s.host),
+        Some(p) => format!("http://{}:{}/", s.host, p),
+        None => format!("http://{}/", s.host),
+    };
+    let mut goal = s.goal.trim().to_string();
+    if goal.is_empty() {
+        goal = "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string();
+    }
+    let https_hint = match port {
+        Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s.host, p),
+        _ => String::new(),
+    };
+    let instruction = format!(
+        "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘."
+    );
+
+    let mut args: Vec<String> = vec!["--mode".into(), "json".into(), "-p".into(), instruction];
+    args.push("--provider".into());
+    args.push(provider.to_string());
+    if provider != "custom" {
+        if let Some(m) = settings.providers.get(provider).and_then(|c| {
+            let m = c.model.trim();
+            if m.is_empty() {
+                None
+            } else {
+                Some(format!("{provider}/{m}"))
+            }
+        }) {
+            args.push("--model".into());
+            args.push(m);
+        }
+    }
+
+    {
+        let ev = json!({ "type": "note", "text": format!("[sys] prime-agent(pi) 실행: node {} {}", cli.display(), args.iter().map(|a| {
+            if a.len() > 80 { format!("{}…", &a[..80]) } else { a.clone() }
+        }).collect::<Vec<_>>().join(" ")) });
+        let stamped = append_event(app, id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+
+    let mut cmd = Command::new("node");
+    cmd.arg(cli.as_os_str());
+    cmd.current_dir(prime_cwd(redcell));
+    cmd.args(&args);
+    if let Some(conn) = settings.providers.get(provider) {
+        inject_provider_env(&mut cmd, provider, conn);
+    }
+    hide_window(&mut cmd);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("node(pi) 실행 실패 — node 설치 및 PATH 확인: {e}"))?;
+
+    let stdout = child.stdout.take().ok_or("stdout 파이프 실패")?;
+    let stderr = child.stderr.take().ok_or("stderr 파이프 실패")?;
+    app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
+    set_status(app, id, "running");
+    app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
+
+    // stderr → [sys] 노트(모델/스코프 로그).
+    {
+        let app = app.clone();
+        let id = id.to_string();
+        thread::spawn(move || {
+            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let ev = json!({ "type": "note", "text": format!("[sys] {line}") });
+                let stamped = append_event(&app, &id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+        });
+    }
+
+    // stdout → pi json 이벤트 스트림: text_delta 를 모아 text_end 에서 노트로,
+    // tool_use 는 [pi-툴] 표시, 종료 시 상태 마감.
+    {
+        let app = app.clone();
+        let id = id.to_string();
+        thread::spawn(move || {
+            let mut buf = String::new();
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let line = line.trim();
+                if line.is_empty() {
+                    continue;
+                }
+                let ev: Value = serde_json::from_str(line).unwrap_or_else(|_| json!({ "raw": line }));
+                let ty = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                if ty == "tool_execution_start" {
+                    let name = ev.get("toolName").and_then(|n| n.as_str()).unwrap_or("tool");
+                    let a = ev.get("args").map(|v| v.to_string()).unwrap_or_default();
+                    let a = a.chars().take(120).collect::<String>();
+                    let ev2 = json!({ "type": "note", "text": format!("[pi-툴] {name} {a}") });
+                    let stamped = append_event(&app, &id, &ev2);
+                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                } else if ty == "message_update" {
+                    if let Some(ae) = ev.get("assistantMessageEvent") {
+                        match ae.get("type").and_then(|t| t.as_str()) {
+                            Some("text_delta") => {
+                                if let Some(d) = ae.get("delta").and_then(|d| d.as_str()) {
+                                    buf.push_str(d);
+                                }
+                            }
+                            Some("text_end") => {
+                                if !buf.trim().is_empty() {
+                                    let ev2 = json!({ "type": "note", "text": buf.trim().to_string() });
+                                    let stamped = append_event(&app, &id, &ev2);
+                                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                                }
+                                buf.clear();
+                            }
+                            _ => {}
+                        }
+                    }
+                } else if ty == "message_end" {
+                    if let Some(m) = ev.get("message") {
+                        if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                            if let Some(content) = m.get("content").and_then(|c| c.as_array()) {
+                                for part in content {
+                                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                            if !t.trim().is_empty() {
+                                                let ev2 = json!({ "type": "note", "text": t.trim().to_string() });
+                                                let stamped = append_event(&app, &id, &ev2);
+                                                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                } else if ty == "error" {
+                    let text = ev.get("error").and_then(|e| e.as_str()).unwrap_or("pi 오류").to_string();
+                    let ev2 = json!({ "type": "note", "text": format!("[오류] {text}") });
+                    let stamped = append_event(&app, &id, &ev2);
+                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                }
+            }
+            if !buf.trim().is_empty() {
+                let ev2 = json!({ "type": "note", "text": buf.trim().to_string() });
+                let stamped = append_event(&app, &id, &ev2);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            let removed = app.state::<Procs>().0.lock().unwrap().remove(&id);
+            if let Some(mut c) = removed {
+                let ok = c.wait().map(|st| st.success()).unwrap_or(false);
+                let ev2 = json!({ "type": "note", "text": if ok { "[완료] prime-agent 종료.".to_string() } else { "[완료] prime-agent 비정상 종료(exit≠0).".to_string() } });
+                let stamped = append_event(&app, &id, &ev2);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                if let Some(cur) = read_session(&app, &id) {
+                    if cur.status == "running" {
+                        let st = if ok { "done" } else { "error" };
+                        set_status(&app, &id, st);
+                        app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
+                    }
+                }
+            }
+        });
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let s = read_session(&app, &id).ok_or("세션을 찾을 수 없습니다")?;
@@ -573,6 +801,13 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
             "redcell 경로를 찾을 수 없습니다: '{redcell}'. 설정(⚙)에서 redcell_dir 을 지정하세요."
         ));
     }
+
+    // prime 모드: prime-agent(pi) 를 직접 실행한다 — panel 은 그냥 prime-agent 셸.
+    // .prime/agent/extensions/redcell 가 있는 프로젝트 루트에서 실행해 인가 확장도 로드한다.
+    if s.mode == "prime" {
+        return run_prime(&app, &id, &s, &settings, &redcell, &provider);
+    }
+
     // mode 에 따라 서브커맨드 선택: python → absolute-agent(RLM, 코드 작성→실행 반복),
     // 그 외 → 고정 툴박스 오케스트레이터.
     let subcommand = match s.mode.as_str() {

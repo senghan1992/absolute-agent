@@ -1,5 +1,5 @@
 {
-  "extensions": ["./.prime/agent/extensions/redcell/index.ts"],
-  "skills": ["./.prime/agent/skills/pentest-lab"],
+  "extensions": ["./.pi/agent/extensions/redcell/index.ts"],
+  "skills": ["./.pi/agent/skills/pentest-lab"],
   "autoRefine": { "enabled": true, "turnInterval": 20, "compact": true }
 }

@@ -35,18 +35,18 @@ const AUTH_CANDIDATES = [
   process.env.REDCELL_AUTH,
   // 간단 IP 목록(redcell auth add)이 있으면 그것을 먼저 쓴다.
   path.join(redcellHome(), DEFAULT_LIST_FILE),
-  ".prime/agent/redcell/authorization.yaml",
+  ".pi/agent/redcell/authorization.yaml",
 ].filter(Boolean) as string[];
 
 const METHODOLOGY = `
-# RedCell — 인가된 화이트해커 모드
+# RedCell — prime-agent 화이트해커 모드
 
-너는 인가된(authorized) 침투테스트/CTF 조수다. 다음 원칙을 절대 어기지 않는다:
-- **Scope 우선**: authorization.yaml 의 allow 에 있는 대상만 다룬다. 확신이 없으면 /scope 로 확인하고, scope 밖이면 시도조차 하지 않는다.
-- **최소 영향**: 취약점은 증명(PoC) 최소 범위로만 확인한다. 데이터 전량 덤프, 서비스 중단(DoS), 파괴적 페이로드는 금지.
-- **재현 가능성**: 모든 발견은 방어 관점의 재현 절차와 완화책으로 보고한다.
+너는 화이트해커 조수다. 인가(scope)는 RedCell 이 강제한다:
+- **Scope 강제**: '~/.redcell/authorization.list'(또는 authorization.yaml) 의 allow 에 있는 대상만
+  다룬다. 확신이 없으면 /scope 로 확인하고, scope 밖이면 시도조차 하지 않는다.
+  (모든 tool_call 은 RedCell 훅이 자동으로 검사·차단한다 — 인가 파일 없으면 전부 차단.)
 
-작업 순서(PTES): 정찰(recon) → 열거(enumerate) → 익스플로잇(exploit, 최소영향) → 사후(post) → 보고(report).
+작업 순서(PTES): 정찰(recon) → 열거(enumerate) → 익스플로잇(exploit) → 사후(post) → 보고(report).
 각 단계 시작 시, harness 메모리에 축적된 과거 성공 전술(playbook)을 먼저 검토하라.
 성공적으로 대상을 공략했다면 /refine 로 그 전술을 메모리에 저장하여 다음에 더 빨리 뚫어라.
 `.trim();
@@ -80,10 +80,12 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
     }
     if (!guard) return; // 이론상 도달 불가
 
-    // 이 호출이 건드리는 대상 호스트들을 추출(전용 툴의 host 인자 + ipython/bash 코드 스캔).
-    const argsStr = JSON.stringify(event?.arguments ?? event?.args ?? {});
+    // 이 호출이 건드리는 대상 호스트들을 추출(전용 툴의 host 인자 + bash/코드 문자열 스캔).
+    // pi 0.8x 의 tool_call 이벤트는 {toolName, input:{...}} 형태다.
+    const argsStr = JSON.stringify(event?.input ?? event?.arguments ?? event?.args ?? {});
+    const toolName = String(event?.toolName ?? event?.name ?? event?.tool ?? "");
     const hosts = extractHosts(argsStr);
-    const intent = classifyIntent(event?.name ?? event?.tool ?? "", argsStr);
+    const intent = classifyIntent(toolName, argsStr);
 
     // 대상이 식별되지 않는 순수 로컬 작업(파일읽기 등)은 통과.
     if (hosts.length === 0) return;
