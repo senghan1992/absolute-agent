@@ -498,10 +498,12 @@ async function runEngagement() {
     await invoke("start_engagement", { id: s.id });
   } catch (e) {
     setBadge("error");
-    await invoke("append_chat", { id: s.id, role: "system", content: "실행 실패: " + e });
+    const msg = "실행 실패: " + e;
+    await invoke("append_chat", { id: s.id, role: "system", content: msg });
     const fresh = await invoke("get_session", { id: s.id });
     if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
     renderChat();
+    alert(msg); // 스폰 실패(전형적: Windows npx 문제, redcell 경로/의존성)를 즉시 알린다
   }
 }
 

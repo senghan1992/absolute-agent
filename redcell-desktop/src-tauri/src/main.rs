@@ -341,10 +341,50 @@ fn append_chat(app: AppHandle, id: String, role: String, content: String) -> Opt
 
 /// 세션 실행 — redcell CLI 를 --ndjson 으로 스폰하고 이벤트를 스트리밍한다.
 /// 즉시 반환하며, 진행은 `engagement-event` / `engagement-status` 이벤트로 전달된다.
+// ── redcell CLI 실행 ─────────────────────────────────────────────────────────
+/// redcell CLI 를 실행할 프로세스를 구성한다.
+/// Windows 에서 `npx`(및 *.cmd 배치 파일)는 CreateProcess 로 직접 실행할 수 없어
+/// 실패하므로, node.exe + tsx 진입점(node_modules/tsx)을 직접 사용한다.
+/// tsx 의 실제 bin 경로는 package.json 을 읽어 결정한다(버전 변화 대응).
+fn redcell_command(redcell_dir: &str, args: &[String]) -> Result<Command, String> {
+    let base = PathBuf::from(redcell_dir);
+    // tsx bin 경로 해석
+    let mut tsx_bin = "node_modules/tsx/dist/cli.mjs".to_string();
+    let pkg_path = base.join("node_modules").join("tsx").join("package.json");
+    if let Ok(txt) = fs::read_to_string(&pkg_path) {
+        if let Ok(v) = serde_json::from_str::<Value>(&txt) {
+            let entry = match v.get("bin") {
+                Some(Value::String(s)) => Some(s.as_str()),
+                Some(Value::Object(m)) => m.get("tsx").and_then(|b| b.as_str()),
+                _ => None,
+            };
+            if let Some(e) = entry {
+                let trimmed = e.strip_prefix("./").unwrap_or(e);
+                tsx_bin = format!("node_modules/tsx/{trimmed}");
+            }
+        }
+    }
+    let entry_path = base.join(&tsx_bin);
+    if !entry_path.exists() {
+        return Err(format!(
+            "redcell 엔진 의존성이 설치되지 않았습니다 ({}). redcell 폴더에서 `npm install` 을 실행하세요.",
+            base.join("node_modules").display()
+        ));
+    }
+    let mut cmd = Command::new("node");
+    cmd.current_dir(&base);
+    cmd.arg(&entry_path).arg("src/cli.ts");
+    cmd.args(args);
+    Ok(cmd)
+}
+
 #[tauri::command]
 fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let s = read_session(&app, &id).ok_or("세션을 찾을 수 없습니다")?;
-    if s.status == "running" {
+    // 앱이 죽었다 다시 켜진 경우 등: 상태가 running 이어도 실제 실행 프로세스가 없으면
+    // 재실행을 허용한다(레지스트리 기준 — 스트림 종료 시 항목이 제거되므로 정확하다).
+    let truly_running = app.state::<Procs>().0.lock().unwrap().contains_key(&id);
+    if s.status == "running" && truly_running {
         return Err("이미 실행 중인 세션입니다".into());
     }
     let settings = get_settings(app.clone());
@@ -386,13 +426,15 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         args.push(settings.auth_path.clone());
     }
 
-    let mut child = Command::new("npx")
-        .current_dir(&redcell)
-        .args(&args)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| format!("redcell 실행 실패 (npx/node 설치 확인): {e}"))?;
+    // Windows 안전: node.exe + tsx 진입점 직접 실행(npx 는 .cmd 라서 스폰 불가).
+    let mut child = redcell_command(&redcell, &args)
+        .and_then(|mut c| {
+            c.stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .map_err(|e| format!("node 실행 실패 — node 설치 및 PATH 확인: {e}"))
+        })
+        .map_err(|e| format!("redcell 실행 실패: {e}"))?;
 
     let stdout = child.stdout.take().ok_or("stdout 파이프 실패")?;
     let stderr = child.stderr.take().ok_or("stderr 파이프 실패")?;
