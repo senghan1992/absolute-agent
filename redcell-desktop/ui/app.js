@@ -10,7 +10,6 @@ let sessions = [];
 let activeId = null;
 let settings = { redcell_dir: "", auth_path: "", default_provider: "" };
 let selectedSeq = null;
-let providerList = []; // 연결 정보 없으면 리스트에 나타내지 않는다
 
 const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
@@ -566,6 +565,25 @@ async function sendChat() {
 }
 
 // ── 프로바이더: 연결된 것만 리스트에 노출, 미설정 시 모달 유도 ────────────────
+// 엔진 레지스트리(redcell/src/providers/registry.ts)와 동일하게 유지한다.
+const PROVIDER_CATALOG = [
+  { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", envKeys: ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], baseUrl: "https://api.anthropic.com/v1", needsBase: false },
+  { name: "openai", kind: "openai-compat", note: "GPT 공식 API", default_model: "gpt-5.4", envKeys: ["OPENAI_API_KEY"], baseUrl: "https://api.openai.com/v1", needsBase: false },
+  { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이", default_model: "moonshotai/kimi-k2.6", envKeys: ["OPENROUTER_API_KEY"], baseUrl: "https://openrouter.ai/api/v1", needsBase: false },
+  { name: "prime-inference", kind: "openai-compat", note: "Prime Intellect inference", default_model: "z-ai/glm-5.2", envKeys: ["PRIME_API_KEY"], baseUrl: "https://api.pinference.ai/api/v1", needsBase: false },
+  { name: "groq", kind: "openai-compat", note: "고속 추론", default_model: "openai/gpt-oss-120b", envKeys: ["GROQ_API_KEY"], baseUrl: "https://api.groq.com/openai/v1", needsBase: false },
+  { name: "cerebras", kind: "openai-compat", note: "Cerebras 초고속 추론", default_model: "gpt-oss-120b", envKeys: ["CEREBRAS_API_KEY"], baseUrl: "https://api.cerebras.ai/v1", needsBase: false },
+  { name: "xai", kind: "openai-compat", note: "xAI Grok", default_model: "grok-4.20-0309-reasoning", envKeys: ["XAI_API_KEY"], baseUrl: "https://api.x.ai/v1", needsBase: false },
+  { name: "deepseek", kind: "openai-compat", note: "DeepSeek", default_model: "deepseek-v4-pro", envKeys: ["DEEPSEEK_API_KEY"], baseUrl: "https://api.deepseek.com", needsBase: false },
+  { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", envKeys: ["MISTRAL_API_KEY"], baseUrl: "https://api.mistral.ai/v1", needsBase: false },
+  { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", envKeys: ["MOONSHOT_API_KEY"], baseUrl: "https://api.moonshot.ai/v1", needsBase: false },
+  { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", envKeys: ["ZAI_API_KEY"], baseUrl: "https://api.z.ai/api/coding/paas/v4", needsBase: false },
+  { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", envKeys: [], baseUrl: "http://localhost:11434/v1", needsBase: true },
+  { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
+];
+let envReadyMap = {}; // get_providers 의 ready_env (시스템 환경변수 감지)
+let expandedProvider = null;
+
 function activeProvider() {
   const sel = $("shProvider");
   const v = sel && sel.value ? sel.value.trim() : "";
@@ -575,26 +593,154 @@ function showProviderModal() {
   $("providerModal").classList.remove("hidden");
 }
 
+// 연결됨 판정: 설정에 저장된 키/base URL 또는 시스템 환경변수 중 하나.
+function providerConnected(p) {
+  const c = (settings.providers || {})[p.name];
+  if (envReadyMap[p.name]) return true; // 시스템 환경변수로 연결
+  if (!c) return false;
+  if (p.name === "custom") return !!(c.base_url); // base URL 필수
+  if (p.needsBase) return true; // ollama: 저장만 하면 기본 localhost base URL 사용
+  return !!(c.api_key); // API 키 저장 여부
+}
+function providerConnState(p) {
+  const c = (settings.providers || {})[p.name] || {};
+  return {
+    api_key: c.api_key || "",
+    base_url: c.base_url || "",
+    model: c.model || "",
+    connected: providerConnected(p),
+    viaEnv: !!envReadyMap[p.name],
+  };
+}
+
+function renderProviderCards() {
+  const el = $("providerCards");
+  if (!el) return;
+  el.innerHTML = PROVIDER_CATALOG.map((p) => {
+    const st = providerConnState(p);
+    const keyLabel = p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "";
+    const basePlaceholder = p.name === "ollama" ? "http://localhost:11434/v1" : "https://your-endpoint/v1";
+    const modelPh = p.default_model || "예: gpt-4o";
+    return `<div class="pcard${st.connected ? " connected" : ""}${expandedProvider === p.name ? " open" : ""}" data-provider="${p.name}">
+      <div class="pcard-head" data-act="toggle">
+        <span class="pcard-name">${p.name}</span>
+        <span class="pcard-note">${esc(p.note)}</span>
+        <span class="pill ${st.connected ? "pill-ok" : "pill-off"}">${st.connected ? (st.viaEnv ? "환경변수 연결됨" : "연결됨") : "미연결"}</span>
+        <span class="pcard-chev">▸</span>
+      </div>
+      <div class="pcard-body">
+        ${p.needsBase ? `<label>Base URL<input class="sh-input" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
+        ${p.envKeys.length ? `<label>API 키 <span class="lbl-dim">(${keyLabel})</span><input class="sh-input" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="sk-…" spellcheck="false" /><button class="btn btn-icon" data-act="eye" title="표시/숨김">👁</button></label>` : ""}
+        <label>모델 <span class="lbl-dim">(선택 — 비우면 ${p.default_model || "엔드포인트 기본"})</span><input class="sh-input" data-f="model" value="${esc(st.model)}" placeholder="${modelPh}" spellcheck="false" /></label>
+        <div class="pcard-actions">
+          <span class="pcard-test" data-r></span>
+          <button class="btn btn-ghost" data-act="test">연결 테스트</button>
+          <button class="btn btn-primary" data-act="save">연결 저장</button>
+        </div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+function cardValues(card) {
+  const q = (sel) => { const i = card.querySelector(sel); return i ? i.value.trim() : ""; };
+  return { api_key: q('[data-f="key"]'), base_url: q('[data-f="base"]'), model: q('[data-f="model"]') };
+}
+
+function collectSettings(providers) {
+  return {
+    redcell_dir: $("setRedcellDir").value.trim(),
+    auth_path: $("setAuthPath").value.trim(),
+    default_provider: $("setProviderDefault") ? $("setProviderDefault").value : settings.default_provider,
+    providers,
+  };
+}
+
+async function saveSettingsNow(providers) {
+  settings = await invoke("save_settings", { settings: collectSettings(providers) });
+  await refreshProviders();
+  renderProviderDefaultSelect();
+  renderProviderCards();
+}
+
+function renderProviderDefaultSelect() {
+  const sel = $("setProviderDefault");
+  if (!sel) return;
+  const connected = PROVIDER_CATALOG.filter(providerConnected);
+  sel.innerHTML = `<option value="">(선택 안 함)</option>`
+    + connected.map((p) => `<option value="${p.name}">${p.name} ✅</option>`).join("");
+  sel.value = settings.default_provider || "";
+}
+
+async function testProviderConn(card, p) {
+  const out = card.querySelector("[data-r]");
+  if (!out) return;
+  const v = cardValues(card);
+  out.textContent = "확인 중…";
+  out.className = "pcard-test";
+  try {
+    const res = await invoke("test_provider", { provider: p.name, apiKey: v.api_key, baseUrl: v.base_url || p.baseUrl });
+    out.textContent = "✅ " + res;
+    out.className = "pcard-test ok";
+  } catch (e) {
+    out.textContent = "❌ " + e;
+    out.className = "pcard-test err";
+  }
+}
+
+function wireProviderCards() {
+  const el = $("providerCards");
+  if (!el) return;
+  el.addEventListener("click", async (e) => {
+    const card = e.target.closest(".pcard");
+    const actEl = e.target.closest("[data-act]");
+    if (!card || !actEl) return;
+    const name = card.dataset.provider;
+    const p = PROVIDER_CATALOG.find((x) => x.name === name);
+    if (!p) return;
+    const act = actEl.dataset.act;
+    if (act === "toggle") {
+      expandedProvider = expandedProvider === name ? null : name;
+      renderProviderCards();
+    } else if (act === "eye") {
+      const k = card.querySelector('[data-f="key"]');
+      if (k) k.type = k.type === "password" ? "text" : "password";
+    } else if (act === "test") {
+      await testProviderConn(card, p);
+    } else if (act === "save") {
+      const providers = Object.assign({}, settings.providers || {});
+      const v = cardValues(card);
+      if (v.api_key || v.base_url || v.model) providers[name] = v;
+      else delete providers[name];
+      await saveSettingsNow(providers);
+      const out2 = card.querySelector("[data-r]");
+      if (out2) { out2.textContent = "💾 저장됨 — 상단 드롭다운에 반영됩니다"; out2.className = "pcard-test ok"; }
+    }
+  });
+}
+
 async function refreshProviders() {
   let list;
   try { list = await invoke("get_providers"); } catch { return; } // preview/mock 환경
   if (!Array.isArray(list)) return;
-  providerList = list.filter((p) => p && p.ready && p.name !== "mock"); // 연결 정보 있는 것만
+  envReadyMap = {};
+  list.forEach((p) => { envReadyMap[p.name] = !!p.ready_env; });
+  const connected = PROVIDER_CATALOG.filter(providerConnected);
   const sel = $("shProvider");
   if (sel) {
     const prev = sel.value;
     sel.innerHTML = `<option value="">— provider 선택 —</option>`
-      + providerList.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
-    const want = (cur() && cur().provider && cur().provider !== "mock") ? cur().provider : "";
-    sel.value = providerList.some((p) => p.name === want) ? want
-      : (prev !== "mock" && providerList.some((p) => p.name === prev) ? prev : "");
+      + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+    const want = (cur() && cur().provider) || settings.default_provider || "";
+    sel.value = connected.some((p) => p.name === want) ? want
+      : (prev && connected.some((p) => p.name === prev) ? prev : "");
   }
   const hint = $("providerHint");
   if (hint) {
-    const names = providerList.map((p) => p.name);
+    const names = connected.map((p) => p.name);
     hint.textContent = names.length
       ? `연결됨: ${names.join(", ")} — 상단 드롭다운에서 선택하세요. 지시가 실제 LLM 추론에 반영됩니다.`
-      : "연결된 프로바이더가 없습니다 — 설정(⚙) > 기본 provider 에 사용할 이름을 저장하세요. API 키는 환경변수(ANTHROPIC_API_KEY 등)로 감지되며, 로컬 ollama 도 연결됩니다.";
+      : "연결된 프로바이더가 없습니다 — 설정(⚙) > 모델 연결 에서 API 키를 입력하고 [연결 저장] 하세요. 키는 이 PC에만 저장되고 실행 시 자동 주입됩니다.";
   }
 }
 
@@ -611,17 +757,19 @@ function switchView(name) {
 function openSettings() {
   $("setRedcellDir").value = settings.redcell_dir || "";
   $("setAuthPath").value = settings.auth_path || "";
-  $("setProvider").value = settings.default_provider || "";
+  renderProviderCards();
+  renderProviderDefaultSelect();
   $("settingsModal").classList.remove("hidden");
 }
 async function saveSettings() {
-  settings = await invoke("save_settings", { settings: {
-    redcell_dir: $("setRedcellDir").value.trim(),
-    auth_path: $("setAuthPath").value.trim(),
-    default_provider: $("setProvider").value.trim(),
-  }});
+  // 카드에 입력된 값까지 수집해 한 번에 저장 (카드별 [연결 저장] 없이도 동작)
+  const providers = {};
+  document.querySelectorAll("#providerCards .pcard").forEach((card) => {
+    const v = cardValues(card);
+    if (v.api_key || v.base_url || v.model) providers[card.dataset.provider] = v;
+  });
+  await saveSettingsNow(providers);
   $("settingsModal").classList.add("hidden");
-  await refreshProviders(); // 저장된 기본값 즉시 반영
 }
 
 // ── 인가 대상 관리 (ip-list) — UI 에서 IP 추가/제거 ─────────────────────────
@@ -777,6 +925,7 @@ function wire() {
   $("settingsSave").onclick = saveSettings;
   $("providerGoto").onclick = () => { $("providerModal").classList.add("hidden"); openSettings(); };
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
+  wireProviderCards();
   $("runBtn").onclick = onRunButton;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });

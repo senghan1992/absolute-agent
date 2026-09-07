@@ -317,13 +317,21 @@
       case "stop_engagement": { const s = findById(args.id); if (s) stopSim(s); return null; }
       case "list_auth": return authResult();
       case "get_providers": return [
-        { name: "anthropic", ready: false, note: "Claude 계열" },
-        { name: "openai", ready: false, note: "GPT 계열" },
-        { name: "openrouter", ready: false, note: "다수 모델 게이트웨이" },
-        { name: "prime-inference", ready: false, note: "Prime Intellect" },
-        { name: "groq", ready: false, note: "고속 추론" },
-        { name: "ollama", ready: true, note: "로컬 실행 — 키 불필요" },
+        { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: [], base_url: "https://api.anthropic.com/v1", ready_env: false, needs_base: false },
+        { name: "openai", kind: "openai-compat", note: "GPT 공식 API", default_model: "gpt-5.4", env_keys: ["OPENAI_API_KEY"], base_url: "https://api.openai.com/v1", ready_env: false, needs_base: false },
+        { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이", default_model: "moonshotai/kimi-k2.6", env_keys: [], base_url: "https://openrouter.ai/api/v1", ready_env: false, needs_base: false },
+        { name: "prime-inference", kind: "openai-compat", note: "Prime Intellect inference", default_model: "z-ai/glm-5.2", env_keys: [], base_url: "https://api.pinference.ai/api/v1", ready_env: false, needs_base: false },
+        { name: "groq", kind: "openai-compat", note: "고속 추론", default_model: "openai/gpt-oss-120b", env_keys: [], base_url: "https://api.groq.com/openai/v1", ready_env: false, needs_base: false },
+        { name: "cerebras", kind: "openai-compat", note: "Cerebras 초고속 추론", default_model: "gpt-oss-120b", env_keys: [], base_url: "https://api.cerebras.ai/v1", ready_env: false, needs_base: false },
+        { name: "xai", kind: "openai-compat", note: "xAI Grok", default_model: "grok-4.20-0309-reasoning", env_keys: [], base_url: "https://api.x.ai/v1", ready_env: false, needs_base: false },
+        { name: "deepseek", kind: "openai-compat", note: "DeepSeek", default_model: "deepseek-v4-pro", env_keys: [], base_url: "https://api.deepseek.com", ready_env: false, needs_base: false },
+        { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", env_keys: [], base_url: "https://api.mistral.ai/v1", ready_env: false, needs_base: false },
+        { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", env_keys: [], base_url: "https://api.moonshot.ai/v1", ready_env: false, needs_base: false },
+        { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", env_keys: [], base_url: "https://api.z.ai/api/coding/paas/v4", ready_env: false, needs_base: false },
+        { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: [], base_url: "http://localhost:11434/v1", ready_env: false, needs_base: true },
+        { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트", default_model: "", env_keys: [], base_url: "", ready_env: false, needs_base: true },
       ];
+      case "test_provider": return new Promise((res) => setTimeout(() => res("OK 200 (preview — 실제 연결은 데스크톱에서 확인)"), 350));
       case "add_auth": {
         const a = getAuth();
         assertTarget(args.target);

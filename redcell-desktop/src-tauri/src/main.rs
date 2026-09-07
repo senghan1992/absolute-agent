@@ -73,6 +73,16 @@ fn status_idle() -> String {
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
+struct ProviderConn {
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    base_url: String,
+    #[serde(default)]
+    model: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Default)]
 struct Settings {
     #[serde(default)]
     redcell_dir: String,
@@ -80,6 +90,10 @@ struct Settings {
     auth_path: String,
     #[serde(default)]
     default_provider: String,
+    /// 사용자가 데스크톱 설정에서 직접 입력한 연결 정보(API 키/base URL/모델).
+    /// 세션 실행 시 자식 프로세스의 환경변수로 주입된다.
+    #[serde(default)]
+    providers: HashMap<String, ProviderConn>,
 }
 
 fn now() -> String {
@@ -339,29 +353,134 @@ fn append_chat(app: AppHandle, id: String, role: String, content: String) -> Opt
     Some(s)
 }
 
-/// 프로바이더 목록 + 자격증명 감지 상태(프론트 ✅ 표시용).
-/// 엔진 레지스트리(redcell providers)와 동일한 이름을 유지한다.
+/// 엔진 레지스트리(redcell/src/providers/registry.ts)와 동일하게 유지한다.
+struct ProviderMeta {
+    name: &'static str,
+    kind: &'static str,
+    note: &'static str,
+    default_model: &'static str,
+    env_keys: &'static [&'static str],
+    base_url: &'static str,
+    needs_base: bool,
+}
+const PROVIDER_CATALOG: &[ProviderMeta] = &[
+    ProviderMeta { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"], base_url: "https://api.anthropic.com/v1", needs_base: false },
+    ProviderMeta { name: "openai", kind: "openai-compat", note: "GPT 공식 API", default_model: "gpt-5.4", env_keys: &["OPENAI_API_KEY"], base_url: "https://api.openai.com/v1", needs_base: false },
+    ProviderMeta { name: "openrouter", kind: "openai-compat", note: "다수 모델 게이트웨이", default_model: "moonshotai/kimi-k2.6", env_keys: &["OPENROUTER_API_KEY"], base_url: "https://openrouter.ai/api/v1", needs_base: false },
+    ProviderMeta { name: "prime-inference", kind: "openai-compat", note: "Prime Intellect inference", default_model: "z-ai/glm-5.2", env_keys: &["PRIME_API_KEY"], base_url: "https://api.pinference.ai/api/v1", needs_base: false },
+    ProviderMeta { name: "groq", kind: "openai-compat", note: "고속 추론", default_model: "openai/gpt-oss-120b", env_keys: &["GROQ_API_KEY"], base_url: "https://api.groq.com/openai/v1", needs_base: false },
+    ProviderMeta { name: "cerebras", kind: "openai-compat", note: "Cerebras 초고속 추론", default_model: "gpt-oss-120b", env_keys: &["CEREBRAS_API_KEY"], base_url: "https://api.cerebras.ai/v1", needs_base: false },
+    ProviderMeta { name: "xai", kind: "openai-compat", note: "xAI Grok", default_model: "grok-4.20-0309-reasoning", env_keys: &["XAI_API_KEY"], base_url: "https://api.x.ai/v1", needs_base: false },
+    ProviderMeta { name: "deepseek", kind: "openai-compat", note: "DeepSeek", default_model: "deepseek-v4-pro", env_keys: &["DEEPSEEK_API_KEY"], base_url: "https://api.deepseek.com", needs_base: false },
+    ProviderMeta { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", env_keys: &["MISTRAL_API_KEY"], base_url: "https://api.mistral.ai/v1", needs_base: false },
+    ProviderMeta { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", env_keys: &["MOONSHOT_API_KEY"], base_url: "https://api.moonshot.ai/v1", needs_base: false },
+    ProviderMeta { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", env_keys: &["ZAI_API_KEY"], base_url: "https://api.z.ai/api/coding/paas/v4", needs_base: false },
+    ProviderMeta { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: &[], base_url: "http://localhost:11434/v1", needs_base: true },
+    ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
+];
+
+/// 프로바이더 목록 + 자격증명 감지 상태(프론트 연동용).
 #[tauri::command]
 fn get_providers() -> Value {
-    let defs: &[(&str, &[&str], &str)] = &[
-        ("mock", &[], "고정 시나리오 — 오프라인 테스트용(LLM 없음)"),
-        ("anthropic", &["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"], "Claude 계열"),
-        ("openai", &["OPENAI_API_KEY"], "GPT 계열"),
-        ("openrouter", &["OPENROUTER_API_KEY"], "다수 모델 게이트웨이"),
-        ("prime-inference", &["PRIME_API_KEY"], "Prime Intellect"),
-        ("groq", &["GROQ_API_KEY"], "고속 추론"),
-        ("ollama", &[], "로컬 실행 — 키 불필요(엔진에 --model 지정 필요)"),
-    ];
     Value::Array(
-        defs.iter()
-            .map(|(name, keys, note)| {
-                let ready = keys.iter().any(|k| {
+        PROVIDER_CATALOG
+            .iter()
+            .map(|p| {
+                let ready_env = p.env_keys.iter().any(|k| {
                     std::env::var(k).map(|v| !v.trim().is_empty()).unwrap_or(false)
                 });
-                json!({ "name": name, "ready": ready, "note": note })
+                json!({
+                    "name": p.name,
+                    "kind": p.kind,
+                    "note": p.note,
+                    "default_model": p.default_model,
+                    "base_url": p.base_url,
+                    "env_keys": p.env_keys,
+                    "ready_env": ready_env,
+                    "needs_base": p.needs_base,
+                })
             })
             .collect(),
     )
+}
+
+/// 저장된 연결 정보를 자식 프로세스 환경변수로 주입한다.
+/// (Windows 사용자는 시스템 환경변수를 직접 다루기 어려우므로 앱이 대신 처리)
+fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
+    if let Some(p) = PROVIDER_CATALOG.iter().find(|p| p.name == provider) {
+        if !conn.api_key.trim().is_empty() {
+            if let Some(k) = p.env_keys.last() {
+                // 마지막 env 슬롯에 주입(앞쪽 OAUTH 등 실제 설정 env 가 있으면 그게 우선)
+                cmd.env(k, conn.api_key.trim());
+            }
+        }
+        if provider == "custom" && !conn.base_url.trim().is_empty() {
+            cmd.env("REDCELL_OPENAI_BASE_URL", conn.base_url.trim());
+        }
+    }
+    if !conn.model.trim().is_empty() {
+        cmd.env("REDCELL_MODEL", conn.model.trim()); // 모든 프로바이더 공통 모델 지정
+    }
+}
+
+/// 연결 테스트 — node fetch 로 대상 엔드포인트 도달성/키 인증을 확인한다.
+/// (reqwest 의존성 추가 없이 이미 있는 node 를 재사용)
+#[tauri::command]
+fn test_provider(provider: String, api_key: String, base_url: String) -> Result<String, String> {
+    let meta = PROVIDER_CATALOG
+        .iter()
+        .find(|p| p.name == provider)
+        .ok_or("알 수 없는 프로바이더")?;
+    let base = if base_url.trim().is_empty() {
+        meta.base_url.to_string()
+    } else {
+        base_url.trim().to_string()
+    };
+    if base.is_empty() {
+        return Err("base URL 을 입력하세요 (custom/ollama 는 필수).".into());
+    }
+    let path = if provider == "ollama" { "/tags" } else { "/models" };
+    let url = format!("{}{}", base.trim_end_matches('/'), path);
+    let script = r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"";try{const r=await fetch(u,{headers:k?{Authorization:"Bearer "+k,"x-api-key":k,"anthropic-version":"2023-06-01"}:{}});console.log("OK "+r.status+" "+r.statusText)}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#;
+    let mut child = Command::new("node")
+        .arg("-e")
+        .arg(script)
+        .env("RC_TEST_URL", url)
+        .env("RC_TEST_KEY", api_key.trim())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("node 실행 실패: {e}"))?;
+    use std::io::Read;
+    // 최대 6초 대기
+    let mut waited = 0;
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            if st.success() {
+                let mut out = String::new();
+                if let Some(mut o) = child.stdout.take() {
+                    let _ = o.read_to_string(&mut out);
+                }
+                let line = out.lines().next().unwrap_or("").trim().to_string();
+                return if line.starts_with("OK") { Ok(line) } else { Err(out.trim().to_string()) };
+            }
+            let mut err = String::new();
+            let mut out = String::new();
+            if let Some(mut o) = child.stderr.take() {
+                let _ = o.read_to_string(&mut err);
+            }
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_string(&mut out);
+            }
+            return Err(format!("{err} {out}").trim().to_string());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        waited += 150;
+        if waited > 6000 {
+            let _ = child.kill();
+            return Err("연결 시간 초과 (6초) — base URL/네트워크를 확인하세요.".into());
+        }
+    }
 }
 
 /// 세션 실행 — redcell CLI 를 --ndjson 으로 스폰하고 이벤트를 스트리밍한다.
@@ -437,7 +556,7 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
         "--host".into(),
         s.host.clone(),
         "--provider".into(),
-        provider,
+        provider.clone(),
         "--ndjson".into(),
     ];
     if let Some(p) = s.port {
@@ -462,6 +581,13 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     }
     // 단일 프로세스: node --import tsx src/cli.ts <args...>  (Windows 에서 npx/.cmd 스폰 불가 회피)
     let mut child = redcell_command(&redcell, &args)
+        .map(|mut c| {
+            // 저장된 연결 정보(API 키/base URL/모델)를 자식 환경변수로 주입
+            if let Some(conn) = settings.providers.get(&provider) {
+                inject_provider_env(&mut c, &provider, conn);
+            }
+            c
+        })
         .and_then(|mut c| {
             c.stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -684,7 +810,8 @@ fn main() {
             add_auth,
             remove_auth,
             auth_ensure,
-            get_providers
+            get_providers,
+            test_provider
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");

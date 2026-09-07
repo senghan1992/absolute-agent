@@ -424,6 +424,28 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .provider-hint { padding: 6px 14px 10px; font-size: 10.5px; line-height: 1.5; color: var(--faint); background: var(--surface); }
 .provider-hint:empty { display: none; }
 
+/* ── 모델 연결 카드 (설정 탭) ─────────────────────────────────────────────── */
+.provider-cards { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; max-height: 46vh; overflow-y: auto; }
+.pcard { border: 1px solid var(--line-2); border-radius: var(--r); background: var(--surface-2); overflow: hidden; }
+.pcard.connected { border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line-2)); }
+.pcard-head { display: flex; align-items: center; gap: 9px; padding: 9px 12px; cursor: pointer; user-select: none; }
+.pcard-head:hover { background: var(--surface-3); }
+.pcard-name { font-weight: 650; font-size: 12.5px; min-width: 104px; }
+.pcard-note { flex: 1; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.pcard-chev { color: var(--faint); font-size: 10px; transition: transform 0.15s; }
+.pcard.open .pcard-chev { transform: rotate(90deg); }
+.pcard-body { display: none; padding: 10px 12px 12px; border-top: 1px dashed var(--line-2); flex-direction: column; gap: 8px; }
+.pcard.open .pcard-body { display: flex; }
+.pcard-body label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
+.pcard-body .btn-icon { align-self: flex-end; margin-top: -26px; margin-right: 4px; position: relative; }
+.pcard-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.pcard-test { flex: 1; font-size: 11px; color: var(--muted); }
+.pcard-test.ok { color: #34d399; }
+.pcard-test.err { color: #fb7185; }
+.pill { font-size: 10px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
+.pill-ok { background: color-mix(in srgb, #34d399 16%, transparent); color: #34d399; }
+.pill-off { background: var(--surface-3); color: var(--faint); }
+
 /* ── 빈 상태 / 모달 ── */
 .hidden { display: none !important; }
 .empty-state { position: fixed; inset: 50px 0 0 0; display: grid; place-items: center; background: var(--bg); z-index: 50; }
