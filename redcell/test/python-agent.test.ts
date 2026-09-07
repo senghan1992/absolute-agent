@@ -8,6 +8,7 @@
 
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import http from "node:http";
+import net from "node:net";
 import { AddressInfo } from "node:net";
 import { ScopeGuard, type AuthorizationFile } from "../src/scope/scope-guard.js";
 import { runPython, scanDanger } from "../src/py/broker.js";
@@ -156,6 +157,44 @@ describe("broker: 안전 실행", () => {
     expect(r.logs.join(" ")).toMatch(/in-scope 200/);
     expect(r.logs.join(" ")).toMatch(/blocked/);
     expect(r.logs.join(" ")).not.toMatch(/reached out-of-scope/);
+  });
+
+  it("문법 오류는 danger 가 아니라 syntax 로 분류된다(정책 위반 아님)", async () => {
+    const r = await runPython("def f(:\n    x = 1", { guard: guard(), target: target(), isolation: "off" });
+    expect(r.ok).toBe(false);
+    expect(r.syntax).toBeDefined();
+    expect(r.danger).toBeUndefined();
+    expect(r.syntax).toMatch(/문법 오류|invalid syntax/);
+  });
+
+  it("rc.tcp — 인가 대상 TCP 조사는 허용, scope 밖은 ScopeError 로 차단한다", async () => {
+    const tcpSrv = net.createServer((sock) => {
+      sock.on("data", (d: Buffer) => {
+        if (d.toString().includes("PING")) sock.write("PONG");
+      });
+      sock.on("end", () => sock.end());
+    });
+    await new Promise<void>((r) => tcpSrv.listen(0, "127.0.0.1", r));
+    const tport = (tcpSrv.address() as AddressInfo).port;
+    try {
+      const code = [
+        `b = rc.tcp('127.0.0.1', ${tport}, payload=b'PING')`,
+        "rc.log('tcp-ok', b.decode())",
+        "try:",
+        "    rc.tcp('169.254.169.254', 80)",
+        "    rc.log('tcp-out-of-scope')",
+        "except rc.ScopeError as e:",
+        "    rc.log('tcp-blocked', str(e)[:30])",
+      ].join("\n");
+      const r = await runPython(code, { guard: guard(), target: target(), isolation: "off" });
+      expect(r.ok).toBe(true);
+      expect(r.logs.join(" ")).toMatch(/tcp-ok PONG/);
+      expect(r.logs.join(" ")).toMatch(/tcp-blocked/);
+      expect(r.logs.join(" ")).not.toMatch(/tcp-out-of-scope/);
+      expect(r.blockedRequests).toBe(1);
+    } finally {
+      tcpSrv.close();
+    }
   });
 
   it("rc.finding 을 구조화 발견으로 파싱한다", async () => {

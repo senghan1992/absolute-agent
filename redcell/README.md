@@ -119,7 +119,10 @@ DNS rebinding 차단, 감사 추적, deny>allow. 정식 게이트(waiver·서명
   실수로 stdlib 로 외부에 나가면 브로커가 아니라 사망한다.
 
 파이썬 쪽은 주입된 `rc` 헬퍼로만 통신한다: `rc.get/post/http(...) → r.status/.headers/.text`,
-취약 신호는 `rc.finding(title, severity, evidence=, impact=)`, 관찰은 `rc.log(...)`.
+`rc.tcp(host, port, payload=None) → bytes` 로 인가 대상의 원시 TCP 조사(banner/맞춤 프로토콜)를 할 수 있고
+(브로커가 scope 밖 host:port 는 ScopeError 로 차단), 취약 신호는 `rc.finding(title, severity, evidence=, impact=)`,
+관찰은 `rc.log(...)`. 문법 오류는 `[구문 오류]` 로, 정책 위반은 `[안전차단]` 으로 구분해 보여주며
+에이전트가 스스로 수정·재시도한다.
 산출물은 기존 `EngagementLog` 라 리포트·시각 상황판·데스크톱 패널에 그대로 흐른다.
 `--provider mock`(오프라인 `MockCoder`) 로 모델 없이도 루프를 재현할 수 있다.
 

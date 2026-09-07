@@ -39,6 +39,8 @@ import os from "node:os";
 import path from "node:path";
 import { randomBytes } from "node:crypto";
 import { AddressInfo } from "node:net";
+import net from "node:net";
+import { lookup as dnsLookup } from "node:dns";
 import { ScopeGuard, type Target } from "../scope/scope-guard.js";
 import { httpRequest, newJar } from "../net/http-client.js";
 import { RateLimiter } from "../net/rate-limiter.js";
@@ -104,6 +106,8 @@ export interface PyResult {
    *   - AST 허용목록(runner): 프로세스는 떴지만 payload 를 exec 하지 않고 거부 → exitCode=0.
    */
   danger?: string;
+  /** runner 의 문법(ast.parse) 오류 — 정책 위반이 아니라 실행 불가 코드. */
+  syntax?: string;
 }
 
 const SEVERITIES = new Set(["info", "low", "medium", "high", "critical"]);
@@ -158,6 +162,7 @@ const ALLOWED_PY_MODULES = [
   "datetime",
   "struct",
   "binascii",
+  "time",
   "hashlib",
   "hmac",
   "html",
@@ -207,8 +212,8 @@ function runnerScript(): string {
     "        return _json.loads(self.text)",
     "    def __repr__(self):",
     '        return "<Resp %s %s %db>" % (self.status, self.url, len(self.text or ""))',
-    "def _call(payload):",
-    '    req = _u.Request(_B + "/req", data=_json.dumps(payload).encode(),',
+    "def _call(payload, endpoint='/req'):",
+    '    req = _u.Request(_B + endpoint, data=_json.dumps(payload).encode(),',
     '                     headers={"x-rc-token": _TK, "content-type": "application/json"})',
     "    with _u.urlopen(req, timeout=40) as r:",
     "        d = _json.loads(r.read().decode())",
@@ -232,6 +237,20 @@ function runnerScript(): string {
     "        return _b64.b64encode(data).decode()",
     "    def b64d(self, s):",
     "        return _b64.b64decode(s + '=' * (-len(s) % 4))",
+    "    def tcp(self, host, port, payload=None, timeout=5, read=4096):",
+    "        # 인가 대상에 대한 원시 TCP 조사(banner/맞춤 프로토콜). 브로커가 host:port 를",
+    "        # ScopeGuard 로 검증한 뒤 연결하므로 scope 밖은 ScopeError 가 난다.",
+    "        body = None",
+    "        if payload is not None:",
+    "            if isinstance(payload, str): payload = payload.encode()",
+    "            body = _b64.b64encode(payload).decode()",
+    "        req = _u.Request(_B + '/tcp', data=_json.dumps({'host': host, 'port': port, 'b64data': body, 'timeout': timeout, 'read': read}).encode(),",
+    "                         headers={'x-rc-token': _TK, 'content-type': 'application/json'})",
+    "        with _u.urlopen(req, timeout=timeout + 10) as r:",
+    "            d = _json.loads(r.read().decode())",
+    "        if 'scopeError' in d: raise ScopeError(d['scopeError'])",
+    "        if 'error' in d: raise OSError(d['error'])",
+    "        return _b64.b64decode(d.get('b64reply') or '')",
     "    def finding(self, title, severity='medium', evidence=None, impact=None):",
     "        print('##RC_FINDING## ' + _json.dumps({'title': title, 'severity': severity, 'evidence': evidence, 'impact': impact}), flush=True)",
     "    def log(self, *a):",
@@ -255,7 +274,8 @@ function runnerScript(): string {
     "    try:",
     "        tree = _ast.parse(src, filename='payload.py')",
     "    except SyntaxError as e:",
-    "        return '문법 오류: ' + str(e)",
+    "        print('##RC_SYNTAX## 문법 오류: ' + str(e), flush=True)",
+    "        _sys.exit(0)",
     "    for node in _ast.walk(tree):",
     "        if isinstance(node, _ast.Import):",
     "            for a in node.names:",
@@ -369,7 +389,7 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
       res.writeHead(status, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
-    if (req.method !== "POST" || req.url !== "/req" || req.headers["x-rc-token"] !== token) {
+    if (req.method !== "POST" || !["/req", "/tcp"].includes(req.url ?? "") || req.headers["x-rc-token"] !== token) {
       reply({ scopeError: "브로커 인증 실패" }, 403);
       return;
     }
@@ -380,6 +400,11 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
       msg = JSON.parse(raw || "{}");
     } catch {
       reply({ scopeError: "잘못된 요청(JSON 파싱 실패)" });
+      return;
+    }
+
+    if (req.url === "/tcp") {
+      await handleTcp(msg as { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply);
       return;
     }
 
@@ -434,6 +459,84 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
     } catch (e) {
       requests++;
       reply({ status: 0, headers: {}, body: "", url: targetUrl.toString(), error: String((e as Error).message) });
+    }
+  }
+
+  // ── /tcp: 인가 대상에 대한 원시 TCP one-shot 조사(banner/맞춤 프로토콜) ──
+  // HTTP 와 동일하게 ScopeGuard 로 host:port 를 검증하고, 호스트명이 실제 인가 IP 로
+  // 해석되는지(rebinding/SSRF 방지)까지 확인한 뒤에만 연결한다.
+  async function handleTcp(msg: { host?: unknown; port?: unknown; b64data?: string; timeout?: unknown; read?: unknown }, reply: (obj: unknown, status?: number) => void): Promise<void> {
+    const host = String(msg.host ?? "");
+    const port = Number(msg.port);
+    if (!host || !Number.isInteger(port) || port <= 0 || port > 65535) {
+      reply({ scopeError: "잘못된 host/port" });
+      return;
+    }
+    const timeoutMs = Math.min(Math.max(Number(msg.timeout) || 5, 1), 30) * 1000;
+    const readCap = Math.min(Math.max(Number(msg.read) || 4096, 1), 16384);
+    if (requests >= maxRequests) {
+      blockedRequests++;
+      reply({ scopeError: `요청 예산 초과(${maxRequests}) — 무한/폭주 루프 방지` });
+      return;
+    }
+
+    // ★ 안전 핵심: HTTP 와 동일하게 실제 연결 직전 ScopeGuard 재확인(우회 불가).
+    const decision = opts.guard.check({ host, port, intent: "exploit" });
+    if (!decision.allowed) {
+      blockedRequests++;
+      opts.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, blocked: decision.reason });
+      reply({ scopeError: `scope 차단: ${decision.reason}` });
+      return;
+    }
+
+    let address: string;
+    try {
+      const ips = await new Promise<Array<{ address: string; family: number }>>((resolve, reject) =>
+        dnsLookup(host, { all: true }, (err, addrs) => (err ? reject(err) : resolve(addrs))),
+      );
+      const ok = ips.find((a) => opts.guard.checkResolvedIp(host, a.address).allowed);
+      if (!ok) {
+        blockedRequests++;
+        reply({ scopeError: `scope 차단: ${host} 가 인가 IP 로 해석되지 않습니다` });
+        return;
+      }
+      address = ok.address;
+    } catch (e) {
+      reply({ error: `DNS 실패: ${(e as Error).message}` });
+      return;
+    }
+
+    // one-shot 프로브: payload 있으면 half-close(end) 로 전송 후 응답 대기, 없으면 banner 대기.
+    const data = typeof msg.b64data === "string" ? Buffer.from(msg.b64data, "base64") : Buffer.alloc(0);
+    const sock = net.connect({ host: address, port });
+    const chunks: Buffer[] = [];
+    let settled = false;
+    let drain: NodeJS.Timeout | null = null;
+    const killer = setTimeout(() => finish(new Error("timeout")), timeoutMs);
+    sock.on("connect", () => {
+      if (data.length) sock.end(data);
+      else sock.write(Buffer.alloc(0));
+    });
+    sock.on("data", (c: Buffer) => {
+      if (settled) return;
+      chunks.push(c);
+      const total = chunks.reduce((n, b) => n + b.length, 0);
+      if (total >= readCap) return finish();
+      if (drain) clearTimeout(drain);
+      drain = setTimeout(() => finish(), 250); // 첫 응답 이후 250ms 여유 수신
+    });
+    sock.on("error", (e) => finish(e));
+    sock.on("close", () => finish());
+    function finish(err?: Error) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killer);
+      if (drain) clearTimeout(drain);
+      sock.destroy();
+      requests++;
+      opts.onRequest?.({ method: "TCP", url: `tcp://${host}:${port}`, status: err ? 0 : 200 });
+      if (err) reply({ error: String(err.message) });
+      else reply({ b64reply: Buffer.concat(chunks).toString("base64") });
     }
   }
 
@@ -511,10 +614,11 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
 
       child.on("close", (codeExit) => {
         clearTimeout(timer);
-        const { findings, logs, clean, danger: astDanger } = parseOutput(stdout);
+        const { findings, logs, clean, danger: astDanger, syntax: astSyntax } = parseOutput(stdout);
         resolve({
           // AST 허용목록 위반이면 runner 가 정상종료(0)하더라도 실행을 거부한 것이므로 ok=false.
-          ok: !timedOut && codeExit === 0 && !astDanger,
+          // 문법 오류(astSyntax)는 실행 불가 코드 — 어느 쪽도 실행되지 않았다는 점은 같다.
+          ok: !timedOut && codeExit === 0 && !astDanger && !astSyntax,
           stdout: clean,
           stderr,
           exitCode: codeExit,
@@ -525,6 +629,7 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
           logs,
           isolation: { backend: backend?.name ?? null, warning: isolationWarning },
           ...(astDanger ? { danger: astDanger } : {}),
+          ...(astSyntax ? { syntax: astSyntax } : {}),
         });
       });
     });
@@ -534,12 +639,14 @@ export async function runPython(code: string, opts: PyRunOpts): Promise<PyResult
   }
 }
 
-/** stdout 에서 ##RC_FINDING##/##RC_LOG##/##RC_DANGER## 라인을 구조화하고, 나머지는 표시용으로. */
-function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; clean: string; danger?: string } {
+/** stdout 에서 ##RC_FINDING##/##RC_LOG##/##RC_DANGER##/##RC_SYNTAX## 라인을 구조화하고,
+ * 나머지는 표시용으로. */
+function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; clean: string; danger?: string; syntax?: string } {
   const findings: PyFinding[] = [];
   const logs: string[] = [];
   const rest: string[] = [];
   let danger: string | undefined;
+  let syntax: string | undefined;
   for (const raw of stdout.split("\n")) {
     const line = raw.replace(/\r$/, ""); // Windows CRLF 정리
     if (line.startsWith("##RC_FINDING## ")) {
@@ -552,6 +659,9 @@ function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; c
       }
     } else if (line.startsWith("##RC_LOG## ")) {
       logs.push(line.slice("##RC_LOG## ".length));
+    } else if (line.startsWith("##RC_SYNTAX## ")) {
+      // 모델이 보낸 코드의 문법 오류(정책 위반 아님). 다음 시도에서 수정하도록 구분해 준다.
+      syntax = syntax ?? line.slice("##RC_SYNTAX## ".length);
     } else if (line.startsWith("##RC_DANGER## ")) {
       // runner 의 AST 허용목록 검증이 실행을 거부한 사유(심층방어 2차 계층).
       danger = danger ?? line.slice("##RC_DANGER## ".length);
@@ -559,5 +669,5 @@ function parseOutput(stdout: string): { findings: PyFinding[]; logs: string[]; c
       rest.push(line);
     }
   }
-  return { findings, logs, clean: rest.join("\n").trim(), danger };
+  return { findings, logs, clean: rest.join("\n").trim(), danger, syntax };
 }

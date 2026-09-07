@@ -49,12 +49,16 @@ const SYSTEM =
   "탐색·공략하되, 다음 규칙을 반드시 지킨다:\n" +
   "1) 대상과의 모든 HTTP 는 미리 정의된 헬퍼 `rc` 로만 한다: rc.get(path), rc.post(path, data=/json=), " +
   "rc.http(method, path_or_url, headers=, body=). 응답은 r.status, r.headers, r.text, r.json() 로 읽는다. " +
+  "원시 TCP 조사는 rc.tcp(host, port, payload=None) 이 필요하다(인가 대상 한정 — banner/맞춤 프로토콜). " +
   "쿠키는 호출 간 자동 유지되므로 로그인→보호자원 접근 같은 멀티스텝을 한 코드에서 이어갈 수 있다. " +
-  "base64 는 rc.b64e/rc.b64d 를 쓴다. requests/urllib/socket 등 직접 네트워크는 금지(정적 스캔에 걸려 실행 안 됨).\n" +
+  "base64 는 rc.b64e/rc.b64d 를 쓴다. requests/urllib/socket 등 직접 네트워크는 금지(정적 스캔 + AST 화이트리스트가 실행 자체를 막는다).\n" +
   "2) 취약 신호를 확인하면 rc.finding(title, severity, evidence=, impact=) 로 보고한다 " +
   "(severity: info|low|medium|high|critical). 확신이 없으면 rc.log(...) 로 관찰만 남긴다.\n" +
-  "3) 비파괴 원칙: 데이터 삭제/변조/DoS 금지. 신호(signal)만 확인한다. scope 밖 호스트로 나가지 않는다.\n" +
+  "3) 인가된 대상이면 공격적으로 파고들어라: 쿠키 탈취/위조, SID·토큰 우회, SSRF(인가 호스트 경유), " +
+  "낮은 난이도 순 SQLi·XSS·경로조작·SSTI·인증우회·API 남용을 실제 페이로드로 시도하고 결과까지 확인하라. " +
+  "단, scope 밖 호스트 접근·데이터 파괴/변조·DoS(폭주/무한루프)는 금지 — 신호(signal) 확인만.\n" +
   "4) 한 번에 한 가지 방법을 짧게 시도한다. 직전 출력을 보고, 통했으면 심화하고 아니면 다른 벡터로 바꾼다.\n" +
+  "5) 코드를 보내기 전에 문법(괄호/들여쓰기)을 스스로 검사하라. 문법 오류는 실행되지 않고 그대로 반환되므로 시도가 낭비된다." +
   "응답은 반드시 JSON 하나로만: {\"code\": \"<python>\", \"rationale\": \"<한 줄 근거>\", \"done\": <bool>}.";
 
 export class PythonAgent {
@@ -125,8 +129,12 @@ export class PythonAgent {
       // 실행 결과를 사람이 읽는 한 줄 + 이벤트로.
       const summary = resultSummary(result);
       emit({ type: "tool_result", phase: "exploit", tool: "python", ok: result.ok, summary, text: `[python #${i + 1}] 실행 결과 — ${summary}` });
+      if (result.syntax) {
+        // 정책 위반이 아니라 실행 불가능한 문법 오류 — 다음 시도에서 자동 수정된다.
+        emit({ type: "note", text: `[구문 오류] 파이썬 문법 오류로 실행되지 않았습니다: ${clip(result.syntax, 300)} — 모델이 다음 시도에서 수정합니다.` });
+      }
       if (result.danger) {
-        emit({ type: "note", text: `[안전차단] 정적 스캔: ${result.danger} — 이 코드는 실행하지 않았습니다.` });
+        emit({ type: "note", text: `[안전차단] ${result.danger} — 이 코드는 실행하지 않았습니다(인가 범위·파괴성·탈출 보호는 항상 유지).` });
       }
       for (const lg of result.logs) emit({ type: "note", text: `[관찰] ${lg}` });
 
@@ -160,6 +168,7 @@ export class PythonAgent {
       code: a.code,
       ok: a.result.ok,
       danger: a.result.danger,
+      syntax: a.result.syntax,
       stdout: clip(a.result.stdout, 1200),
       stderr: clip(a.result.stderr, 600),
       requests: a.result.requests,
@@ -171,10 +180,12 @@ export class PythonAgent {
         `대상=${target.host}${target.port ? ":" + target.port : ""}. 목표=${goal}. ` +
         `직전 시도들의 코드와 출력을 보고, 다음에 실행할 파이썬 코드 1개를 작성하라. ` +
         `아직 확인 안 된 벡터를 노려라(SQLi·XSS·경로조작·인증우회·API 남용·SSTI 등 창의적으로). ` +
+        `코드를 보내기 전에 문법(괄호 짝, 들여쓰기)을 스스로 검사하라 — 문법 오류는 실행되지 않고 그대로 반환된다. ` +
         `더 시도할 가치가 없으면 {"done": true} 를 반환하라.`,
       target,
       helper_api:
         "rc.get(path) / rc.post(path, data={}|json={}) / rc.http(method, path_or_url, headers={}, body='') → r.status, r.headers, r.text, r.json(); " +
+        "rc.tcp(host, port, payload=b'...'|None, timeout=5) → bytes — 인가 대상에 대한 원시 TCP 조사(banner/맞춤 프로토콜), scope 밖은 rc.ScopeError; " +
         "쿠키는 호출 간 자동 유지(멀티스텝 로그인 플로우 가능); rc.b64e(data)/rc.b64d(s) 로 base64; " +
         "rc.finding(title, severity, evidence=, impact=); rc.log(...)",
       previous_attempts: history,
@@ -197,6 +208,7 @@ export class PythonAgent {
 }
 
 function resultSummary(r: PyResult): string {
+  if (r.syntax) return `구문 오류(미실행, 모델이 수정) — ${firstLine(r.syntax) || ""}`;
   if (r.danger) return `안전차단(미실행): ${r.danger}`;
   if (r.timedOut) return `타임아웃 — 요청 ${r.requests}건`;
   if (r.exitCode !== 0) return `오류 종료(code=${r.exitCode}) — ${firstLine(r.stderr) || "stderr 없음"}`;
