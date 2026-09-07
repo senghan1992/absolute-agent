@@ -621,17 +621,25 @@ function renderProviderCards() {
     const keyLabel = p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "";
     const basePlaceholder = p.name === "ollama" ? "http://localhost:11434/v1" : "https://your-endpoint/v1";
     const modelPh = p.default_model || "예: gpt-4o";
-    return `<div class="pcard${st.connected ? " connected" : ""}${expandedProvider === p.name ? " open" : ""}" data-provider="${p.name}">
-      <div class="pcard-head" data-act="toggle">
+    const open = expandedProvider === p.name;
+    return `<div class="pcard${st.connected ? " connected" : ""}${open ? " open" : ""}" data-provider="${p.name}">
+      <div class="pcard-head" data-act="toggle" role="button" tabindex="0" aria-expanded="${open}">
+        <span class="led ${st.connected ? "on" : ""}"></span>
         <span class="pcard-name">${p.name}</span>
+        <span class="pcard-kind">${p.kind}</span>
         <span class="pcard-note">${esc(p.note)}</span>
-        <span class="pill ${st.connected ? "pill-ok" : "pill-off"}">${st.connected ? (st.viaEnv ? "환경변수 연결됨" : "연결됨") : "미연결"}</span>
-        <span class="pcard-chev">▸</span>
+        <span class="pcard-state ${st.connected ? "ok" : ""}">${st.connected ? (st.viaEnv ? "환경변수" : "연결됨") : "미연결"}</span>
+        <svg class="ic pcard-chev"><use href="#i-chev"/></svg>
       </div>
       <div class="pcard-body">
-        ${p.needsBase ? `<label>Base URL<input class="sh-input" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
-        ${p.envKeys.length ? `<label>API 키 <span class="lbl-dim">(${keyLabel})</span><input class="sh-input" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="sk-…" spellcheck="false" /><button class="btn btn-icon" data-act="eye" title="표시/숨김">👁</button></label>` : ""}
-        <label>모델 <span class="lbl-dim">(선택 — 비우면 ${p.default_model || "엔드포인트 기본"})</span><input class="sh-input" data-f="model" value="${esc(st.model)}" placeholder="${modelPh}" spellcheck="false" /></label>
+        ${p.needsBase ? `<label class="fld"><span>Base URL</span><input class="sh-input mono" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
+        ${p.envKeys.length ? `<label class="fld"><span>API 키 <span class="lbl-dim">(${keyLabel})</span></span>
+          <span class="pcard-keyrow">
+            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="sk-…" spellcheck="false" autocomplete="off" />
+            <button class="btn btn-icon" data-act="eye" title="표시/숨김" aria-label="키 표시/숨김"><svg class="ic"><use href="#i-eye"/></svg></button>
+          </span>
+        </label>` : ""}
+        <label class="fld"><span>모델 <span class="lbl-dim">(선택 — 비우면 기본 ${p.default_model || "엔드포인트 기본"})</span></span><input class="sh-input mono" data-f="model" value="${esc(st.model)}" placeholder="${modelPh}" spellcheck="false" /></label>
         <div class="pcard-actions">
           <span class="pcard-test" data-r></span>
           <button class="btn btn-ghost" data-act="test">연결 테스트</button>
@@ -661,6 +669,7 @@ async function saveSettingsNow(providers) {
   await refreshProviders();
   renderProviderDefaultSelect();
   renderProviderCards();
+  updateConnSummary();
 }
 
 function renderProviderDefaultSelect() {
@@ -691,6 +700,13 @@ async function testProviderConn(card, p) {
 function wireProviderCards() {
   const el = $("providerCards");
   if (!el) return;
+  el.addEventListener("keydown", (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    const head = e.target.closest(".pcard-head");
+    if (!head) return;
+    e.preventDefault();
+    head.click();
+  });
   el.addEventListener("click", async (e) => {
     const card = e.target.closest(".pcard");
     const actEl = e.target.closest("[data-act]");
@@ -754,11 +770,24 @@ function switchView(name) {
 }
 
 // ── 설정 ─────────────────────────────────────────────────────────────────────
+function updateConnSummary() {
+  const el = $("connSummary");
+  if (!el) return;
+  const connected = PROVIDER_CATALOG.filter(providerConnected);
+  const n = connected.length;
+  const names = connected.map((p) => p.name).join(", ");
+  el.innerHTML = `<span class="s-dot ${n ? "on" : ""}"></span>`
+    + (n
+      ? `연결됨 ${n}/${PROVIDER_CATALOG.length} — ${esc(names)}`
+      : `연결된 프로바이더 없음 (${PROVIDER_CATALOG.length}종 지원) — 아래에서 연결하세요`);
+}
+
 function openSettings() {
   $("setRedcellDir").value = settings.redcell_dir || "";
   $("setAuthPath").value = settings.auth_path || "";
   renderProviderCards();
   renderProviderDefaultSelect();
+  updateConnSummary();
   $("settingsModal").classList.remove("hidden");
 }
 async function saveSettings() {
@@ -922,10 +951,21 @@ function wire() {
   $("emptyNewBtn").onclick = newSession;
   $("settingsBtn").onclick = openSettings;
   $("settingsCancel").onclick = () => $("settingsModal").classList.add("hidden");
+  $("settingsClose").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsSave").onclick = saveSettings;
   $("providerGoto").onclick = () => { $("providerModal").classList.add("hidden"); openSettings(); };
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   wireProviderCards();
+  // 모달 공통: 바깥 클릭 / Esc 로 닫기
+  ["settingsModal", "authModal", "providerModal"].forEach((id) => {
+    const m = $(id);
+    if (!m) return;
+    m.addEventListener("pointerdown", (e) => { if (e.target === m) m.classList.add("hidden"); });
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    ["settingsModal", "authModal", "providerModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
+  });
   $("runBtn").onclick = onRunButton;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });

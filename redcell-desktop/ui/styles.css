@@ -231,20 +231,20 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .btn:disabled { opacity: 0.5; cursor: not-allowed; box-shadow: none; filter: none; }
 
 /* ── 워크스페이스 ── */
-#workspace { flex: 1 1 auto; display: grid; grid-template-columns: 1fr 400px; min-height: 0; }
+#workspace { flex: 1 1 auto; display: grid; grid-template-columns: minmax(0, 1fr) 400px; min-height: 0; }
 .panel { min-height: 0; display: flex; flex-direction: column; }
 #mainPanel { border-right: 1px solid var(--line); background: var(--surface); }
 #agentPanel { background: linear-gradient(180deg, var(--surface-2), var(--surface)); }
 
 /* ── 세션 헤더 ── */
-.session-header { display: flex; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
-.sh-name { background: transparent; border: none; color: var(--text); font-size: 15.5px; font-weight: 650; padding: 3px 0; outline: none; width: 190px; letter-spacing: -0.2px; }
+.session-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
+.sh-name { background: transparent; border: none; color: var(--text); font-size: 15.5px; font-weight: 650; padding: 3px 0; outline: none; width: clamp(120px, 14vw, 190px); min-width: 120px; letter-spacing: -0.2px; }
 .sh-name::placeholder { color: var(--faint); }
-.sh-target { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 4px 10px; }
+.sh-target { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 4px 10px; flex: 1 1 340px; min-width: 240px; max-width: 640px; }
 .tgt-ico { color: var(--accent-2-fg); display: grid; place-items: center; }
 .tgt-ico .ic { width: 14px; height: 14px; }
 .tgt-sep { color: var(--faint); }
-.sh-input { background: transparent; border: none; color: var(--text); padding: 4px; font-size: 12.5px; outline: none; font-family: var(--mono); }
+.sh-input { background: transparent; border: none; color: var(--text); padding: 4px; font-size: 12.5px; outline: none; font-family: var(--mono); min-width: 0; flex: 0 1 auto; }
 .sh-input::placeholder { color: var(--faint); }
 .sh-host { width: 118px; }
 .sh-port { width: 50px; }
@@ -424,27 +424,55 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .provider-hint { padding: 6px 14px 10px; font-size: 10.5px; line-height: 1.5; color: var(--faint); background: var(--surface); }
 .provider-hint:empty { display: none; }
 
-/* ── 모델 연결 카드 (설정 탭) ─────────────────────────────────────────────── */
-.provider-cards { display: flex; flex-direction: column; gap: 8px; margin: 4px 0 12px; max-height: 46vh; overflow-y: auto; }
-.pcard { border: 1px solid var(--line-2); border-radius: var(--r); background: var(--surface-2); overflow: hidden; }
-.pcard.connected { border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line-2)); }
-.pcard-head { display: flex; align-items: center; gap: 9px; padding: 9px 12px; cursor: pointer; user-select: none; }
+/* ── 모델 연결 카드 + 설정 패널 ────────────────────────────────────────────── */
+.mono { font-family: var(--mono); font-size: 12px; }
+.provider-cards { display: flex; flex-direction: column; gap: 7px; max-height: min(44vh, 340px); overflow-y: auto; padding-right: 2px; overscroll-behavior: contain; }
+.pcard { flex: 0 0 auto; border: 1px solid var(--line-2); border-radius: var(--r); background: var(--surface-2); overflow: hidden; }
+.pcard.connected { border-color: color-mix(in srgb, var(--accent-2) 38%, var(--line-2)); background: linear-gradient(180deg, color-mix(in srgb, var(--accent-2) 5%, transparent), var(--surface-2)); }
+.pcard-head { display: flex; align-items: center; gap: 9px; padding: 10px 12px; cursor: pointer; user-select: none; }
 .pcard-head:hover { background: var(--surface-3); }
-.pcard-name { font-weight: 650; font-size: 12.5px; min-width: 104px; }
+.pcard-head:focus-visible { outline: 2px solid var(--accent); outline-offset: -2px; border-radius: var(--r); }
+.led { width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); flex: none; transition: background 0.2s, box-shadow 0.2s; }
+.led.on { background: var(--accent-2); box-shadow: 0 0 8px color-mix(in srgb, var(--accent-2) 55%, transparent); }
+.pcard-name { font-weight: 650; font-size: 12.5px; min-width: 92px; }
+.pcard-kind { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.4px; color: var(--faint); border: 1px solid var(--line-2); border-radius: 5px; padding: 1.5px 5px; background: var(--surface-3); white-space: nowrap; }
 .pcard-note { flex: 1; color: var(--faint); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.pcard-chev { color: var(--faint); font-size: 10px; transition: transform 0.15s; }
+.pcard-state { font-size: 10.5px; color: var(--faint); white-space: nowrap; }
+.pcard-state.ok { color: var(--accent-2-fg); }
+.pcard-chev { width: 13px; height: 13px; color: var(--faint); flex: none; transition: transform 0.16s ease; }
 .pcard.open .pcard-chev { transform: rotate(90deg); }
-.pcard-body { display: none; padding: 10px 12px 12px; border-top: 1px dashed var(--line-2); flex-direction: column; gap: 8px; }
+.pcard-body { display: none; flex-direction: column; gap: 9px; padding: 11px 12px 13px; border-top: 1px dashed var(--line-2); background: color-mix(in srgb, var(--bg) 32%, var(--surface-2)); }
 .pcard.open .pcard-body { display: flex; }
-.pcard-body label { display: flex; flex-direction: column; gap: 4px; font-size: 11.5px; color: var(--muted); }
-.pcard-body .btn-icon { align-self: flex-end; margin-top: -26px; margin-right: 4px; position: relative; }
-.pcard-actions { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
-.pcard-test { flex: 1; font-size: 11px; color: var(--muted); }
+.pcard-keyrow { position: relative; display: block; }
+.pcard-keyrow .sh-input { width: 100%; padding-right: 42px; }
+.pcard-keyrow .btn-icon { position: absolute; right: 5px; top: 50%; transform: translateY(-50%); }
+.pcard-actions { display: flex; align-items: center; gap: 8px; margin-top: 2px; }
+.pcard-test { flex: 1; font-size: 11px; color: var(--muted); min-height: 16px; }
 .pcard-test.ok { color: #34d399; }
 .pcard-test.err { color: #fb7185; }
-.pill { font-size: 10px; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
-.pill-ok { background: color-mix(in srgb, #34d399 16%, transparent); color: #34d399; }
-.pill-off { background: var(--surface-3); color: var(--faint); }
+
+/* 설정 카드 셸 — 고정 헤더/푸터 + 가운데 스크롤 */
+.modal-card.settings-card { width: 640px; max-width: 94vw; max-height: min(760px, calc(100dvh - 40px)); padding: 0; display: flex; flex-direction: column; overflow: hidden; }
+.s-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 18px 22px 14px; border-bottom: 1px solid var(--line); }
+.s-head h3 { margin: 0; font-size: 16px; letter-spacing: -0.2px; }
+.s-sub { display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--muted); margin-top: 7px; line-height: 1.4; }
+.s-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line-2); flex: none; }
+.s-dot.on { background: var(--accent-2); box-shadow: 0 0 8px color-mix(in srgb, var(--accent-2) 55%, transparent); }
+.s-body { padding: 16px 22px 8px; overflow-y: auto; min-height: 0; flex: 1 1 auto; display: flex; flex-direction: column; gap: 18px; overscroll-behavior: contain; }
+.s-group { display: flex; flex-direction: column; gap: 10px; }
+.s-group-title { font-size: 11px; font-weight: 600; letter-spacing: 0.6px; text-transform: uppercase; color: var(--faint); }
+.s-group-title .lbl-dim { text-transform: none; letter-spacing: 0; }
+.s-howto { display: flex; align-items: center; gap: 9px; font-size: 11.5px; line-height: 1.5; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; }
+.s-howto .ic { width: 14px; height: 14px; color: var(--accent-2); flex: none; }
+.s-steps { font-size: 11px; color: var(--faint); letter-spacing: 0.1px; }
+.s-steps .arr { color: var(--line-2); margin: 0 3px; }
+.s-steps b { color: var(--muted); }
+.s-foot { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 13px 22px; border-top: 1px solid var(--line); background: var(--surface); }
+.s-foot-hint { font-size: 10.5px; color: var(--faint); }
+.fld { display: flex; flex-direction: column; gap: 6px; font-size: 12px; color: var(--muted); margin: 0 !important; }
+.modal-card .fld .sh-input, .modal-card .fld select.sh-input { margin: 0; width: 100%; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 9px; padding: 9px 11px; color: var(--text); font-size: 12.5px; transition: border-color 0.13s, box-shadow 0.13s; }
+.fld .sh-input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.fld-note { color: var(--faint); font-size: 10.5px; line-height: 1.5; }
 
 /* ── 빈 상태 / 모달 ── */
 .hidden { display: none !important; }
@@ -456,7 +484,7 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .empty-card p { color: var(--muted); line-height: 1.75; margin-bottom: 24px; }
 
 .modal { position: fixed; inset: 0; background: color-mix(in srgb, var(--bg) 55%, rgba(0, 0, 0, 0.6)); backdrop-filter: blur(4px); display: grid; place-items: center; z-index: 100; }
-.modal-card { background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-lg); padding: 24px; width: 480px; max-width: 90vw; box-shadow: var(--shadow-2); }
+.modal-card { background: var(--surface); border: 1px solid var(--line-2); border-radius: var(--r-lg); padding: 24px; width: 480px; max-width: 90vw; max-height: calc(100dvh - 40px); overflow-y: auto; box-shadow: var(--shadow-2); }
 .modal-card h3 { margin: 0 0 18px; font-size: 16px; }
 .modal-card label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 15px; }
 .lbl-dim { color: var(--faint); }
