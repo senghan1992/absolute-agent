@@ -38,13 +38,19 @@ const AUTH_CANDIDATES = [
   ".pi/agent/redcell/authorization.yaml",
 ].filter(Boolean) as string[];
 
+// 게이트가 **명시적으로** 켜진 경우(데스크톱 패널이 -e + REDCELL_GATE=1 로 스폰)만
+// fail-closed 로 전부 차단한다. 인가 파일이 아예 없는 상태에서의 우연 로드/수동 세션은
+// 조용히 통과시켜 다른 작업을 방해하지 않는다(문제 보고: 전역 설치가 다른 pi 세션을 간섭).
+const GATE_EXPLICIT = process.env.REDCELL_GATE === "1";
+const GATE_DISABLED = process.env.REDCELL_DISABLE === "1";
+
 const METHODOLOGY = `
 # RedCell — prime-agent 화이트해커 모드
 
 너는 화이트해커 조수다. 인가(scope)는 RedCell 이 강제한다:
 - **Scope 강제**: '~/.redcell/authorization.list'(또는 authorization.yaml) 의 allow 에 있는 대상만
   다룬다. 확신이 없으면 /scope 로 확인하고, scope 밖이면 시도조차 하지 않는다.
-  (모든 tool_call 은 RedCell 훅이 자동으로 검사·차단한다 — 인가 파일 없으면 전부 차단.)
+  (모든 tool_call 은 RedCell 훅이 자동으로 검사·차단한다 — 인가 파일에 없으면 차단.)
 
 작업 순서(PTES): 정찰(recon) → 열거(enumerate) → 익스플로잇(exploit) → 사후(post) → 보고(report).
 각 단계 시작 시, harness 메모리에 축적된 과거 성공 전술(playbook)을 먼저 검토하라.
@@ -52,6 +58,9 @@ const METHODOLOGY = `
 `.trim();
 
 export default async function redcell(pi: ExtensionAPI): Promise<void> {
+  // 비상 탈출구: REDCELL_DISABLE=1 이면 아무것도 등록하지 않는다.
+  if (GATE_DISABLED) return;
+
   let guard: ScopeGuard | null = null;
   let authError: string | null = null;
 
@@ -76,7 +85,12 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
   pi.on("tool_call", async (event: any, _ctx: ExtensionContext) => {
     await ensureGuard();
     if (authError) {
-      return { block: true, reason: `RedCell: 인가 파일 로드 실패로 모든 액션을 차단합니다. ${authError}` };
+      // 인가 파일이 어디에도 없으면: 명시 게이트(REDCELL_GATE=1)일 때만 전부 차단(fail-closed),
+      // 그 외(우연 로드·수동 pi 세션)는 조용히 통과 — 다른 작업을 방해하지 않는다.
+      if (GATE_EXPLICIT) {
+        return { block: true, reason: `RedCell: 인가 파일 로드 실패로 모든 액션을 차단합니다. ${authError}` };
+      }
+      return;
     }
     if (!guard) return; // 이론상 도달 불가
 
@@ -117,7 +131,10 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
       async execute(_id, params: { host: string; port?: number; path?: string }) {
         await ensureGuard();
         if (!guard) {
-          return { content: [{ type: "text", text: `인가 파일 없음: ${authError}` }], details: {}, isError: true } as any;
+          if (GATE_EXPLICIT) {
+            return { content: [{ type: "text", text: `인가 파일 없음: ${authError}` }], details: {}, isError: true } as any;
+          }
+          return { content: [{ type: "text", text: `RedCell: 인가 게이트가 꺼져 있어 재크 툴을 사용하지 않습니다(설정: REDCELL_GATE=1 + 인가 파일).` }], details: {}, isError: true } as any;
         }
         const target: Target = { host: params.host, port: params.port, intent: "recon" };
         const d = guard.check(target);

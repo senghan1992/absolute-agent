@@ -690,6 +690,8 @@ fn run_prime(
     cmd.arg(cli.as_os_str());
     cmd.current_dir(prime_cwd(redcell));
     cmd.args(&args);
+    // 인가 게이트 명시 활성화: 확장의 tool_call 훅이 이 세션에서만 fail-closed 로 동작한다.
+    cmd.env("REDCELL_GATE", "1");
     if let Some(conn) = settings.providers.get(provider) {
         inject_provider_env(&mut cmd, provider, conn);
     }
