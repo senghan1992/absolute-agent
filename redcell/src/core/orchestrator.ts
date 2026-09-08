@@ -48,6 +48,9 @@ export type OrchestratorEvent =
   | { type: "tool_result"; text: string; phase: Phase; tool: string; ok: boolean; summary: string; severity?: EngagementFinding["severity"] }
   | { type: "finding"; text: string; finding: EngagementFinding }
   | { type: "distilled"; text: string; id: string; title: string }
+  | { type: "reflect"; text: string; round: number }
+  | { type: "reward"; text: string; step: number; value: number }
+  | { type: "verify"; text: string; verdict: "achieved" | "partial" | "unclear"; ratio: number }
   | { type: "note"; text: string }
   | { type: "error"; text: string }
   | { type: "done"; text: string; log: EngagementLog };

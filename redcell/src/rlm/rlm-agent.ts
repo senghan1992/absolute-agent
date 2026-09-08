@@ -7,20 +7,22 @@
  *      프로세스의 globals 에 계속 실행된다(스텝을 넘어 변수·상태 지속).
  *   2) **prompt-as-a-variable** — REPL 전역 `ctx` 사전: 모델이 ctx_get/ctx_set 으로
  *      맥락(관찰, 중간 결과, 가설)을 코드 변수로 관리한다.
- *   3) **재귀 서브콜 rlm(prompt)** — 파이썬 함수처럼 하위 (R)LM 에이전트를 호출하고,
- *      그 최종 답변을 **값으로** 돌려받는다(프로그래매틱 subagent calling).
- *   4) **자기발전 기억** — rc.memo(key, text) 로 배운 전략을 세션 메모리 파일에 남기고,
- *      다음 실행 시작 시 ctx.memories 로 재주입된다(continual harness).
+ *   3) **재귀/병렬 서브콜** — rlm(prompt) 동기, rlm_async(prompt)+rlm_wait(key) 병렬.
+ *   4) **Continual Harness(자기발전)** — 이전 실행에서 distilled/memo/reflect 로 쌓인
+ *      지식을 관련성 점수로 회상(recall)해 주입하고, 이번 실행 결과를 증류(distill)해
+ *      저장한다. 진전 없음 → 회고(reflect), 스텝별 보상(reward), 목표 달성 검증(verify).
  *
  * 안전은 엔진과 동일: 모든 대상 통신은 ReplSession 의 BrokerCtx(ScopeGuard·예산·RPS·
  * 비파괴)를 통과하고, 파괴/DoS/scope 밖은 어느 경로(재귀 포함)에서도 차단된다.
- * 모델 재귀 깊이·요청 예산·스텝 수는 상한이 있다.
+ * 학습 지식은 **로컬 파일(~/.redcell/harness)**에만 기록된다(외부 유출 없음).
  */
 
 import type { ScopeGuard, Target } from "../scope/scope-guard.js";
 import type { ModelAdapter, EngagementLog, EngagementFinding } from "../core/types.js";
 import type { OrchestratorEvent, SessionContext } from "../core/orchestrator.js";
 import { ReplSession, type ReplMem, type ReplStepResult } from "../py/broker.js";
+import { HarnessStore, type HarnessRecall, tokenize } from "../harness/harness-store.js";
+import { SkillLibrary } from "../harness/skill-library.js";
 
 export interface RlmAgentOpts {
   /** 모델 재귀 깊이 상한(rlm() 중첩 호출). 기본 3. */
@@ -31,10 +33,18 @@ export interface RlmAgentOpts {
   stepTimeoutMs?: number;
   /** 재귀 세션 전체가 공유하는 요청 예산(브로커가 강제). */
   budget?: { used: number; max: number };
-  /** 이전 세션에서 학습한 기억(ctx.memories + 시스템 프롬프트 재주입). */
+  /** 이전 세션에서 학습한 평판 기억(ctx.memories + 시스템 프롬프트 재주입, 하위 호환). */
   memories?: string[];
-  /** rc.memo() 수집분을 끝에 기록할 파일(markdown). */
+  /** rc.memo() 수집분을 끝에 기록할 파일(markdown, 하위 호환). */
   memoryFile?: string;
+  /** Continual Harness — 형식화 평생 지식(recall/record/distill 의 저장소). */
+  harness?: HarnessStore;
+  /** 스킬 카탈로그(rc.skill(name) → SKILL.md 본문). */
+  skills?: SkillLibrary;
+  /** 진전 없는 스텝 N 회 연속 → 강제 회고(reflect). 기본 4. */
+  reflectAfter?: number;
+  /** 목표 검증 시 최소 토큰 일치율(미충족 시 추가 증거 스텝 1회). 기본 0.5. */
+  verifyRatio?: number;
   /** 실시간 이벤트 훅(Orchestrator 와 동일 형식 → 패널/CLI 가 그대로 소비). */
   onEvent?: (e: OrchestratorEvent) => void;
   /** 로그인/프록시 세션. */
@@ -55,6 +65,9 @@ interface StepRecord {
   result: ReplStepResult;
 }
 
+/* 발견 심각도 → 스텝 보상. */
+const SEV_SCORE: Record<string, number> = { critical: 1, high: 1, medium: 0.6, low: 0.4, info: 0.1 };
+
 const RLM_SYSTEM =
   "너는 RLM(Recursive Language Model) 화이트해커다. 작업을 코드로 분해해 영구 " +
   "Python REPL 에서 실행한다. 핵심 규칙:\n" +
@@ -64,14 +77,17 @@ const RLM_SYSTEM =
   "2) REPL 은 **영구**다: 변수와 ctx 가 스텝을 넘어 유지된다. 중간 관찰·가설·결과는 ctx_set()/ctx_get() 으로 " +
   "'코드 변수(prompt-as-variable)'로 관리하고 다음 스텝에서 이어 써라.\n" +
   "3) 작업이 크면 **재귀 서브콜**로 분해하라: r = rlm('하위 작업 지시', 8) — 하위 에이전트가 실행되고 " +
-  "최종 답변이 값으로 돌아온다(깊이 제한 있음 — 과도한 위임은 삼가고, 부분 문제에만 쓸 것).\n" +
-  "4) 통한 전략·재사용할 지식은 rc.memo('키', '내용') 로 기억하라(다음 세션에 재주입됨).\n" +
+  "최종 답변이 값으로 돌아온다(깊이 제한 있음). 독립적인 부문제 여러 개는 rlm_async('지시') 로 동시에 던진 뒤 " +
+  "rlm_wait(키) 로 결과를 모아라(병렬 재귀, 예산은 공유).\n" +
+  "4) 통한 전략·재사용할 지식은 rc.memo('키','내용') 로 harness 에 기록하라(다음 실행에서 " +
+  "관련성 점수로 자동 회상·주입됨 — 이번 세션의 harness_memories 에도 있다).\n" +
   "5) 취약 신호 확인 시 rc.finding(title, severity, evidence=, impact=) 로 보고(severity: info|low|medium|high|critical).\n" +
   "6) 인가된 대상이면 공격적으로 파고들어라: 쿠키 위조/토큰 우회, SSRF(인가 호스트 경유), SQLi·XSS·SSTI·경로조작·인증우회·API 남용을 " +
   "실제 페이로드로 시도하되, **scope 밖 호스트·데이터 파괴/변조·DoS(폭주/무한루프)는 금지** — 신호 확인만.\n" +
   "7) 문법(괄호/들여쓰기)을 보내기 전에 스스로 검사하라 — 문법 오류는 실행되지 않고 그대로 반환된다.\n" +
   "8) 목표가 끝나면 최종 답변을 print('FINAL: ...') 로 한 줄에 내라. " +
-  "응답은 JSON 하나로만: {\"code\": <python|null>, \"text\": <자유텍스트|null>, \"rationale\": \"<한 줄 근거>\", \"done\": <bool>}.";
+  "응답은 JSON 하나로만: {\"code\": <python|null>, \"text\": <자유텍스트|null>, \"rationale\": \"<한 줄 근거>\", \"done\": <bool>}.\n" +
+  "9) 절차 스킬이 필요하면 rc.skill('스킬명') → 본문 문자열(카탈로그는 ctx.skills_catalog 참고).";
 
 export class RlmAgent {
   constructor(
@@ -81,7 +97,11 @@ export class RlmAgent {
   ) {}
 
   /** 최종 답변(FINAL: 이후 텍스트) — rlm() 재귀 콜이 돌려받는 값. */
-  private finalText = "";
+  finalText = "";
+
+  /** 병렬 서브콜 키 → 진행 중 Promise. */
+  private asyncKids = new Map<string, Promise<string>>();
+  private asyncSeq = 0;
 
   async run(target: Target, goal: string): Promise<EngagementLog> {
     const depth = this.opts.depth ?? 0;
@@ -109,7 +129,25 @@ export class RlmAgent {
     }
     if (depth === 0) {
       emit({ type: "authorized", text: `[인가] ${gate.reason} — 목표: ${goal}`, target, goal });
-      emit({ type: "phase", text: "[phase] rlm-agent (영구 REPL + 재귀 서브콜) 시작", phase: "exploit" });
+      emit({ type: "phase", text: "[phase] rlm-agent (영구 REPL + 재귀/병렬 서브콜 + 평생 학습) 시작", phase: "exploit" });
+    }
+
+    // ── Continual Harness 회상: 이전 실행의 학습을 관련성 점수로 되살린다. ──
+    let recalls: HarnessRecall[] = [];
+    if (this.opts.harness) {
+      try {
+        recalls = await this.opts.harness.recall(`${goal} ${target.host} ${target.port ?? ""}`, { max: 8 });
+        if (recalls.length) {
+          emit({
+            type: "recall",
+            phase: "exploit",
+            count: recalls.length,
+            text: `[학습 회상] ${recalls.length}건 — ${recalls.map((r) => r.entry.key).join(", ")}`,
+          });
+        }
+      } catch (e) {
+        emit({ type: "note", text: `[학습] harness 회상 실패(무시하고 계속): ${(e as Error).message}` });
+      }
     }
 
     const memories = this.opts.memories ?? [];
@@ -117,8 +155,14 @@ export class RlmAgent {
       goal,
       target: `${target.host}${target.port ? `:${target.port}` : ""}`,
       memories,
+      harness_memories: recalls.map((r) => `- [${r.entry.kind}:${r.entry.key}] ${r.entry.text} (hits=${r.entry.hits}, win=${((r.entry.wins + 1) / (r.entry.wins + r.entry.fails + 2)).toFixed(2)})`),
     };
     if (depth > 0) ctx.parent = "이 에이전트는 상위 작업의 일부를 위임받았다 — 요청된 부분만 처리하고 FINAL 로 답하라.";
+    if (this.opts.skills) {
+      const cat = this.opts.skills.catalog();
+      ctx.skills_catalog = cat;
+      if (cat.length) emit({ type: "note", text: `[스킬] 카탈로그 ${cat.length}개 — ${cat.map((c) => c.name).join(", ")}` });
+    }
 
     const repl = await ReplSession.create({
       guard: this.guard,
@@ -132,38 +176,21 @@ export class RlmAgent {
       trusted: this.opts.trusted ?? this.model.trusted === true,
       python: this.opts.python,
       ctx,
-      onRlm: async (req) => {
-        // RLM 재귀 서브콜: 같은 게이트·같은 예산으로 하위 에이전트를 돌리고 결과를 값으로 돌려준다.
-        if (depth >= (this.opts.maxDepth ?? 3)) {
-          emit({ type: "note", text: `[${label}] rlm() 최대 재귀 깊이(${this.opts.maxDepth ?? 3}) — 상위에서 직접 처리하도록 지시했습니다.` });
-          return `[rlm] 최대 재귀 깊이(${this.opts.maxDepth ?? 3}) 초과 — 이 부분은 상위 에이전트가 직접 처리하세요.`;
-        }
-        const kid = new RlmAgent(this.guard, this.model, {
-          ...this.opts,
-          depth: depth + 1,
-          maxIterations: Math.min(req.max_steps || 8, 8),
-          onEvent: (e) => {
-            if (e.type === "note" || e.type === "finding") {
-              emit({ ...e, text: `[${label}↘] ${e.text}` });
-            }
-          },
-        });
-        const klog = await kid.run(target, req.prompt);
-        // 하위 에이전트의 발견은 상위 로그로 승격(중복 제목 제외).
-        for (const f of klog.findings) {
-          if (!log.findings.some((x) => x.title === f.title)) {
-            log.findings.push(f);
-            emit({ type: "finding", finding: f, text: `[${label}↘ 발견] (${f.severity}) ${f.title}` });
-          }
-        }
-        const text = kid.finalText || `[${label}↘ 완료] (${
-          klog.findings.length ? `발견 ${klog.findings.length}건` : "발견 없음"
-        }, 하위 에이전트 종료)`;
-        return text;
+      onRlm: (req) => this.spawnKid(req.prompt, req.max_steps, label, emit, log, target),
+      onRlmAsync: (req, key) => {
+        const p = this.spawnKid(req.prompt, req.max_steps, label, emit, log, target).finally(() => this.asyncKids.delete(key));
+        this.asyncKids.set(key, p);
+        return Promise.resolve();
       },
+      onRlmWait: async (key) => (this.asyncKids.get(key) ?? Promise.resolve("[rlm] 해당 키의 하위 에이전트가 없습니다")),
+      onSkill: (name) => this.opts.skills?.get(name)?.body ?? `[skill] 카탈로그에 없음: ${name}`,
       onMemo: (m: ReplMem) => {
         this.memos.push(m);
         emit({ type: "note", text: `[${label}·기억] ${m.key}: ${m.text.slice(0, 200)}` });
+        // 형식화 harness 로도 기록(다음 실행 recall 대상).
+        if (this.opts.harness) {
+          void this.opts.harness.upsert({ kind: "memory", key: m.key, text: m.text, tags: [target.host], source: "memo" }).catch(() => undefined);
+        }
       },
       onRequest: (info) =>
         info.blocked
@@ -172,9 +199,40 @@ export class RlmAgent {
     });
 
     const attempts: StepRecord[] = [];
+    let cumReward = 0;
+    let noProgressStreak = 0;
+    let reflectRound = 0;
+    const reflectAfter = this.opts.reflectAfter ?? 4;
     try {
       for (let i = 0; i < maxIter; i++) {
-        const plan = await this.planStep(target, goal, attempts, memories, emit);
+        // ── 회고(reflect): 진전 없는 연속 스텝 → 전략 전환 강제 + tabu 기억. ──
+        let reflecting = false;
+        if (noProgressStreak >= reflectAfter) {
+          reflecting = true;
+          noProgressStreak = 0;
+          reflectRound++;
+          const last = attempts.slice(-3).map((a) => a.rationale);
+          emit({
+            type: "reflect",
+            round: reflectRound,
+            text: `[회고 ${reflectRound}] ${reflectAfter} 스텝 연속 진전 없음 — 전략 전환: (${last.join(" → ")})`,
+          });
+          if (this.opts.harness) {
+            try {
+              await this.opts.harness.upsert({
+                kind: "memory",
+                key: `tabu-${Date.now().toString(36)}`,
+                text: `진전 없었던 전술: ${last.join(" → ")} — 같은 맥락에서 재시도하지 말고 다른 벡터를 시도할 것(이번 세션에서 직접 확인됨).`,
+                tags: ["tabu", target.host],
+                source: "reflect",
+              });
+            } catch {
+              /* 기록 실패는 치명적이지 않음 */
+            }
+          }
+        }
+
+        const plan = await this.planStep({ target, goal, attempts, ctx, reflecting, emit });
         if (!plan) {
           emit({ type: "note", text: `[${label}] 모델이 종료를 선언(또는 더 낼 코드 없음).` });
           break;
@@ -222,12 +280,20 @@ export class RlmAgent {
           }
           for (const lg of result.logs) emit({ type: "note", text: `[관찰] ${lg}` });
 
+          const newFindings: typeof result.findings = [];
           for (const f of result.findings) {
             if (log.findings.some((x) => x.title === f.title)) continue;
+            newFindings.push(f);
             const finding: EngagementFinding = { phase: "exploit", severity: f.severity, title: f.title, detail: plan.rationale, evidence: f.evidence, impact: f.impact };
             log.findings.push(finding);
             emit({ type: "finding", finding, text: `[발견] (${finding.severity}) ${finding.title}` });
           }
+
+          // ── 보상(reward): 새 발견 심각도 + 유효 행동(요청). 진전 없음 → streak. ──
+          const reward = rewardFor(result, newFindings);
+          cumReward += reward;
+          noProgressStreak = reward > 0 ? 0 : noProgressStreak + 1;
+          emit({ type: "reward", step: i + 1, value: reward, text: `[보상] 스텝 ${i + 1}: +${reward.toFixed(2)} (누적 ${cumReward.toFixed(2)})` });
 
           // FINAL: 프린트는 이 에이전트(재귀 값 포함)의 최종 답변이다 — 코드로 답을 내는 RLM 계약.
           // (로그/발견 처리를 먼저 끝낸 뒤 종료한다 — break 가 관찰·발견을 삼키지 않도록.)
@@ -245,7 +311,37 @@ export class RlmAgent {
       await repl.close();
     }
 
-    // 자기발전 기억: rc.memo() 수집분을 메모리 파일에 누적 기록.
+    // ── 자기발전: 발견 → 증류(distill), 회상 항목 신용/불신, 목표 검증(verify). ──
+    if (this.opts.harness) {
+      try {
+        const found = log.findings.length > 0;
+        for (const f of log.findings) {
+          const src = attempts.find((a) => a.result.findings.some((x) => x.title === f.title));
+          const e = await this.opts.harness.distill({
+            title: `${target.host}: ${f.title}`,
+            kind: "memory",
+            tags: [f.severity, ...tokenize(`${f.title} ${f.detail}`)],
+            text: `${f.title} (${f.severity}) — ${f.detail}${f.evidence ? " 증거: " + clip(f.evidence, 200) : ""}${src ? " 방법: " + src.rationale : ""}`,
+          });
+          emit({ type: "distilled", id: e.key, title: f.title, text: `[증류] ${f.title} → 기억 [${e.key}] 저장` });
+        }
+        if (recalls.length) {
+          if (found) await this.opts.harness.win(recalls.map((r) => r.entry.key));
+          else if (attempts.length >= 2) await this.opts.harness.fail(recalls.map((r) => r.entry.key));
+        }
+        const v = verifyGoal(goal, log.findings, this.finalText, this.opts.verifyRatio ?? 0.5);
+        emit({
+          type: "verify",
+          verdict: v.verdict,
+          ratio: v.ratio,
+          text: `[검증] 목표 달성 판정: ${v.verdict} (일치율 ${(v.ratio * 100).toFixed(0)}%) — ${v.reason}`,
+        });
+      } catch (e) {
+        emit({ type: "note", text: `[학습] 증류/검증 실패(무시): ${(e as Error).message}` });
+      }
+    }
+
+    // 자기발전 기억(하위 호환): rc.memo() 수집분을 평판 메모리 파일에도 누적 기록.
     if (this.memos.length && this.opts.memoryFile) {
       try {
         const { appendFileSync } = await import("node:fs");
@@ -270,16 +366,53 @@ export class RlmAgent {
 
   private memos: ReplMem[] = [];
 
-  /** 모델에게 다음 REPL 코드/텍스트 한 조각을 받는다. null 이면 종료. */
-  private async planStep(
-    target: Target,
-    goal: string,
-    attempts: StepRecord[],
-    memories: string[],
+  /** 재귀/병렬 공용: 하위 RlmAgent 를 띄우고 결과 문자열을 얻는다(같은 게이트·예산). */
+  private async spawnKid(
+    prompt: string,
+    maxSteps: number,
+    label: string,
     emit: (e: OrchestratorEvent) => void,
-  ): Promise<{ code?: string; text?: string; rationale: string; done: boolean } | null> {
-    const history = attempts.slice(-4).map((a, i) => ({
-      step: attempts.length - Math.min(4, attempts.length) + i + 1,
+    log: EngagementLog,
+    target: Target,
+  ): Promise<string> {
+    if ((this.opts.depth ?? 0) >= (this.opts.maxDepth ?? 3)) {
+      emit({ type: "note", text: `[${label}] rlm() 최대 재귀 깊이(${this.opts.maxDepth ?? 3}) — 상위에서 직접 처리하도록 지시했습니다.` });
+      return `[rlm] 최대 재귀 깊이(${this.opts.maxDepth ?? 3}) 초과 — 이 부분은 상위 에이전트가 직접 처리하세요.`;
+    }
+    const kid = new RlmAgent(this.guard, this.model, {
+      ...this.opts,
+      depth: (this.opts.depth ?? 0) + 1,
+      maxIterations: Math.min(maxSteps || 8, 8),
+      onEvent: (e) => {
+        if (e.type === "note" || e.type === "finding" || e.type === "distilled" || e.type === "verify" || e.type === "recall") {
+          emit({ ...e, text: `[${label}↘] ${e.text}` });
+        }
+      },
+    });
+    const klog = await kid.run(target, prompt);
+    // 하위 에이전트의 발견은 상위 로그로 승격(중복 제목 제외).
+    for (const f of klog.findings) {
+      if (!log.findings.some((x) => x.title === f.title)) {
+        log.findings.push(f);
+        emit({ type: "finding", finding: f, text: `[${label}↘ 발견] (${f.severity}) ${f.title}` });
+      }
+    }
+    return kid.finalText || `[${label}↘ 완료] (${klog.findings.length ? `발견 ${klog.findings.length}건` : "발견 없음"}, 하위 에이전트 종료)`;
+  }
+
+  /** 모델에게 다음 REPL 코드/텍스트 한 조각을 받는다. null 이면 종료. */
+  private async planStep(args: {
+    target: Target;
+    goal: string;
+    attempts: StepRecord[];
+    ctx: Record<string, unknown>;
+    reflecting: boolean;
+    emit: (e: OrchestratorEvent) => void;
+  }): Promise<{ code?: string; text?: string; rationale: string; done: boolean } | null> {
+    const { target, goal, attempts, ctx, reflecting, emit } = args;
+    const window = attempts.slice(-4);
+    const history = window.map((a, i) => ({
+      step: attempts.length - window.length + i + 1,
       code: a.code,
       ok: a.result.ok,
       danger: a.result.danger,
@@ -291,23 +424,38 @@ export class RlmAgent {
       blocked: a.result.blockedRequests,
       findings: a.result.findings.map((f) => f.title),
     }));
+    const instruction =
+      `대상=${target.host}${target.port ? ":" + target.port : ""}. 목표=${goal}. ` +
+      `직전 스텝들의 코드·출력을 보고 다음에 실행할 파이썬 코드 1개를 작성하라. ` +
+      `REPL 은 영구이므로 이전 변수/ctx 를 이어 쓸 수 있다. ` +
+      `부문제는 rlm('지시', 8) 재귀로 위임하고 결과를 값으로 받아라. 독립 부문제는 rlm_async/rlm_wait 로 병렬화. ` +
+      `통한 전략은 rc.memo('키','내용') 으로 남겨라. 재사용할 절차는 rc.skill('스킬명') 로 읽어라. ` +
+      `아직 확인 안 된 벡터를 노려라(쿠키 우회·SSRF 경유·SQLi·SSTI·인증우회·API 남용 등). ` +
+      `문법을 보내기 전에 검사하라 — 문법 오류는 실행되지 않고 그대로 반환된다. ` +
+      `모두 끝났으면 print('FINAL: ...') 하는 코드 또는 text 에 FINAL: 를 내라.` +
+      (reflecting
+        ? ` 지금까지 ${this.opts.reflectAfter ?? 4} 스텝 연속 진전이 없었다. **이전과 다른 전략을 제안하라** — ` +
+          `반복 실패 전술(tabu 로 기록됨)을 다시 시도하지 말고, 목표와 대상만 다시 보고 새 벡터를 골라라.`
+        : "");
+    const harnessText = (ctx.harness_memories as string[] | undefined)?.length
+      ? "이전 세션에서 학습한 지식(재사용해라):\n" + (ctx.harness_memories as string[]).join("\n")
+      : undefined;
+    const cat = ctx.skills_catalog as { name: string; description: string }[] | undefined;
     const prompt = JSON.stringify({
-      instruction:
-        `대상=${target.host}${target.port ? ":" + target.port : ""}. 목표=${goal}. ` +
-        `직전 스텝들의 코드·출력을 보고 다음에 실행할 파이썬 코드 1개를 작성하라. ` +
-        `REPL 은 영구이므로 이전 변수/ctx 를 이어 쓸 수 있다. ` +
-        `부문제는 rlm('지시', 8) 재귀로 위임하고 결과를 값으로 받아라. ` +
-        `통한 전략은 rc.memo('키','내용') 으로 남겨라. ` +
-        `아직 확인 안 된 벡터를 노려라(쿠키 우회·SSRF 경유·SQLi·SSTI·인증우회·API 남용 등). ` +
-        `문법을 보내기 전에 검사하라 — 문법 오류는 실행되지 않고 그대로 반환된다. ` +
-        `모두 끝났으면 print('FINAL: ...') 하는 코드 또는 text 에 FINAL: 를 내라.`,
+      instruction,
       target,
       helper_api:
         "rc.get(path)/rc.post(...)/rc.http(method, path_or_url, ...) → r.status/r.headers/r.text/r.json(); " +
         "rc.tcp(host, port, payload=b'...'|None); rc.b64e/b64d; rc.finding(title, severity, evidence=, impact=); " +
         "rc.log(...); rc.ctx_get(key, default)/rc.ctx_set(key, value) — 영구 맥락 변수(prompt-as-variable); " +
-        "rlm(prompt, max_steps=8) → 하위 에이전트 최종 답변 문자열(값처럼 사용); rc.memo(key, text) — 자기발전 기억",
-      ...(memories.length ? { memories: `이전 세션에서 학습한 기억(재사용해라):\n` + memories.map((m) => `  - ${m}`).join("\n") } : {}),
+        "rlm(prompt, max_steps=8) → 하위 에이전트 최종 답변 문자열; " +
+        "rlm_async(prompt, max_steps=8, key=None) → 키 반환(비차단), rlm_wait(key) → 결과; " +
+        "rc.skill(name) → SKILL.md 본문; rc.memo(key, text) — 자기발전 기억",
+      ...(harnessText ? { harness_memories: harnessText } : {}),
+      ...(cat?.length ? { skills_catalog: cat.map((c) => `${c.name}: ${c.description}`) } : {}),
+      ...((this.opts.memories ?? []).length
+        ? { memories: `이전 세션에서 학습한 기억(재사용해라):\n` + (this.opts.memories ?? []).map((m) => `  - ${m}`).join("\n") }
+        : {}),
       previous_attempts: history,
       response_schema: { code: "string(python)|null", text: "string|null(FINAL: 접두사로 최종답변)", rationale: "string", done: "boolean" },
     });
@@ -330,6 +478,32 @@ export class RlmAgent {
     if (typeof parsed.text === "string" && parsed.text.trim()) out.text = parsed.text;
     return out.code || out.text || out.done ? out : null;
   }
+}
+
+/** 스텝 보상: 새 발견의 심각도 합 + 유효 행동 소액. 오류/차단/구문오류는 0. */
+function rewardFor(r: ReplStepResult, newFindings: { severity: string }[]): number {
+  if (r.syntax || r.danger || r.exc) return 0;
+  let v = 0;
+  for (const f of newFindings) v += SEV_SCORE[f.severity] ?? 0.1;
+  if (r.requests > 0) v += 0.05;
+  return Math.round(v * 100) / 100;
+}
+
+/** 목표 검증: 목표 토큰 중 발견 제목/상세·최종답변에 등장한 비율. */
+function verifyGoal(
+  goal: string,
+  findings: EngagementFinding[],
+  finalText: string,
+  minRatio: number,
+): { verdict: "achieved" | "partial" | "unclear"; ratio: number; reason: string } {
+  const tokens = tokenize(goal);
+  if (!tokens.size) return { verdict: "unclear", ratio: 1, reason: "목표 토큰 없음" };
+  const hay = `${findings.map((f) => `${f.title} ${f.detail}`).join(" ")} ${finalText ?? ""}`.toLowerCase();
+  const hits = [...tokens].filter((tk) => hay.includes(tk)).length;
+  const ratio = hits / tokens.size;
+  if (ratio >= minRatio) return { verdict: "achieved", ratio, reason: `토큰 ${hits}/${tokens.size} 일치` };
+  if (ratio > 0) return { verdict: "partial", ratio, reason: `토큰 ${hits}/${tokens.size} 일치 — 증거 부족` };
+  return { verdict: "unclear", ratio, reason: "목표와 일치하는 증거 없음" };
 }
 
 function resultSummary(r: ReplStepResult): string {

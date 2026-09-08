@@ -278,8 +278,37 @@ function runnerScript(): string {
     "    def memo(self, key, text):",
     "        # 자기발전 기억: 엔진이 세션 메모리 파일에 기록해 다음 실행에서 재주입한다.",
     "        print('##RC_MEMO## ' + _b64.b64encode(_json.dumps({'key': key, 'text': text}).encode()).decode(), flush=True)",
+    "    def skill(self, name):",
+    "        # 절차 스킬 카탈로그 요청: 엔진이 skills/<name>/SKILL.md 본문을 실어 준다.",
+    "        print('##RC_SKILL## ' + _b64.b64encode(name.encode('utf-8')).decode(), flush=True)",
+    "        _l = _sys.stdin.readline()",
+    "        if not _l or not _l.startswith('##RC_SKILL_RESULT## '):",
+    "            return '[skill] 스킬을 받지 못했습니다: ' + str(name)",
+    "        try:",
+    "            return _b64.b64decode(_l[len('##RC_SKILL_RESULT## '):].strip()).decode('utf-8')",
+    "        except Exception:",
+    "            return '[skill] 스킬 본문 디코딩 실패'",
+    "    def rlm_async(self, prompt, max_steps=8, key=None):",
+    "        # 병렬 재귀 서브콜(비차단): 즉시 키를 돌려주고 rlm_wait(key) 로 결과를 받는다.",
+    "        import uuid as _uuid",
+    "        _key = key or _uuid.uuid4().hex[:8]",
+    "        _req = _b64.b64encode(_json.dumps({'prompt': prompt, 'max_steps': max_steps}).encode()).decode()",
+    "        print('##RC_RLM_ASYNC## ' + _key + ' ' + _req, flush=True)",
+    "        return _key",
+    "    def rlm_wait(self, key):",
+    "        # 병렬 서브콜 결과 대기: 엔진이 하위 에이전트 완료 후 이 줄로 회신한다.",
+    "        print('##RC_RLM_WAIT## ' + str(key), flush=True)",
+    "        while True:",
+    "            _l = _sys.stdin.readline()",
+    "            if not _l:",
+    "                return '[rlm] 엔진과의 연결이 끊어졌습니다'",
+    "            if _l.startswith('##RC_RLM_RESULT## ' + str(key) + ' '):",
+    "                try:",
+    "                    return _b64.b64decode(_l[len('##RC_RLM_RESULT## ' + str(key) + ' '):].strip()).decode('utf-8')",
+    "                except Exception:",
+    "                    return '[rlm] 결과 디코딩 실패'",
     "    def rlm(self, prompt, max_steps=8):",
-    "        # RLM 재귀 서브콜: 하위 에이전트를 코드 함수처럼 호출하고 결과를 값을 받는다.",
+    "        # RLM 재귀 서브콜(동기식, 하위 호환): 엔진 콜백→결과를 값으로 받는다.",
     "        _req = _b64.b64encode(_json.dumps({'prompt': prompt, 'max_steps': max_steps}).encode()).decode()",
     "        print('##RC_RLM## ' + _req, flush=True)",
     "        _l = _sys.stdin.readline()",
@@ -616,6 +645,12 @@ export interface ReplSessionOpts extends PyRunOpts {
   ctx?: Record<string, unknown>;
   /** 파이썬의 rlm(prompt, max_steps) 재귀 서브콜마다 호출된다 → 결과 문자열을 돌려주면 값으로 반환된다. */
   onRlm?: (req: { prompt: string; max_steps: number }) => Promise<string>;
+  /** 파이썬의 rlm_async(prompt, max_steps, key) — 비차단 발신. key 로 완료를 추적한다. */
+  onRlmAsync?: (req: { prompt: string; max_steps: number }, key: string) => Promise<void>;
+  /** 파이썬의 rlm_wait(key) — 해당 키 하위 에이전트 결과(또는 실패 문자열)를 돌려준다. */
+  onRlmWait?: (key: string) => Promise<string>;
+  /** 파이썬의 rc.skill(name) — 스킬 본문(SKILL.md)을 돌려준다. */
+  onSkill?: (name: string) => Promise<string> | string;
   /** rc.memo(key, text) 마다 호출된다(자기발전 기억 수집). */
   onMemo?: (m: ReplMem) => void;
 }
@@ -727,6 +762,18 @@ export class ReplSession {
       void this.handleRlm(l);
       return;
     }
+    if (l.startsWith("##RC_RLM_ASYNC## ")) {
+      void this.handleRlmAsync(l);
+      return;
+    }
+    if (l.startsWith("##RC_RLM_WAIT## ")) {
+      void this.handleRlmWait(l);
+      return;
+    }
+    if (l.startsWith("##RC_SKILL## ")) {
+      void this.handleSkill(l);
+      return;
+    }
     this.stepBuf.push(l);
     if (l === "##RC_RESULT##") {
       if (this.stepTimer) clearTimeout(this.stepTimer);
@@ -752,6 +799,48 @@ export class ReplSession {
     }
     if (!this.child?.stdin?.writable) return;
     this.child.stdin.write("##RC_RLM_RESULT## " + Buffer.from(text, "utf8").toString("base64") + "\n");
+  }
+
+  /** ##RC_RLM_ASYNC## <key> <b64req> — 하위 에이전트를 병렬로 시작(즉시 반환, 결과는 wait 시 회신). */
+  private async handleRlmAsync(line: string): Promise<void> {
+    const rest = line.slice("##RC_RLM_ASYNC## ".length).trim();
+    const sp = rest.indexOf(" ");
+    if (sp < 0) return;
+    const key = rest.slice(0, sp).trim();
+    try {
+      const body = Buffer.from(rest.slice(sp + 1).trim(), "base64").toString("utf8");
+      const req = JSON.parse(body);
+      await this.opts.onRlmAsync?.({ prompt: String(req.prompt ?? ""), max_steps: Number(req.max_steps) || 8 }, key);
+    } catch (e) {
+      // 해석 실패: 아무것도 등록하지 않는다 — rlm_wait(key) 는 "결과 없음" 을 받는다.
+    }
+  }
+
+  /** ##RC_RLM_WAIT## <key> — 키에 해당하는 하위 에이전트 결과를 stdin 으로 회신. */
+  private async handleRlmWait(line: string): Promise<void> {
+    const key = line.slice("##RC_RLM_WAIT## ".length).trim();
+    let text = "[rlm] 하위 에이전트 결과 없음";
+    try {
+      if (this.opts.onRlmWait) text = await this.opts.onRlmWait(key);
+    } catch (e) {
+      text = `[rlm] 하위 에이전트 오류: ${(e as Error).message}`;
+    }
+    if (!this.child?.stdin?.writable) return;
+    this.child.stdin.write("##RC_RLM_RESULT## " + key + " " + Buffer.from(text, "utf8").toString("base64") + "\n");
+  }
+
+  /** ##RC_SKILL## <b64 name> — 스킬 본문을 stdin 으로 회신. */
+  private async handleSkill(line: string): Promise<void> {
+    let text = "[skill] 스킬을 받지 못했습니다";
+    try {
+      const name = Buffer.from(line.slice("##RC_SKILL## ".length).trim(), "base64").toString("utf8");
+      const body = this.opts.onSkill ? await this.opts.onSkill(name) : "";
+      text = body || `[skill] 스킬 없음: ${name}`;
+    } catch (e) {
+      text = `[skill] 스킬 오류: ${(e as Error).message}`;
+    }
+    if (!this.child?.stdin?.writable) return;
+    this.child.stdin.write("##RC_SKILL_RESULT## " + Buffer.from(text, "utf8").toString("base64") + "\n");
   }
 
   /** REPL 에 코드 한 스텝을 보내고 결과를 기다린다(순차 실행 전용). */
