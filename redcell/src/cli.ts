@@ -20,6 +20,7 @@ import { loadAuthorization } from "./scope/load-auth.js";
 import { parseIpList, classifyTarget, DEFAULT_LIST_FILE, DEFAULT_VALIDITY_DAYS } from "./scope/ip-list.js";
 import { SkillMemory } from "./memory/skill-memory.js";
 import { Orchestrator, type OrchestratorEvent, type SessionContext } from "./core/orchestrator.js";
+import { LivePanel } from "./panel/panel.js";
 import { performLogin } from "./net/login.js";
 import { AutoPilot } from "./core/autopilot.js";
 import { PythonAgent } from "./py/python-agent.js";
@@ -411,7 +412,16 @@ async function cmdRun(args: Args): Promise<void> {
   if (ndjson) {
     process.stdout.write(JSON.stringify({ type: "meta", model: auto ? "autopilot" : label, authPath, target: { host, port }, goal }) + "\n");
   }
-  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+  let panel: LivePanel | undefined;
+  if (args.flags.panel) {
+    const pport = args.flags["panel-port"] ? Number(str(args.flags["panel-port"])) : 5173;
+    panel = await LivePanel.start({ title: `run — ${host}:${port ?? ""} · ${auto ? "autopilot" : label}` }, pport);
+    console.error(`[panel] 데스크톱 패널: http://127.0.0.1:${panel.port}`);
+  }
+  const emit = (e: OrchestratorEvent) => {
+    if (ndjson) process.stdout.write(JSON.stringify(e) + "\n");
+    panel?.push(e);
+  };
   if (!auto && label.startsWith("mock")) {
     const warn =
       "mock 프로바이더는 LLM 없이 고정 시나리오로 동작합니다(오프라인 테스트용) — 지시/목표가 계획에 반영되지 않습니다. " +
@@ -496,6 +506,7 @@ async function cmdRun(args: Args): Promise<void> {
     argsFor: argsForFn,
   });
   const log = await orch.run({ host, port }, goal);
+  await panel?.close();
   let activeFindings = log.findings;
   if (!ndjson) {
     const gov = await governReport(guard, args, root, allowUnauth, { findings: log.findings });
@@ -1047,7 +1058,16 @@ async function cmdRlm(args: Args): Promise<void> {
 
   const ndjson = !!args.flags.ndjson;
   if (ndjson) process.stdout.write(JSON.stringify({ type: "meta", model: label, mode: "rlm", authPath, target: { host, port }, goal, memories: memories.length }) + "\n");
-  const emit = ndjson ? (e: OrchestratorEvent) => process.stdout.write(JSON.stringify(e) + "\n") : undefined;
+  let panel: LivePanel | undefined;
+  if (args.flags.panel) {
+    const pport = args.flags["panel-port"] ? Number(str(args.flags["panel-port"])) : 5173;
+    panel = await LivePanel.start({ title: `rlm — ${host}:${port ?? ""} · ${label}` }, pport);
+    console.error(`[panel] 데스크톱 패널: http://127.0.0.1:${panel.port}`);
+  }
+  const emit = (e: OrchestratorEvent) => {
+    if (ndjson) process.stdout.write(JSON.stringify(e) + "\n");
+    panel?.push(e);
+  };
 
   const isoFlag = str(args.flags.isolation);
   const isolation: "required" | "best-effort" | "off" =
@@ -1072,6 +1092,7 @@ async function cmdRlm(args: Args): Promise<void> {
     isolation,
   });
   const log = await agent.run({ host, port }, goal);
+  await panel?.close();
 
   let activeFindings = log.findings;
   if (!ndjson) {
@@ -1106,6 +1127,8 @@ Commands:
                  [--target-ref <ref>]  검사 대상의 커밋/빌드 참조(서명 리포트 출처에 기록)
                  [--target-map <file.json>]  아는 경로/파라미터를 직접 주입(정찰 크롤 보강)
                  [--no-visual]  초보자용 시각 상황판(ASCII 그림)을 끄고 상세 리포트만 출력
+                 [--panel]  로컬 라이브 패널(http://127.0.0.1:5173)에 이벤트를 흘린다
+                 [--panel-port <n>]  패널 포트(기본 5173, 0=임의)
   pyrun        absolute-agent 모드: 모델이 파이썬 코드를 스스로 작성·실행하며 공략
                  --host <h> [--port <p>] [--goal <g>] [--provider <name>] [--model <id>]
                  [--auth <path>] [--proxy <url>] [--max-actions <n>] 코드 반복 횟수
@@ -1128,6 +1151,8 @@ Commands:
                  [--max-actions <n>] REPL 스텝 수(기본 10) [--step-timeout <ms>]
                  [--isolation required|best-effort|off] OS 격리 정책(기본 required)
                  [--ndjson] [--no-visual]
+                 [--panel]  로컬 라이브 패널(http://127.0.0.1:5173)에 학습 이벤트를 흘린다
+                 [--panel-port <n>]  패널 포트(기본 5173, 0=임의)
                  REPL 변수 ctx(prompt-as-variable) 지속 · rlm('지시') 함수처럼 재귀 위임
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
   models       프로바이더별 기본 모델 표시

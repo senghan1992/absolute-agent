@@ -45,6 +45,34 @@ fingerprint 기반 정밀 검색은 없다. RedCell 의 `SkillMemory` 는 그 �
 **색인 계층**으로, "이 서비스 지문에 맞는 전술"을 점수순으로 꺼내준다.
 (점수 = fingerprint 유사도 × Laplace-smoothed 성공률)
 
+
+## RLM 모드 — 재귀 언어 모델 에이전트 + 학습 루프
+
+`src/rlm/` 은 prime-agent 의 RLM 패러다임을 엔진 내부로 이식한 계층이다.
+
+```
+                      ┌──────────────────────────────────────────────┐
+  CLI (src/cli.ts) ──▶│ RlmAgent (src/rlm/rlm-agent.ts)              │
+                      │  영구 Python REPL (ReplSession/브로커)          │
+                      │   ┌─ rlm('하위작업') → 병렬 자식 REPL (동일 게이트) │
+                      │   └─ recall → act → reward → reflect → verify │
+                      └──────────────────────────────────────────────┘
+                               │ OrchestratorEvent(onEvent)
+              ┌────────────────┼─────────────────┐
+              ▼                ▼                 ▼
+        ndjson(stdout)   LivePanel(SSE)    감사 추적(audit)
+```
+
+- **재귀 서브콜**: REPL 프리루드의 `rlm_async(prompt, max_steps, key)`/`rlm_wait(key)` 가
+  `##RC_RLM_ASYNC##`/`##RC_RLM_WAIT##` 마커로 브로커를 거쳐 자식 REPL 세션을 병렬 실행하고
+  값을 회수한다. 레거시 동기 `rlm()`(`##RC_RLM##`/`##RC_RLM_RESULT##`)은 그대로 유지된다(하위호환).
+- **학습 루프**: `recall`(기억 재사용) → `reward`(발견 보상) → `reflect`(전략 반성) →
+  `verify`(`achieved/unclear`) → `distill`(harness memory/skill 엔트리). 에피소드 간에
+  기억이 쌓여 다음 에피소드의 행동 수가 줄어든다 — `bench/rlbench.ts` 가 이 곡선을 결정적으로 증명한다
+  (`npm run bench:rl`, 4개 게이트 통과 시 exit 0).
+- **데스크톱 패널** (`--panel`): `src/panel/panel.ts` 의 `LivePanel` 은 이벤트 스트림을
+  외부 의존성 0(CDN 없음)의 로컬 HTTP+SSE 패널로 서빙한다. `--ndjson` 과 직교이며,
+  내부 이벤트와 사람이 읽는 리포트가 섞이지 않도록 stdout 은 ndjson 전용, 패널 URL/진행은 stderr.
 ## prime-agent 인터페이스 매핑 (검증된 실제 시그니처)
 
 | RedCell | prime-agent (`@earendil-works/pi-coding-agent`) |

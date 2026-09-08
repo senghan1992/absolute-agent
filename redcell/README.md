@@ -43,6 +43,19 @@ redcell rlm --host 127.0.0.1 --port 8080 \
 안전은 엔진과 동일하다: 모든 대상 통신은 ReplSession 브로커(ScopeGuard·공유 예산·RPS·
 비파괴)를 통과하고, 재귀 하위 에이전트도 같은 게이트를 공유한다.
 
+### 라이브 데스크톱 패널 (`--panel`) — 학습 과정을 눈으로
+
+```bash
+redcell run --host 127.0.0.1 --port 8080 --panel        # run 도 지원
+redcell rlm  --host 127.0.0.1 --port 8080 --panel        # rlm 권장(recall/reward/verify)
+# --panel-port <n>  포트 지정(기본 5173, 0=임의)
+```
+
+`--panel` 을 주면 CLI 가 로컬 HTTP 패널(`http://127.0.0.1:<port>`)을 띄운다. 브라우저에서
+이벤트 타임라인(recall/action/reward/distilled/reflect/verify/finding)과 통계 카드(누적 보상
+스파크라인 포함)가 실시간으로 갱신된다. 외부 CDN/네트워크를 전혀 쓰지 않는 셀프컨테인드
+HTML + SSE 라서 오프라인에서도 동작하고, CLI 종료와 함께 패널도 닫힌다.
+
 ## 무엇이 "자기발전"인가 — 탐색 엔진이 핵심
 
 RedCell 의 심장은 **스스로 여러 방법을 시도하고, 결과로 배우고, 발전하는 탐색 엔진**이다.
