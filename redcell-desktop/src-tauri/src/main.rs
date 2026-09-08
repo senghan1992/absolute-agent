@@ -70,7 +70,8 @@ fn default_provider() -> String {
     "mock".into()
 }
 fn default_mode() -> String {
-    "tools".into()
+    // 기본은 prime-agent(pi) 직접 실행 — 위에 대상 URL/호스트를 넣고 지시하면 CLI 처럼 쓴다.
+    "prime".into()
 }
 fn status_idle() -> String {
     "idle".into()
@@ -612,6 +613,24 @@ fn run_prime(
     let cli = prime_cli_path(redcell).ok_or(
         "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정)".to_string(),
     )?;
+
+    // RedCell 인가 확장(scope 게이트) 설치 여부 — 미설치면 안전 경고를 노트로 남긴다.
+    let ext_root = prime_cwd(redcell).join(".pi").join("agent").join("extensions").join("redcell");
+    let ext_global = std::env::var("HOME")
+        .ok()
+        .map(PathBuf::from)
+        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
+        .map(|h| h.join(".pi").join("agent").join("extensions").join("redcell"));
+    let ext_ok = ext_root.exists() || ext_global.map_or(false, |p| p.exists());
+    let warn = if ext_ok {
+        "[sys] 인가 게이트: RedCell 확장 로드됨 — pi 의 모든 툴 호출을 인가 목록으로 검사합니다.".to_string()
+    } else {
+        "[sys] ⚠ RedCell 확장이 설치되지 않아 pi 의 툴 호출을 인가 목록으로 검사하지 못합니다. ".to_string()
+            + "설치: `cd <프로젝트 루트> && bash redcell\\prime-agent\\install.sh` 후 앱 재시작. "
+    };
+    let ev3 = json!({ "type": "note", "text": warn });
+    let stamped3 = append_event(app, id, &ev3);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
 
     // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
     // CLI 처럼 이전 대화를 이어간다(첫 턴에 생성·저장, 이후 턴은 재사용).

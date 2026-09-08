@@ -139,6 +139,35 @@ function renderCapture(s) {
   wireRows();
   const cap = document.querySelector(".capture");
   if (cap) cap.scrollTop = cap.scrollHeight;
+  renderPiConsole(s);
+}
+
+/** prime 모드: 좌측 패널을 pi CLI 화면(터미널)으로 렌더링한다. */
+function renderPiConsole(s) {
+  const live = $("view-live");
+  const body = $("piConsoleBody");
+  if (!live || !body) return;
+  const isPrime = !!(s && s.mode === "prime");
+  live.classList.toggle("pi-mode", isPrime);
+  if (!isPrime) return;
+  const lines = [];
+  for (const m of (s.chat || [])) {
+    if (m.role === "user" && m.content.trim()) lines.push({ cls: "pi-user", text: m.content });
+  }
+  for (const e of eventsOf(s)) {
+    const t = (e.text || e.reason || "").trim();
+    if (!t) continue;
+    if (/^\[pi-툴\]/.test(t)) lines.push({ cls: "pi-tool", text: t });
+    else if (/^\[sys\]/.test(t)) lines.push({ cls: "pi-sys", text: t });
+    else if (e.type === "error" || /^\[오류\]/.test(t)) lines.push({ cls: "pi-error", text: t });
+    else if (/^\[완료\]/.test(t) || e.type === "done" || t.startsWith("완료")) lines.push({ cls: "pi-done", text: t });
+    else if (/발견|\[인텔\]/.test(t)) lines.push({ cls: "pi-find", text: t });
+    else lines.push({ cls: "pi-text", text: t });
+  }
+  body.innerHTML = lines.length
+    ? lines.map((l) => `<span class="${l.cls}">${esc(l.text)}</span>\n`).join("")
+    : "prime-agent(pi) 대기 중 — 위에 대상 호스트/URL 을 넣고 지시를 보내면 CLI 처럼 여기에 스트리밍됩니다.";
+  body.scrollTop = body.scrollHeight;
 }
 function wireRows() {
   document.querySelectorAll("#capBody tr").forEach((tr) => {
@@ -391,6 +420,9 @@ function onLiveEvent(event) {
   };
   const cap = document.querySelector(".capture");
   if (cap) cap.scrollTop = cap.scrollHeight;
+
+  // prime 모드: pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
+  if (s && s.mode === "prime") renderPiConsole(s);
 
   renderStepper(s);
   renderMetrics(s);

@@ -80,7 +80,7 @@
               <option value="python">python(RLM)</option>
               <option value="rlm">rlm(재귀 REPL)</option>
               <option value="osint">osint(뒤지기)</option>
-              <option value="prime">prime(pi)</option>
+              <option value="prime">prime-agent(pi)</option>
             </select>
             <label class="sh-max" title="공격 최대 모드(tools 전용): 모델 계획 후 남은 툴을 단계별 전수 1회씩 + opt-in 프로브 전체 + 파이썬 심화 실행 활성 — 칼리 대체식 다각 공격">
               <input type="checkbox" id="shMax" />
@@ -124,7 +124,7 @@
           <button class="subtab" data-view="next">다음 단계</button>
         </div>
 
-        <!-- 라이브 캡처: 테이블 + 상세 -->
+        <!-- 라이브 캡처: 테이블 + 상세 (prime 모드는 아래 pi 콘솔로 대체) -->
         <div id="view-live" class="view active live">
           <div class="capture">
             <table class="cap-table">
@@ -144,6 +144,10 @@
           </div>
           <div id="detail" class="detail">
             <div class="detail-empty">행을 선택하면 상세가 표시됩니다.</div>
+          </div>
+          <!-- prime-agent(pi) CLI 화면 — 터미널처럼 스트리밍 -->
+          <div id="piConsole" class="pi-console hidden">
+            <pre id="piConsoleBody" class="pi-console-body"></pre>
           </div>
         </div>
 
