@@ -106,6 +106,33 @@ redcell explore  |  redcell mcts     # 자기발전/트리검색 데모
 redcell help
 ```
 
+### 사용자 정의 프로바이더 (custom providers)
+
+자체(vLLM·Ollama·LM Studio 등 OpenAI 호환 서버, 또는 Anthropic 호환 게이트웨이) 엔드포인트를
+코드 수정 없이 등록하고 `--provider <이름>` 으로 바로 연결한다. 기존 환경변수 방식의 익명
+`custom` 항목(`REDCELL_OPENAI_BASE_URL`/`REDCELL_MODEL`/`REDCELL_OPENAI_API_KEY`)은 그대로 유지된다.
+
+```bash
+# 등록 — 이름은 영문/숫자/._- 1~40자
+redcell providers add my-llm   --base-url http://127.0.0.1:8000/v1 \          # OpenAI 호환(기본) / anthropic 호환은 --kind anthropic
+  --api-key-env MY_LLM_KEY \                     # 키를 담은 env 변수명(여러 개는 콤마). env 를 못 찾으면 --api-key 리터럴 사용
+  --default-model llama-3.3-70b \                # --model 미지정 시 기본값
+  --header "X-Tag: redcell" \                    # 추가 헤더(여러 개는 콤마)
+  --note "로컬 vLLM"
+
+redcell providers            # 목록 — 사용자 정의 항목도 ✅/— 자격증명 상태 표시
+redcell providers rm my-llm  # 삭제(빌트인은 삭제 불가)
+redcell providers add my-llm --base-url ...       # 같은 이름 재등록 = 교체
+
+# 연결 — 빌트인과 동일한 경로
+redcell run --host 127.0.0.1 --port 8080 --provider my-llm
+redcell config set defaultProvider my-llm        # 기본 프로바이더로 지정
+```
+
+저장 위치는 `~/.redcell/providers.json`(`REDCELL_HOME` 변경 시 함께 이동, 소유자 전용 600 권한).
+빌트인과 같은 이름으로 등록하면 사용자 정의 정의가 우선한다. `--kind anthropic` 프로바이더는
+`baseUrl`은 선택이며, `--api-key-env`/`--api-key` 인증을 그대로 쓴다(oauth 토큰은 미지원).
+
 ### 간단 인가: 내가 입력한 IP = 인가 (ip-list)
 
 정식 Rules of Engagement(YAML) 작성을 부담스러워할 때, **IP 목록 한 장**으로 시작한다.

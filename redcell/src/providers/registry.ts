@@ -27,6 +27,11 @@ export interface ProviderSpec {
   headers?: () => Record<string, string>;
   /** 설명(도움말 표시용) */
   note?: string;
+  /**
+   * 파일에 저장된 리터럴 API 키(사용자 정의 프로바이더용).
+   * envKeys 보다 우선순위가 낮다 — env 에 키가 있으면 env 를 쓴다.
+   */
+  apiKey?: string;
 }
 
 // base URL / env / 기본모델은 prime-agent(packages/ai) 참고.
@@ -74,10 +79,11 @@ export class ProviderRegistry {
 
   /** 자격증명이 있는 env 를 찾는다(없으면 null). 키가 필요없는 프로바이더는 {source:""}. */
   credential(spec: ProviderSpec, env: NodeJS.ProcessEnv): { source: string; value?: string } | null {
-    if (spec.envKeys.length === 0) return { source: "" }; // 로컬 등 키 불필요
+    if (spec.envKeys.length === 0 && !spec.apiKey) return { source: "" }; // 로컬 등 키 불필요
     for (const k of spec.envKeys) {
       if (env[k]) return { source: k, value: env[k] };
     }
+    if (spec.apiKey) return { source: "config(apiKey)", value: spec.apiKey };
     return null;
   }
 

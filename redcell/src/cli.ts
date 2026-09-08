@@ -41,7 +41,8 @@ import { toMarkdown, type ReportOptions } from "./report/report.js";
 import { toVisualBoard } from "./report/visual.js";
 import { buildProvenance, applyWaivers, checkSeparationOfDuties } from "./report/provenance.js";
 import { decideVerdict } from "./core/autopilot.js";
-import { ProviderRegistry } from "./providers/registry.js";
+import { ProviderRegistry, type ProviderSpec } from "./providers/registry.js";
+import { loadCustomProviders, upsertCustomProvider, removeCustomProvider, applyCustomProviders, validateSpec, customProvidersPath } from "./providers/custom-store.js";
 import { loadConfig, saveConfig, resolveModel, redcellHome, type RedcellConfig } from "./config.js";
 import type { ModelAdapter, EngagementFinding, Coverage, GateVerdict } from "./core/types.js";
 import { execFileSync } from "node:child_process";
@@ -95,7 +96,16 @@ function resolveEnabledOptIns(fromAuth: string[], flag: string | undefined): str
 // ── 서브커맨드 ───────────────────────────────────────────────────────────────
 const registry = new ProviderRegistry();
 
-async function cmdProviders(): Promise<void> {
+async function cmdProviders(args: Args): Promise<void> {
+  const sub = args._.shift();
+  if (sub === "add") return void (await cmdProviderAdd(args));
+  if (sub === "rm" || sub === "remove") return void (await cmdProviderRm(args));
+  if (sub !== undefined) {
+    console.error(`알 수 없는 providers 서브커맨드: '${sub}' (add | rm <name>)`);
+    process.exitCode = 1;
+    return;
+  }
+
   const cfg = await loadConfig();
   console.log("프로바이더 (✅=자격증명 감지, —=미설정):\n");
   console.log(`${"".padEnd(2)}${"NAME".padEnd(16)}${"KIND".padEnd(15)}${"CREDENTIAL".padEnd(22)}DEFAULT MODEL`);
@@ -104,9 +114,87 @@ async function cmdProviders(): Promise<void> {
     const mark = cred ? "✅" : "—";
     const src = cred ? (cred.source || "(불필요)") : s.envKeys.join("|") || "-";
     const isDefault = cfg.defaultProvider === s.name ? " *" : "";
-    console.log(`${mark} ${s.name.padEnd(16)}${s.kind.padEnd(15)}${src.padEnd(22)}${s.defaultModel ?? "(--model 필요)"}${isDefault}`);
+    const user = s.apiKey !== undefined && !s.envKeys.length ? " (사용자 정의)" : "";
+    console.log(`${mark} ${s.name.padEnd(16)}${s.kind.padEnd(15)}${src.padEnd(22)}${s.defaultModel ?? "(--model 필요)"}${isDefault}${user}`);
   }
-  console.log(`\n* = config 기본 프로바이더. 변경: redcell config set defaultProvider <name>`);
+  console.log(
+    `\n* = config 기본 프로바이더. 변경: redcell config set defaultProvider <name>\n` +
+      `사용자 정의: redcell providers add <name> --base-url <url> [--api-key-env <ENV>] [--default-model <id>]  (${customProvidersPath()})`,
+  );
+}
+
+/** redcell providers add <name> --base-url <url> [--kind openai-compat|anthropic] [--api-key-env ENV[,ENV]] [--api-key <키>] [--default-model <id>] [--header "K: V"[,K: V]] [--note "..."] */
+async function cmdProviderAdd(args: Args): Promise<void> {
+  const name = args._.shift();
+  if (!name) {
+    console.error("사용법: redcell providers add <name> --base-url <url> [--api-key-env <ENV>] [--default-model <id>] [--header \"K: V\"]");
+    process.exitCode = 1;
+    return;
+  }
+  const kind = str(args.flags.kind) ?? "openai-compat";
+  const baseUrl = str(args.flags["base-url"]);
+  const envKeys = (str(args.flags["api-key-env"]) ?? "").split(",").map((s) => s.trim()).filter(Boolean);
+  const apiKey = str(args.flags["api-key"]);
+  const defaultModel = str(args.flags["default-model"]);
+  const note = str(args.flags.note);
+  const headers: Record<string, string> = {};
+  for (const pair of (str(args.flags.header) ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
+    const m = /^([^:]+):\s*(.+)$/.exec(pair);
+    if (!m) {
+      console.error(`헤더 형식 오류: '${pair}' — "이름: 값" 형식이어야 합니다.`);
+      process.exitCode = 1;
+      return;
+    }
+    headers[m[1].trim()] = m[2].trim();
+  }
+
+  const spec: ProviderSpec = {
+    name,
+    kind: kind as ProviderSpec["kind"],
+    baseUrl,
+    envKeys,
+    ...(apiKey ? { apiKey } : {}),
+    ...(defaultModel ? { defaultModel } : {}),
+    ...(Object.keys(headers).length ? { headers: () => headers } : {}),
+    ...(note ? { note } : {}),
+  };
+  try {
+    validateSpec(spec);
+  } catch (e) {
+    console.error(`[providers] ${(e as Error).message}`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const builtin = registry.get(name);
+  await upsertCustomProvider(validateSpec(spec), process.env);
+  console.error(
+    `[providers] 사용자 정의 프로바이더 '${name}' 저장: ${customProvidersPath()}` +
+      (builtin ? ` (기존 '${name}' 정의 교체됨)` : ""),
+  );
+  console.log(`redcell providers add '${name}' 완료. 연결: redcell run --provider ${name} [--model <id>]`);
+}
+
+/** redcell providers rm <name> */
+async function cmdProviderRm(args: Args): Promise<void> {
+  const name = args._.shift();
+  if (!name) {
+    console.error("사용법: redcell providers rm <name>");
+    process.exitCode = 1;
+    return;
+  }
+  const builtin = registry.get(name) && !(await loadCustomProviders()).some((s) => s.name === name);
+  const removed = await removeCustomProvider(name, process.env);
+  if (!removed) {
+    if (builtin) {
+      console.error(`[providers] '${name}' 는 빌트인 프로바이더라 삭제할 수 없습니다(사용자 정의로 교체하려면 add 를 쓰세요).`);
+    } else {
+      console.error(`[providers] 사용자 정의 프로바이더 '${name}' 가 없습니다.`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  console.error(`[providers] 사용자 정의 프로바이더 '${name}' 삭제됨.`);
 }
 
 async function cmdModels(): Promise<void> {
@@ -1173,6 +1261,8 @@ Commands:
 
 예:
   export ANTHROPIC_API_KEY=sk-ant-...
+  export MY_LLM_KEY=...
+  redcell providers add my-llm --base-url http://127.0.0.1:8000/v1 --api-key-env MY_LLM_KEY --default-model llama-3.3
   redcell providers
   redcell run --host 127.0.0.1 --port 8080 --goal "웹 취약점 정찰"
   redcell run --host 10.13.37.5 --provider openrouter --model moonshotai/kimi-k2.6`);
@@ -1189,12 +1279,19 @@ async function main(): Promise<void> {
     return;
   }
 
+  // 사용자 정의 프로바이더(~/.redcell/providers.json)를 레지스트리에 주입
+  try {
+    applyCustomProviders(registry, await loadCustomProviders());
+  } catch (e) {
+    console.error(`[providers] ⚠️ ${(e as Error).message}`);
+  }
+
   switch (cmd) {
     case "run": return void (await cmdRun(args));
     case "pyrun": return void (await cmdPyRun(args));
     case "osint": return void (await cmdOsint(args));
     case "rlm": return void (await cmdRlm(args));
-    case "providers": return void (await cmdProviders());
+    case "providers": return void (await cmdProviders(args));
     case "models": return void (await cmdModels());
     case "scope": return void (await cmdScope(args));
     case "auth": return void (await cmdAuth(args));
