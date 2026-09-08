@@ -35,6 +35,8 @@ import { MockModel } from "./core/mock-model.js";
 import { parseTargetMap, argsFromMap, type TargetMap } from "./core/target-map.js";
 import type { Fingerprint } from "./memory/skill-memory.js";
 import { forge, type VulnClass } from "./core/payload-forge.js";
+import { autoArgsFor } from "./assault/args.js";
+import { runAssault } from "./assault/pipeline.js";
 import { httpRequest } from "./net/http-client.js";
 import type { CookieJar } from "./net/http-client.js";
 import { toMarkdown, type ReportOptions } from "./report/report.js";
@@ -298,6 +300,145 @@ async function cmdScope(args: Args): Promise<void> {
     }
   }
   console.log(`   허용 ${summary.allows}개 · 제외 ${summary.denies}개 · 인가 만료 ${summary.until} · RPS ${guard.requestsPerSecond}/s`);
+}
+
+/**
+ * assault — URL 한 줄로 자동 공격 캠페인 (recon→enumerate→exploit→evidence→analysis→report).
+ *
+ *   redcell assault --url http://10.13.37.5:8080/app [options]
+ *
+ * 옵션:
+ *   --authorize           URL 의 호스트를 개인 인가 목록에 기록하고 진행(내가 입력한 URL = 인가).
+ *   --auth <path>         인가 파일 경로(기본 ~/.redcell/authorization.list).
+ *   --provider/--model    AI 전투 분석 모델(생략 시 설정에서; 없으면 결정적 규칙 분석으로 폴백).
+ *   --no-ai               AI 분석 끄기(결정적 분석만).
+ *   --proxy <url>         프록시(Burp/ZAP) 또는 env REDCELL_PROXY.
+ *   --full-exposure       샘플 redaction 끄기(명시적 탈취 허용 — 기본은 마스킹).
+ *   --evidence-cap <n>    항목당 샘플 최대 문자(기본 1500).
+ *   --evidence-max <n>    매니페스트 최대 항목(기본 40).
+ *   --enable <a,b>        opt-in 프로브(logic_probe, cache_poison_probe / all).
+ *   --target-map <file>   툴별 인자 수동 지정 JSON(자동 데이터 흐름 오버라이드).
+ *   --ndjson              이벤트를 한 줄 JSON 으로 stdout 에 흘린다(패널/데스크톱 연동).
+ *
+ * 종료코드: 0=완료(발견 여부와 무관) · 3=scope 차단 · 4=대상 미도달.
+ * 보고서: ~/.redcell/assault/<host>-<ts>/{report.md, report.html, report.json}
+ */
+async function cmdAssault(args: Args): Promise<void> {
+  if (args.flags.help || args.flags.h) {
+    console.log(`redcell assault — URL 한 줄 → 자동 공격 캠페인
+
+사용법: redcell assault --url <http(s)://host[:port][/path]> [옵션]
+
+필수:
+  --url <url>            공격 대상 URL (이 URL 자체가 인가 범위의 근거)
+
+인가:
+  --authorize            입력 URL 의 호스트를 ~/.redcell/authorization.list 에 기록 후 즉시 진행
+                         (기록 없이 진행하려면 미리 redcell auth add <호스트>)
+  --auth <path>          인가 목록 파일 경로 (기본 ~/.redcell/authorization.list)
+
+분석:
+  --provider <name>      AI 프로바이더 (기본 config 값, 없으면 결정적 분석)
+  --model <id>           모델 ID
+  --no-ai                AI 없이 결정적(규칙 기반) 분석 — 오프라인 안전
+
+수집:
+  --full-exposure        증거 샘플 전체 원문 포함 (기본: 비밀값 마스킹 redaction)
+  --evidence-cap <n>     항목당 샘플 최대 문자 수 (기본 1500)
+  --evidence-max <n>     매니페스트 최대 항목 수 (기본 40)
+
+진행:
+  --proxy <url>          Burp/ZAP 등 프록시 경유
+  --enable <t[,t]>       opt-in 프로브 활성화 (예: logic_probe,xxe_probe|all)
+  --target-map <file.json>  아는 경로/파라미터 주입 (정찰 보강)
+  --ndjson               이벤트를 NDJSON 로 출력
+
+종료코드: 0 clean · 2 findings · 3 인가 밖 차단 · 4 대상 미도달 · 1 오류`);
+    return;
+  }
+  const cfg = await loadConfig();
+  const url = str(args.flags.url);
+  if (!url) throw new Error("redcell assault 에는 --url 이 필요합니다. 예: redcell assault --url http://127.0.0.1:8080");
+  const authorize = !!args.flags.authorize;
+  if (authorize && str(args.flags.auth)) {
+    throw new Error("--authorize 와 --auth 는 함께 쓸 수 없습니다. (영구 인가는 redcell auth add <호스트> 를 쓰세요.)");
+  }
+  const authPath = authorize
+    ? path.join(redcellHome(), DEFAULT_LIST_FILE)
+    : await findAuthPath(str(args.flags.auth), cfg);
+
+  const ndjson = !!args.flags.ndjson;
+  const emit = (e: Record<string, unknown>): void => {
+    if (ndjson) console.log(JSON.stringify(e));
+  };
+  console.error(`[assault] 대상: ${url}${authorize ? "  (--authorize: 입력 URL = 인가)" : ""}`);
+  console.error(`[scope] ${authPath}`);
+
+  // AI 분석 모델 — 명시 지정은 실패 시 오류, 자동 선택은 결정적 폴백.
+  let model: ModelAdapter | undefined;
+  let label = "deterministic";
+  const provider = str(args.flags.provider);
+  if (!args.flags["no-ai"]) {
+    if (provider === "mock") {
+      model = new MockModel();
+      label = "mock";
+    } else if (provider || str(args.flags.model)) {
+      const r = resolveModel(registry, cfg, { provider, model: str(args.flags.model) });
+      model = r.model;
+      label = `${r.provider}:${r.modelId}`;
+    } else {
+      try {
+        const r = resolveModel(registry, cfg, {});
+        model = r.model;
+        label = `${r.provider}:${r.modelId}`;
+      } catch {
+        console.error("[assault] 모델 없음 — 결정적(규칙 기반) 전투 분석으로 진행합니다. (--provider mock 으로 모의 AI 도 가능)");
+      }
+    }
+  } else {
+    console.error("[assault] --no-ai: 결정적 분석만 사용합니다.");
+  }
+  if (model) console.error(`[model] ${label}`);
+
+  const targetMap = args.flags["target-map"] ? await loadTargetMapFlag(str(args.flags["target-map"])) : undefined;
+  const enabledOptIns = resolveEnabledOptIns([], str(args.flags.enable));
+
+  const res = await runAssault({
+    url,
+    authFile: authPath,
+    authorize,
+    model,
+    modelLabel: label,
+    proxy: str(args.flags.proxy),
+    ai: !args.flags["no-ai"],
+    fullExposure: !!args.flags["full-exposure"] || !!args.flags["no-redact"],
+    evidenceCap: args.flags["evidence-cap"] ? Number(str(args.flags["evidence-cap"])) : undefined,
+    evidenceMax: args.flags["evidence-max"] ? Number(str(args.flags["evidence-max"])) : undefined,
+    enabledOptIns,
+    targetMap,
+    onEvent: emit,
+  });
+
+  if (res.exitCode === 3) {
+    console.error(scopeBlockedBanner(res.report.target.host, res.report.target.port, res.report.verdictReason));
+    process.exitCode = 3;
+    return;
+  }
+  if (res.exitCode === 4) {
+    console.error(`⛔ 대상 미도달 — 스캔을 시작하지 않았습니다. (${res.report.verdictReason})`);
+    process.exitCode = 4;
+    return;
+  }
+  const r = res.report;
+  console.error(`✅ 완료 — 판정 ${r.verdict}: ${r.verdictReason}`);
+  console.error(`   발견 ${r.findings.length}건 · 탈취 가능 정보 ${r.exposed.length}건 · 툴 ${r.coverage.toolsRun}회`);
+  if (!ndjson) {
+    console.log(`📄 보고서: ${res.reportDir}/report.md`);
+    console.log(`🖥️  HTML : ${res.reportDir}/report.html`);
+    console.log(`🧾 JSON : ${res.reportDir}/report.json`);
+  } else {
+    console.error(`📄 보고서: ${res.reportDir}/ (report.md / report.html / report.json)`);
+  }
 }
 
 // ── 간단 인가 목록(auth) — 내가 입력한 IP = 인가 ───────────────────────────────
@@ -777,69 +918,7 @@ async function loadTargetMapFlag(pathArg: string | undefined): Promise<TargetMap
   return parseTargetMap(json);
 }
 
-function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, unknown> {
-  const endpoints: string[] = [];
-  for (const i of fp.indicators ?? []) {
-    const m = /^endpoint (\/\S+)/.exec(i);
-    if (m) endpoints.push(m[1]);
-  }
-  const forgeMap: Record<string, VulnClass> = {
-    xss_probe: "xss",
-    path_traversal: "lfi",
-    open_redirect: "redirect",
-    ssrf_probe: "ssrf",
-  };
-  // 발견된 엔드포인트에서 서로 다른 경로/파라미터 집합을 추출한다.
-  // 취약점은 엔드포인트마다 다르므로(예: /tpl→SSTI, /ping→CMDI), 주입 계열
-  // 툴에는 발견한 경로·파라미터 전체를 넘겨 발산적으로 스윕하게 한다.
-  const paths = [...new Set(endpoints.map((e) => e.split("?")[0]))].slice(0, 8);
-  const params = [
-    ...new Set(
-      endpoints.flatMap((e) => {
-        const q = e.split("?")[1];
-        return q ? [...new URLSearchParams(q).keys()] : [];
-      }),
-    ),
-  ].filter(Boolean).slice(0, 8);
 
-  if (endpoints.length === 0) {
-    // 엔드포인트가 없어도 페이로드 툴은 fp 기반 변형을 실어 발산을 유지한다.
-    return forgeMap[toolName] ? { payloads: forge(forgeMap[toolName], fp) } : {};
-  }
-  const first = endpoints[0];
-  const path0 = first.split("?")[0];
-  // 주입 계열 툴: 발견한 경로 전체를 스윕(+ 파라미터 힌트). 페이로드는 fp 기반 변형.
-  if (forgeMap[toolName]) {
-    const a: Record<string, unknown> = { paths, payloads: forge(forgeMap[toolName], fp) };
-    if (params.length) a.params = params;
-    return a;
-  }
-  switch (toolName) {
-    case "api_probe":
-      return { paths };
-    case "ssti_probe":
-    case "cmdi_probe":
-    case "logic_probe": {
-      const a: Record<string, unknown> = { paths };
-      if (params.length) a.params = params;
-      return a;
-    }
-    case "xxe_probe":
-    case "deserialize_probe":
-    case "auth_session_probe":
-    case "cache_poison_probe":
-      return { paths };
-    case "sqli_probe":
-    case "cors_audit":
-      return { path: path0, ...(params.length ? { params } : {}) };
-    case "idor_probe": {
-      const idPath = endpoints.find((e) => /\/\d+(\/?$)/.test(e.split("?")[0])) ?? first;
-      return { path: idPath.split("?")[0] };
-    }
-    default:
-      return {};
-  }
-}
 
 async function cmdConfig(args: Args): Promise<void> {
   const [op, key, value] = args._;
@@ -1199,6 +1278,12 @@ function help(): void {
 사용법: redcell <command> [options]
 
 Commands:
+  assault      URL 한 줄 → 자동 공격 캠페인 (재구성·열거·공격·증거·AI 분석·전투보고)
+                 --url <http(s)://host[:port][/path]>  (필수)
+                 [--authorize]  입력 URL 의 호스트를 인가 목록에 기록 후 즉시 진행
+                 [--auth <path>] [--provider <name>] [--model <id>] [--no-ai]
+                 [--proxy <url>] [--enable <t[,t]>] [--target-map <file.json>]
+                 [--full-exposure] [--evidence-cap <n>] [--evidence-max <n>] [--ndjson]
   run          인가된 대상에 engagement 실행
                  --host <h> [--port <p>] [--goal <g>]
                  [--provider <name>] [--model <id>] [--auth <path>]
@@ -1288,6 +1373,7 @@ async function main(): Promise<void> {
 
   switch (cmd) {
     case "run": return void (await cmdRun(args));
+    case "assault": return void (await cmdAssault(args));
     case "pyrun": return void (await cmdPyRun(args));
     case "osint": return void (await cmdOsint(args));
     case "rlm": return void (await cmdRlm(args));

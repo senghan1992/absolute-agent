@@ -116,6 +116,29 @@ ScopeGuard 로 검사한다. 현재 기본 툴:
 | `dir_enum` | enumerate | 흔한 경로 열거(소형 wordlist) |
 | `sqli_probe` | exploit | SQLi **탐지만**(오류 시그니처, 추출 없음, 최소영향) |
 
+## assault 파이프라인 — URL 한 줄 → 전투 보고 (`src/assault/`)
+
+`redcell assault --url <url>` 는 순수 **결정적 오케스트레이션** 파이프라인이다(모델 유무와 무관하게
+진행·증거·보고 구조가 고정). 단계별 모듈:
+
+| 모듈 | 역할 |
+| --- | --- |
+| `url.ts` | URL 파싱(스킴 화이트리스트 http/https, 기본 포트, 호스트 형식 fail-closed) + `--authorize` 인가 기록 |
+| `pipeline.ts` | 전체 오케스트레이션: 인가 확인 → 로그인(선택) → recon/exploit 스윕 → 증거 수집 → 분석 → 보고. 모든 요청을 ScopeGuard(도달성·DNS 재바인딩·횡적이동)로 게이팅, 도달 불가면 종료코드 4 |
+| `args.ts` | 툴별 공격 인자 생성(자동 URL/파라미터 합성) |
+| `evidence.ts` | `ToolOutcome` 의 지표/발견을 "탈취 가능 정보" 매니페스트로 변환. **redaction**(KEY=value·이메일·URL userinfo·토큰 마스킹), 항목별 샘플 cap(기본 1500자), 매니페스트 상한(기본 40), target+label 기준 중복 제거 |
+| `analysis.ts` | 결정적 분석: 증거 → 공격 경로 체인(카테고리별 target 그룹핑으로 중복 제거) + 방어 권고(defense). 모델이 없거나 `--no-ai` 면 이 합성이 항상 실행된다 |
+| `report.ts` | `report.md`(전투 보고) / `report.html`(self-contained) / `report.json`(기계 판독) 렌더링 |
+
+**핵심 결정**
+- **인가 = URL 자체.** `--authorize` 는 호스트를 `~/.redcell/authorization.list` 에 기록한 뒤에만
+  요청을 보낸다. 인가 밖 호스트는 스캔 없이 종료코드 3.
+- **재현성.** 같은 대상·같은 옵션이면 툴 순서·분석·보고서가 동일(smoke/e2e 테스트가 고정 포트
+  로컬 서버로 검증). AI 분석은 어디까지나 보고서 *해석* 레이어 — 없는 경우 결정적 합성으로 대체.
+- **증거 지향.** 찾은 취약점이 "실제로 무엇을 탈취할 수 있는가"를 샘플로 증명하고, 원본 비밀값은
+  redaction 으로 보고서 밖으로 새지 않게 한다. `--full-exposure` 으로만 원문이 포함된다.
+- **블랙박스 경로 발견.** `--target-map <json>` 으로 아는 경로/파라미터를 주입해 정찰을 보강한다.
+
 ## 모델 계층 (`src/models/`)
 
 `ModelAdapter` 하나로 추상화. `createModelFromEnv()` 가 자격증명으로 선택:

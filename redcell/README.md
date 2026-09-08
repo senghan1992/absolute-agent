@@ -106,6 +106,44 @@ redcell explore  |  redcell mcts     # 자기발전/트리검색 데모
 redcell help
 ```
 
+### assault — URL 한 줄 → 자동 공격 캠페인 (`assault`)
+
+공격 대상 URL 하나만 주면 **재구성(recon) → 열거(enumerate) → 공격 스윕(exploit) → 증거 수집(evidence) → 분석(analysis) → 전투 보고(report)** 까지 자동으로 이어진다.
+URL 자체가 인가 범위의 근거이며, `--authorize` 로 호스트를 개인 인가 목록에 기록한 뒤에만 요청이 나간다(그 외엔 fail-closed, 종료코드 3).
+
+```bash
+redcell assault --url http://127.0.0.1:8080 --authorize              # 1회 캠페인 (추천 시작)
+redcell assault --url https://stage.example.com --no-ai              # AI 없이 결정적 분석(오프라인 안전, 재현 가능)
+redcell assault --url http://127.0.0.1:8080 --full-exposure          # 증거 샘플 원문 포함(redaction 끔)
+redcell assault --url http://127.0.0.1:8080 --enable all             # 부작용성 opt-in 프로브까지 전수
+redcell assault --url http://127.0.0.1:8080 --target-map map.json    # 아는 경로/파라미터 주입
+redcell assault --url http://127.0.0.1:8080 --ndjson                 # 이벤트 NDJSON 스트림
+```
+
+**주요 플래그**
+
+| 플래그 | 의미 |
+|---|---|
+| `--url <url>` | 공격 대상 URL(필수, http/https) |
+| `--authorize` | 입력 URL 의 호스트를 `~/.redcell/authorization.list` 에 기록 후 즉시 진행 |
+| `--auth <path>` | 인가 목록 파일 경로(기본 `~/.redcell/authorization.list`) |
+| `--provider / --model` | AI 분석 프로바이더·모델 (없으면 결정적 분석으로 자동 대체) |
+| `--no-ai` | AI 없이 결정적(규칙 기반) 분석 — 동일 대상·동일 옵션이면 동일 보고서 |
+| `--full-exposure` | 증거 샘플 비밀값 마스킹(redaction) 끔 — 원문 포함 |
+| `--evidence-cap <n>` | 항목당 샘플 최대 문자 수 (기본 1500) |
+| `--evidence-max <n>` | 매니페스트 최대 항목 수 (기본 40) |
+| `--proxy <url>` | Burp/ZAP 등 프록시 경유 (env `REDCELL_PROXY` 도 가능) |
+| `--enable <t[,t]>` | opt-in 프로브 활성화 (예: `logic_probe,xxe_probe` 또는 `all`) |
+| `--target-map <file.json>` | 아는 경로/파라미터를 주입해 정찰 보강 |
+| `--ndjson` | 이벤트(진행/발견/차단)를 NDJSON 으로 출력 |
+
+**출력** — `~/.redcell/assault/<host>-<ts>/` 에 `report.md`(전투 보고), `report.html`, `report.json` 이 생성된다.
+매니페스트는 **"탈취 가능한 정보"**(민감 파일·자격증명·개인정보·스키마·오류누설)를 항목별로
+redaction 된 샘플과 함께 나열하고, 분석 단계가 이를 **공격 경로(attack path) 체인**으로 엮어
+방어 권고(defense)까지 제시한다.
+
+**종료코드**: `0` clean · `2` findings(게이트 실패) · `3` 인가 밖 차단 · `4` 대상 미도달(스캔 자체를 시작하지 않음) · `1` 오류
+
 ### 사용자 정의 프로바이더 (custom providers)
 
 자체(vLLM·Ollama·LM Studio 등 OpenAI 호환 서버, 또는 Anthropic 호환 게이트웨이) 엔드포인트를
