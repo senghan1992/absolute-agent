@@ -614,24 +614,6 @@ fn run_prime(
         "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정)".to_string(),
     )?;
 
-    // RedCell 인가 확장(scope 게이트) 설치 여부 — 미설치면 안전 경고를 노트로 남긴다.
-    let ext_root = prime_cwd(redcell).join(".pi").join("agent").join("extensions").join("redcell");
-    let ext_global = std::env::var("HOME")
-        .ok()
-        .map(PathBuf::from)
-        .or_else(|| std::env::var("USERPROFILE").ok().map(PathBuf::from))
-        .map(|h| h.join(".pi").join("agent").join("extensions").join("redcell"));
-    let ext_ok = ext_root.exists() || ext_global.map_or(false, |p| p.exists());
-    let warn = if ext_ok {
-        "[sys] 인가 게이트: RedCell 확장 로드됨 — pi 의 모든 툴 호출을 인가 목록으로 검사합니다.".to_string()
-    } else {
-        "[sys] ⚠ RedCell 확장이 설치되지 않아 pi 의 툴 호출을 인가 목록으로 검사하지 못합니다. ".to_string()
-            + "설치: `cd <프로젝트 루트> && bash redcell\\prime-agent\\install.sh` 후 앱 재시작. "
-    };
-    let ev3 = json!({ "type": "note", "text": warn });
-    let stamped3 = append_event(app, id, &ev3);
-    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
-
     // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
     // CLI 처럼 이전 대화를 이어간다(첫 턴에 생성·저장, 이후 턴은 재사용).
     let mut s2 = s.clone();
@@ -665,7 +647,16 @@ fn run_prime(
         )
     };
 
+    // RedCell 인가 확장(scope 게이트)을 `-e` 로 **명시 로드**한다 — 전역 설치·트러스트·settings
+    // 병합이 없어도 패널에서 항상 게이트가 켜진다(다른 프로젝트의 pi 세션엔 영향 없음).
+    let ext_path = PathBuf::from(redcell).join("prime-agent").join("index.ts");
+    let ev3 = json!({ "type": "note", "text": "[sys] 인가 게이트: RedCell 확장을 -e 로 명시 로드 — pi 의 모든 툴 호출을 인가 목록으로 검사합니다(이 세션만)." });
+    let stamped3 = append_event(app, id, &ev3);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
+
     let mut args: Vec<String> = vec![
+        "-e".into(),
+        ext_path.to_string_lossy().into_owned(),
         "--mode".into(),
         "json".into(),
         "--session-id".into(),

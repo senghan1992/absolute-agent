@@ -15,10 +15,11 @@ prime-agent 의 자기발전 패러다임(Continual Harness)을 보안 도메인
 ## 데스크톱 패널 = prime-agent 셸
 
 `redcell-desktop` 의 모드 선택에서 `prime(pi)` 를 고르면 패널이 곧바로 prime-agent(pi) 를
-실행한다(`pi --mode json -p "<지시문>"`) — 지시문에 인가된 대상 URL 을 붙여 보내고,
-pi 의 bash/웹 툴이 자유롭게 조사한 결과를 그대로 스트리밍한다. RedCell 확장
-(`prime-agent/`, `./prime-agent/install.sh` 로 `.pi/agent` + 전역 `~/.pi/agent` 에 설치)이
-여전히 모든 tool_call 을 인가 목록으로 게이팅한다.
+실행한다(`pi -e <redcell/prime-agent/index.ts> --mode json --session-id rc-… -p "<지시문>"`) —
+지시문에 인가된 대상 URL 을 붙여 보내고, pi 의 bash/웹 툴이 자유롭게 조사한 결과를
+그대로 스트리밍한다. RedCell 확장은 **`-e` 로 명시 로드**되므로 이 패널 세션에서만
+모든 tool_call 을 인가 목록으로 게이팅한다 — 전역 설치가 없어 다른 곳의 pi 에는
+전혀 영향이 없다.
 
 ## RLM 모드 (`rlm`) — 재귀 언어 모델(Recursive Language Model) 방식 에이전트
 
@@ -487,15 +488,19 @@ npx tsx src/cli.ts run --host 127.0.0.1 --port 8080 --goal "웹 스택 식별" -
 npm link && redcell providers
 ```
 
-## prime-agent 에 붙이기 (권장)
+## prime-agent 에 붙이기 (프로젝트 로컬 — 권장)
 
 ```bash
-# prime-agent 를 사용하는 프로젝트 디렉터리에서:
+# pi 를 사용하는 프로젝트 디렉터리에서 (기본: 로컬만 설치, 다른 곳의 pi 에 영향 없음)
 /path/to/redcell/prime-agent/install.sh .
-# → .prime/agent/{extensions/redcell, skills/pentest-lab, redcell/authorization.yaml} 생성
-# authorization.yaml 을 본인 권한 대상으로 수정한 뒤 prime-agent 실행:
-#   /scope       인가 상태 확인
-#   /playbooks   학습된 전술 목록
+# → .pi/agent/{extensions/redcell, skills/pentest-lab, redcell/authorization.yaml} 생성
+# authorization.yaml 을 본인 권한 대상으로 수정한 뒤:
+#   pi -e /path/to/redcell/prime-agent/index.ts    확장 명시 로드(인가 게이트 켜짐, 이 세션만)
+#   /scope       인가 상태 확인   /playbooks   학습된 전술 목록
+
+# 경고: --global 로 설치하면 *모든* pi 세션의 툴 호출을 인가 목록으로 검사한다 —
+# 다른 프로젝트에서 pi 를 쓸 때 "인가" 차단 메시지가 보이면 다음과 같이 제거:
+#   rm "$HOME/.pi/agent/extensions/redcell"   (Windows: Remove-Item "$HOME\.pi\agent\extensions\redcell")
 ```
 
 확장은 prime-agent 의 문서화된 인터페이스에 정확히 대응한다:
