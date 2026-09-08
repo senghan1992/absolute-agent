@@ -16,7 +16,8 @@
     "test": "vitest run",
     "bench": "tsx bench/bench.ts",
     "bench:external": "tsx bench/external.ts",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "bench:rl": "tsx bench/rlbench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",
