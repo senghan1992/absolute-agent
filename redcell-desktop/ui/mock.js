@@ -64,7 +64,7 @@
     port: 8080,
     goal: "웹 취약점 정찰 및 방어 권고",
     provider: "anthropic",
-    mode: "tools",
+    mode: "prime",
     status: "done",
     created_at: nowIso(),
     updated_at: nowIso(),
@@ -297,7 +297,7 @@
       case "get_session": { const s = findById(args.id); return s ? clone(s) : null; }
       case "create_session": {
         const s = { id: uid(), name: args.name && args.name.trim() ? args.name : "session-" + Math.random().toString(36).slice(2, 6),
-          host: args.host || "127.0.0.1", port: args.port ?? null, goal: args.goal || "", provider: args.provider || "mock", mode: args.mode || "tools",
+          host: args.host || "127.0.0.1", port: args.port ?? null, goal: args.goal || "", provider: args.provider || "mock", mode: "prime",
           status: "idle", created_at: nowIso(), updated_at: nowIso(), chat: [], events: [] };
         store.sessions.unshift(s); return clone(s);
       }

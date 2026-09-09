@@ -75,16 +75,6 @@
             <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더">
               <option value="">— provider 선택 —</option>
             </select>
-            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스 자율 에이전트(기본), python=absolute-agent(코드 작성→실행 반복), prime=prime-agent(pi) 직접 실행 — 인가 목록은 동일하게 적용">
-              <option value="tools">tools</option>
-              <option value="python">python(코드실행)</option>
-              <option value="prime">prime-agent(pi)</option>
-            </select>
-            <label class="sh-max" title="공격 최대 모드(tools 전용): 모델 계획 후 남은 툴을 단계별 전수 1회씩 + opt-in 프로브 전체 + 파이썬 심화 실행 활성 — 칼리 대체식 다각 공격">
-              <input type="checkbox" id="shMax" />
-              <svg class="ic" style="width:13px;height:13px"><use href="#i-crosshair"/></svg>
-              <span>최대 공격</span>
-            </label>
           </div>
           <span id="statusBadge" class="badge badge-idle">idle</span>
           <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
@@ -163,15 +153,8 @@
           <span id="agentState" class="agent-state">대기</span>
         </div>
         <div id="chatMessages" class="chat-messages"></div>
-        <div class="quick-goals" id="quickGoals">
-          <span class="qg-label">빠른 지시</span>
-          <button class="chip" type="button" data-goal="취약점 찾아줘">취약점 찾아줘</button>
-          <button class="chip" type="button" data-goal="정보 노출 가능성 조사해줘">정보 노출 조사</button>
-          <button class="chip" type="button" data-goal="인증 우회 공격 루트 찾아줘">인증 우회 루트</button>
-          <button class="chip" type="button" data-goal="보안 설정 전반 점검해줘">보안 설정 점검</button>
-        </div>
         <div class="composer">
-          <textarea id="chatInput" rows="3" placeholder="지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+          <textarea id="chatInput" rows="3" placeholder="prime-agent 에 지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
           <div class="composer-row">
             <span class="composer-hint">인가된 scope 안에서만 실행됩니다</span>
             <button id="chatSend" class="btn btn-primary">지시<svg class="ic"><use href="#i-send"/></svg></button>

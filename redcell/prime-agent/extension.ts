@@ -9,10 +9,10 @@
  *      authorization.yaml scope 밖이면 {block:true} 로 차단한다(harness 레벨 가드).
  *   2) 인가된 대상 전용 정찰 툴(recon_http)을 등록한다.
  *   3) /scope, /engage, /playbooks 슬래시 명령을 등록한다.
- *   4) 화이트해커 방법론(PTES/OWASP, 인가·최소영향 원칙) 시스템 프롬프트를 주입한다.
+ *   4) 인가 대상 전용 시스템 프롬프트(범용 조수 — scope 안에서 자유로운 작업 수행) 를 주입한다.
  *
  * 자기발전(self-improvement)은 prime-agent 의 Continual Harness 를 그대로 사용한다:
- *   성공한 공략은 /refine(또는 auto-refine)에 의해 harness_state.json 의
+ *   성공한 공략/작업 흐름은 /refine(또는 auto-refine)에 의해 harness_state.json 의
  *   kind:"memory"/"skill" 엔트리로 축적되어, 다음 engagement 에서 프롬프트에 재주입된다.
  *   RedCell 의 SkillMemory 는 이 harness 메모리를 fingerprint 로 색인하는 보조 계층이다.
  */
@@ -45,16 +45,16 @@ const GATE_EXPLICIT = process.env.REDCELL_GATE === "1";
 const GATE_DISABLED = process.env.REDCELL_DISABLE === "1";
 
 const METHODOLOGY = `
-# RedCell — prime-agent 화이트해커 모드
+# RedCell — 인가된 대상 전용 AI 조수
 
-너는 화이트해커 조수다. 인가(scope)는 RedCell 이 강제한다:
+너는 사용자의 지시를 자유롭게 수행하는 AI 조수다. 인가(scope)는 RedCell 이 강제한다:
 - **Scope 강제**: '~/.redcell/authorization.list'(또는 authorization.yaml) 의 allow 에 있는 대상만
   다룬다. 확신이 없으면 /scope 로 확인하고, scope 밖이면 시도조차 하지 않는다.
   (모든 tool_call 은 RedCell 훅이 자동으로 검사·차단한다 — 인가 파일에 없으면 차단.)
-
-작업 순서(PTES): 정찰(recon) → 열거(enumerate) → 익스플로잇(exploit) → 사후(post) → 보고(report).
-각 단계 시작 시, harness 메모리에 축적된 과거 성공 전술(playbook)을 먼저 검토하라.
-성공적으로 대상을 공략했다면 /refine 로 그 전술을 메모리에 저장하여 다음에 더 빨리 뚫어라.
+- 대상(URL)이 인가되어 있으면 조사·탐색·파일 추출 등 사용자가 시킨 일을 자유롭게 수행하고
+  결과를 정리해 사용자에게 전달한다. 해킹/취약점만 강제하는 것이 아니라, 그 대상에 대한
+  모든 종류의 업무를 수행한다.
+- 파일로 만들어 달라는 요청은 실제 파일로 저장해 저장 경로를 알려준다.
 `.trim();
 
 export default async function redcell(pi: ExtensionAPI): Promise<void> {

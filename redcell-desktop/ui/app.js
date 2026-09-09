@@ -90,24 +90,10 @@ function renderActive() {
   $("shPort").value = s.port ?? "";
   $("shGoal") && ($("shGoal").value = s.goal || "");
   $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
-  // 정리된 모드 리스트에 없는 기존 세션(rlm/osint 등)은 옵션을 임시 보존해 값이 유실되지 않게 한다.
-  if ($("shMode")) {
-    const sel = $("shMode");
-    const mv = s.mode || "tools";
-    if (mv && !sel.querySelector(`option[value="${mv}"]`)) {
-      const o = document.createElement("option");
-      o.value = mv;
-      o.textContent = `${mv}(기존 세션)`;
-      sel.appendChild(o);
-    }
-    sel.value = mv;
-  }
-  $("shMax") && ($("shMax").checked = !!s.max);
   const chatInput = $("chatInput");
   if (chatInput) {
-    chatInput.placeholder = s.mode === "prime"
-      ? "pi 프롬프트를 입력하세요 — 이전 대화와 이어집니다 (Enter 전송 · Shift+Enter 줄바꿈)"
-      : "지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)";
+    chatInput.placeholder =
+      "prime-agent 에 지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈) — URL 은 위에 입력";
   }
   setBadge(s.status);
 
@@ -153,14 +139,12 @@ function renderCapture(s) {
   renderPiConsole(s);
 }
 
-/** prime 모드: 좌측 패널을 pi CLI 화면(터미널)으로 렌더링한다. */
+/** 좌측 패널을 pi CLI 화면(터미널)으로 렌더링한다 — 이 앱은 prime-agent(pi) 전용 셸이다. */
 function renderPiConsole(s) {
   const live = $("view-live");
   const body = $("piConsoleBody");
   if (!live || !body) return;
-  const isPrime = !!(s && s.mode === "prime");
-  live.classList.toggle("pi-mode", isPrime);
-  if (!isPrime) return;
+  live.classList.add("pi-mode");
   const lines = [];
   for (const m of (s.chat || [])) {
     if (m.role === "user" && m.content.trim()) lines.push({ cls: "pi-user", text: m.content });
@@ -432,8 +416,8 @@ function onLiveEvent(event) {
   const cap = document.querySelector(".capture");
   if (cap) cap.scrollTop = cap.scrollHeight;
 
-  // prime 모드: pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
-  if (s && s.mode === "prime") renderPiConsole(s);
+  // pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
+  if (s) renderPiConsole(s);
 
   renderStepper(s);
   renderMetrics(s);
@@ -452,17 +436,10 @@ async function onFinished(id, status) {
   const fresh = await invoke("get_session", { id });
   if (fresh) { const i = sessions.findIndex((x) => x.id === id); if (i >= 0) sessions[i] = fresh; }
   const s = sessions.find((x) => x.id === id);
-  const fs = findingsOf(s);
-  if (s && s.mode === "prime") {
+  {
     const summary = status === "error"
-      ? "pi 가 오류로 종료되었습니다. 라이브 캡처의 [sys]/[오류] 노트를 확인하세요."
-      : "완료 — 아래에서 이어서 질문할 수 있습니다(같은 pi 세션으로 이어집니다).";
-    await invoke("append_chat", { id, role: "assistant", content: summary });
-  } else {
-    const sev = {}; fs.forEach((f) => { sev[f.severity] = (sev[f.severity] || 0) + 1; });
-    const summary = status === "error"
-      ? "실행이 오류로 종료되었습니다. ‘라이브 캡처’에서 원인을 확인하세요."
-      : `완료 — 발견 ${fs.length}건` + (fs.length ? ` (${Object.entries(sev).map(([k, v]) => `${k}:${v}`).join(", ")})` : "") + `. ‘다음 단계’ 탭에 권고를 정리했습니다.`;
+      ? "prime-agent 가 오류로 종료되었습니다. 라이브 캡처의 [sys]/[오류] 노트를 확인하세요."
+      : "완료 — 아래에서 이어서 지시할 수 있습니다(같은 대화로 이어집니다).";
     await invoke("append_chat", { id, role: "assistant", content: summary });
   }
   const upd = await invoke("get_session", { id });
@@ -515,8 +492,8 @@ async function persistHeader(overrides = {}) {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: $("shProvider").value,
-    mode: $("shMode") ? $("shMode").value : "tools",
-    max: $("shMax") ? $("shMax").checked : false,
+    mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
+    max: false,
   };
   const updated = await invoke("update_session", payload);
   if (updated) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = updated; }
@@ -1052,7 +1029,7 @@ function wire() {
     $("chatInput").value = b.dataset.goal || b.textContent.trim();
     sendChat();
   });
-  ["shName", "shHost", "shPort", "shProvider", "shMode"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
+  ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }
 
