@@ -50,6 +50,24 @@ redcell-desktop (Tauri, Rust)
 
 ## 실행
 
+### Windows
+1. **pi CLI 설치(필수)**: PowerShell 에서
+   ```powershell
+   npm i -g @earendil-works/pi-coding-agent
+   ```
+2. 프로젝트 폴더로 이동해 실행:
+   ```powershell
+   cd redcell-desktop\src-tauri
+   cargo tauri dev
+   ```
+   앱이 pi 를 찾는 대표 위치(`%APPDATA%\npm\node_modules`, `%ProgramFiles%\nodejs`,
+   nvm-windows `%APPDATA%\nvm`, pnpm `%LOCALAPPDATA%\pnpm`, `npm root -g`, PATH 위
+   `pi.cmd`)를 자동 탐색한다. 못 찾으면 에러 메시지에 검색한 후보 전체와
+   `USERPROFILE`/PATH 상태가 표시된다. 특수 위치에 설치했다면 `REDCELL_PI_DIR`
+   환경변수로 pi 패키지 디렉터리를 직접 지정할 수도 있다.
+
+### Linux / macOS
+
 ```bash
 cd redcell-desktop/src-tauri
 cargo tauri dev          # 개발 실행 (창이 뜸)
