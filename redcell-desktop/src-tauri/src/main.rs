@@ -868,6 +868,11 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     } else if s.max {
         // 최대 공격 모드(tools): 모델 계획 후 남은 툴 전수 1회씩 + opt-in 전체 + python_exec.
         args.push("--max".into());
+    } else if subcommand == "run" {
+        // 기본(tools): 안전한 전수 커버리지 — 모델 계획이 일찍 끝나도 남은 읽기전용 툴을
+        // 각 단계 1회씩 전부 돌린다(prime-agent 대비 수집량 열세 해소). 부작용성
+        // opt-in 프로브(logic/race/upload 등)는 여기서 켜지 않는다 — 그건 --max.
+        args.push("--coverage".into());
     }
     if let Some(p) = s.port {
         args.push("--port".into());

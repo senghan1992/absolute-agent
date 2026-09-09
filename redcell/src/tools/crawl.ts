@@ -14,8 +14,11 @@ import { authGet, baseUrl, joinPath } from "./util.js";
 const HREF_RE = /(?:href|action|src)\s*=\s*["']([^"'#]+)["']/gi;
 const FORM_RE = /<form\b([^>]*)>([\s\S]*?)<\/form>/gi;
 const INPUT_NAME_RE = /<(?:input|textarea|select)\b[^>]*\bname\s*=\s*["']?([A-Za-z0-9_.\-\[\]]+)/gi;
-const MAX_PAGES = 5;
-const MAX_ENDPOINTS = 20;
+// 크롤 폭: 실전 사이트(메뉴·페이지네이션·JS 링크)에서 표면을 제대로 담으려면 홈페이지만
+// 돌아서는 안 된다. RPS 준수 하에서 24 페이지 / 64 엔드포인트 까지 수집한다(초기 5/20 은
+// prime-agent 같은 자유 탐색 에이전트 대비 수집량이 크게 밀렸던 원인).
+const MAX_PAGES = 24;
+const MAX_ENDPOINTS = 64;
 
 export const crawl: Tool = {
   name: "crawl",

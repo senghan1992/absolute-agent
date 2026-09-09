@@ -134,6 +134,7 @@ redcell assault --url http://127.0.0.1:8080 --ndjson                 # 이벤트
 | `--evidence-max <n>` | 매니페스트 최대 항목 수 (기본 40) |
 | `--proxy <url>` | Burp/ZAP 등 프록시 경유 (env `REDCELL_PROXY` 도 가능) |
 | `--enable <t[,t]>` | opt-in 프로브 활성화 (예: `logic_probe,xxe_probe` 또는 `all`) |
+| `--coverage` | 전수 커버리지 — 모델 계획 후 남은 기본 툴을 각 단계 1회씩 전부 실행(읽기전용 스윕). 부작용성 opt-in 프로브는 제외 — 완전 수동 동의는 `--max`. 데스크톱 tools 모드는 기본 켬 |
 | `--cookie <n=v[,n=v]>` | 인가된 테스트 세션 쿠키 — "로그인 뒤" 표면(캐시 기만·세션 결함)까지 점검 |
 | `--target-map <file.json>` | 아는 경로/파라미터를 주입해 정찰 보강 |
 | `--ndjson` | 이벤트(진행/발견/차단)를 NDJSON 으로 출력 |
@@ -288,7 +289,7 @@ redcell run --host 127.0.0.1 --port 8080 --provider mock
 | `src/models/` | **모델 어댑터** — Anthropic(SDK) · OpenAI호환 · Mock |
 | `src/memory/` | **SkillMemory** — fingerprint 색인 playbook 저장/recall/distill |
 | `src/scope/` | **ScopeGuard** — 운영자가 authorization.yaml 로 통제하는 대상 게이트 |
-| `src/core/` | **Orchestrator**(모델 계획) + **AutoPilot**(밴딧 자율, 모델 없음) + **MockModel**(발산형 규칙 플래너) |
+| `src/core/` | **Orchestrator**(목표 지향 자율 루프 — 아래) + **AutoPilot**(밴딧 자율, 모델 없음) + **MockModel**(발산형 규칙 플래너) |
 | `src/core/payload-forge.ts` | **PayloadForge** — 핑거프린트/WAF 반영 동적 페이로드 생성(주입 통로) |
 | `src/core/credential-harvest.ts` | 실행 중 노출된 자격증명 수확 → 이후 요청 재사용(발견 체이닝) |
 | `src/tools/` `src/report/` | 37개 다각 공격 표면 툴(아래 표) / Markdown 보고서 + **공격 체인 합성**(`report/chains.ts`) |
@@ -581,6 +582,27 @@ labs/ 의 로컬 랩과 1:1 대응하며, **외부 대상은 아예 받지 않�
 넘긴다. `--cookie "sid=..."`(콤마 복수) 로 세션을 주입하면 인증 표면까지 점검하고,
 무인증 차등(예: `/profile` 차단 vs `/profile/x.css` 개인 본문)을 증거로 남긴다.
 인가 파일의 `login:` 블록(실제 로그인 플로우)과도 결합된다.
+
+### 목표 지향 자율 루프 — 횟수가 아니라 목표가 실행을 결정한다
+
+prime-agent(pi) 같은 자유 탐색 에이전트처럼, RedCell 의 Orchestrator 도 **목표가 달성될 때까지**
+스스로 판단하며 돌아다닌다. 단계(recon→enumerate→exploit→post) 길이는 고정 횟수가 아니라
+세 가지가 결정한다:
+
+1. **모델의 종료 선언 + 추궁(challenge)** — 모델이 done 을 선언하면 한 번 더 물은다:
+   "발견을 재료로 아직 시도할 수 있는 게 없나?". 소득이 나오면 계속하고, 추궁에서도
+   종료이면 다음 단계로. 게으른 조기 종료를 걸러낸다.
+2. **소득 정체(stagnation)** — 발견·수집 지표(엔드포인트/경로/포트 리스트)·자격증명 총량이
+   연속 4 액션 동안 늘지 않으면 "이 단계에서 얻을 것은 뽑았다"고 판단해 다음으로 넘어간다.
+   같은 액션 재제안도 정체로 센다(무한 중복 루프 방지).
+3. **안전 가드(비상 브레이크)** — 총 액션 150·20분 상한. 일상 종료 조건이 실패했을 때만
+   발동된다(무한 루프/비용 폭주 방지 — 일상적인 종료 조건이 아니다).
+
+단계 구조가 끝나도 **자유 추격(free chase)** 이 이어진다: 모델이 단계 구분 없이 발견을
+재료로 사슬을 이어 다음 수를 제안하는 한 계속 실행한다(예: 노출 설정 파일 → 자격증명 →
+로그인 → 권한 상승). 모델 프롬프트에는 지금까지의 발견·수집 목록(findings_so_far,
+discovered_surface, recent_results)이 매번 들어가므로, 실행이 길어질수록 더 구체적인
+다음 수를 낸다. `--max-actions <n>`·`--max-minutes <m>` 로 안전 가드만 조정할 수 있다.
 
 ### 초보자 시각 상황판 (ASCII) — 보안 신입·비전문 개발자도 판단 가능
 

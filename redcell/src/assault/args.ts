@@ -24,7 +24,7 @@ export function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, u
   // 발견된 엔드포인트에서 서로 다른 경로/파라미터 집합을 추출한다.
   // 취약점은 엔드포인트마다 다르므로(예: /tpl→SSTI, /ping→CMDI), 주입 계열
   // 툴에는 발견한 경로·파라미터 전체를 넘겨 발산적으로 스윕하게 한다.
-  const paths = [...new Set(endpoints.map((e) => e.split("?")[0]))].slice(0, 8);
+  const paths = [...new Set(endpoints.map((e) => e.split("?")[0]))].slice(0, 12);
   const params = [
     ...new Set(
       endpoints.flatMap((e) => {
@@ -32,7 +32,7 @@ export function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, u
         return q ? [...new URLSearchParams(q).keys()] : [];
       }),
     ),
-  ].filter(Boolean).slice(0, 8);
+  ].filter(Boolean).slice(0, 12);
 
   if (endpoints.length === 0) {
     // 엔드포인트가 없어도 페이로드 툴은 fp 기반 변형을 실어 발산을 유지한다.

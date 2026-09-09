@@ -50,7 +50,7 @@ PING
 PING
 PING
 PING
-PING %0d%0aX-RedCell-Probe-3zb1kt: 1
+PING %0d%0aX-RedCell-Probe-xbbabo: 1
 PING x
 PING
 PING
@@ -61,5 +61,5 @@ PING
 PING
 PING 127.0.0.1
 PING 1.1.1.1
-RCXb9ta4_0
+RCX1l5zg6_0
 RkxBRy1QWUFHRU5ULTQyCg==

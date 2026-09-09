@@ -19,7 +19,7 @@
                     │ (동일 엔진 재사용)
 ┌─────────────────────────────────────────────────────────────┐
 │ RedCell 엔진 (src/)                                             │
-│   ScopeGuard ── Orchestrator ── SkillMemory                    │
+│   ScopeGuard ── Orchestrator(목표 지향 자율 루프) ── SkillMemory │
 │      │             │                │                          │
 │   authorization  ToolBox(http_probe) knowledge/playbooks       │
 │      .yaml       ModelAdapter        (fingerprint 색인)         │

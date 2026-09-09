@@ -56,7 +56,17 @@ export type OrchestratorEvent =
   | { type: "done"; text: string; log: EngagementLog };
 
 export interface OrchestratorOpts {
-  /** phase 당 최대 액션 수(폭주 방지) */
+  /**
+   * [안전 가드·비상 브레이크] 전체 액션 상한(폭주/비용 방지). 루프의 1차 종료 조건은
+   * '목표 달성'(모델 종료 선언 + 추궁 통과)과 '정체'(새 소득 없음)이며, 이 상한은 그것들이
+   * 실패했을 때 무한 루프를 막는 최후의 장치다(기본 150).
+   */
+  maxTotalActions?: number;
+  /** [안전 가드] 벽시계 상한(분, 기본 20). */
+  maxMinutes?: number;
+  /** 정체 판정: 연속으로 새 소득(발견·지표·자격증명) 없는 액션이 이 횟수면 단계를 접는다(기본 4). */
+  stagnationLimit?: number;
+  /** (호환/게이트용) 단계당 액션 수 고정 예산 — 지정하면 목표 지향 대신 고정 루프. 미지정이 기본. */
   maxActionsPerPhase?: number;
   /** exploit/post 단계 진입 허용 여부. 기본 true 지만 dry-run 시 false. */
   allowActivePhases?: boolean;
@@ -70,8 +80,8 @@ export interface OrchestratorOpts {
    */
   enabledOptIns?: string[];
   /**
-   * 커버리지 전수 모드(--max). 모델 계획이 끝난 뒤 해당 phase 의 아직 안 쓴 툴을 전부 1회씩
-   * 추가 실행한다(모델이 몰라서 놓친 표면까지 뒤짐). argsFor 로 기본 인자를 생성한다.
+   * 커버리지 전수 모드(--max/--coverage). 모델 계획이 끝난 뒤 해당 phase 의 아직 안 쓴 툴을
+   * 전부 1회씩 추가 실행한다(모델이 몰라서 놓친 표면까지 뒤짐). argsFor 로 기본 인자를 생성한다.
    */
   coverage?: boolean;
   /** 툴별 기본 인자 생성기(보통 cli 의 autoArgsFor). coverage 모드에서 사용. */
@@ -89,6 +99,11 @@ export interface SessionContext {
 }
 
 export class Orchestrator {
+  /** [안전 가드] 총 액션 상한/기한 — run() 시작 때 세팅. */
+  private maxTotal: number | null = null;
+  private deadline: number | null = null;
+  private totalActions = 0;
+
   constructor(
     private readonly guard: ScopeGuard,
     private readonly memory: SkillMemory,
@@ -98,7 +113,10 @@ export class Orchestrator {
   ) {}
 
   async run(target: Target, goal: string): Promise<EngagementLog> {
-    const maxActions = this.opts.maxActionsPerPhase ?? 6;
+    // 목표 지향 실행 — 단계 길이는 (모델 종료 선언+추궁)·소득 정체·안전 가드가 결정한다.
+    this.maxTotal = this.opts.maxTotalActions ?? 150;
+    this.deadline = Date.now() + (this.opts.maxMinutes ?? 20) * 60_000;
+    this.totalActions = 0;
     const log: EngagementLog = {
       target,
       fingerprint: {},
@@ -223,6 +241,11 @@ export class Orchestrator {
     };
 
 
+    // 목표 지향 루프의 공유 상태 — '횟수'가 아니라 '소득'이 진행을 결정한다.
+    const executed = new Set<string>(); // 동일 툴+동일 인자 재제안 스킵(중복 예산 낭비 방지)
+    const stagLimit = this.opts.stagnationLimit ?? 4;
+    let staleScore = this.infoScore(log);
+
     for (const phase of PHASES) {
       if ((phase === "exploit" || phase === "post") && this.opts.allowActivePhases === false) {
         emit({ type: "note", text: `[건너뜀] active phase(${phase}) 비활성화됨(dry-run).` });
@@ -243,19 +266,43 @@ export class Orchestrator {
         });
       }
 
-      for (let i = 0; i < maxActions; i++) {
-        const action = await this.plan(phase, target, goal, log.fingerprint, recalled.map((r) => r.playbook), log, emit);
-        if (!action) {
-          emit({ type: "note", text: `[${phase}] 모델이 이 단계 종료를 선언.` });
-          break;
-        }
+      // 목표 지향 루프 — 횟수가 아니라 '목표'와 '소득'이 단계의 길이를 결정한다:
+      //   1) 모델이 종료를 선언하면 한 번 추궁한다("발견을 재료로 아직 할 수 있는 수 없나?").
+      //      그래도 종료이면 다음 단계로 — 모델의 판단이 1차 종료 조건.
+      //   2) 연속으로 새 소득(발견·지표·자격증명)이 없으면 정체로 보고 단계를 접는다(2차).
+      //   3) 총 액션/시간 안전 가드는 비상 브레이크일 뿐, 일상 종료 조건이 아니다(3차).
+      let stag = 0;
+      let phaseActions = 0;
+      while (true) {
+        if (this.budgetStop(emit)) break;
+        if (this.opts.maxActionsPerPhase != null && phaseActions >= this.opts.maxActionsPerPhase) break;
 
-        const tool = this.tools.get(action.tool);
-        if (!tool) {
-          emit({ type: "note", text: `[${phase}] 알 수 없는 툴: ${action.tool} — 건너뜀.` });
+        const action = await this.plan(phase, target, goal, log, recalled.map((r) => r.playbook), emit);
+        if (!action) {
+          // 모델 종료 선언 → 추궁(challenge): 게으른 종료를 걸러낸다.
+          emit({ type: "note", text: `[${phase}] 모델이 이 단계 종료를 선언 — 목표 관점에서 재검토한다.` });
+          const ch = await this.plan(phase, target, goal, log, recalled.map((r) => r.playbook), emit, "challenge");
+          if (!ch) break; // 추궁에서도 종료 → 다음 단계
+          const ranC = await this.execAction(phase, ch, log, runOne, executed, emit);
+          phaseActions++;
+          // 실행+새 소득이면 정체 리셋, 그 외(중복 제안 포함)는 정체로 센다 — 무한 중복 루프 방지.
+          const nowC = this.infoScore(log);
+          stag = ranC && nowC > staleScore ? 0 : stag + 1;
+          staleScore = nowC;
+          if (stag >= stagLimit) { emit({ type: "note", text: `[${phase}] 새 소득 없음 ${stag}회 연속 — 단계를 접는다.` }); break; }
           continue;
         }
-        await runOne(phase, tool, action.tool, action.args, action.rationale, action.fromPlaybook);
+
+        const ran = await this.execAction(phase, action, log, runOne, executed, emit);
+        phaseActions++;
+        // 실행+새 소득(발견·지표·자격증명)이면 정체 리셋. 그 외(중복 제안 포함)는 정체로 센다.
+        const now = this.infoScore(log);
+        stag = ran && now > staleScore ? 0 : stag + 1;
+        staleScore = now;
+        if (stag >= stagLimit) {
+          emit({ type: "note", text: `[${phase}] 새 소득 없는 시도 ${stag}회 연속 — 이 단계에서 얻을 것은 뽑았다고 판단, 다음으로 넘어간다.` });
+          break;
+        }
       }
 
       // 커버리지 전수(--max 공격 모드): 모델 계획이 소진된 뒤, 이번 phase 의 아직 안 쓴 툴을
@@ -271,10 +318,87 @@ export class Orchestrator {
       }
     }
 
+    // 자율 추격(free chase) — 단계 구조가 끝나도, 모델이 목표 관점에서 '아직 시도할 수'를
+    // 제안하는 한 계속 실행한다(prime-agent 식 자기 주도). 단계 구분 없이 발견을 재료로
+    // 사슬을 잇는다(예: 노출 파일 → 자격증명 → 로그인 → 권한 상승). 종료는 추궁·정체·가드가 결정.
+    if (this.opts.maxActionsPerPhase == null) {
+      let chaseStag = 0;
+      while (true) {
+        if (this.budgetStop(emit)) break;
+        const a = await this.plan("post", target, goal, log, [], emit, "free");
+        if (!a) {
+          emit({ type: "note", text: "[추격] 목표 달성 여부를 최종 검토한다." });
+          const ch = await this.plan("post", target, goal, log, [], emit, "challenge");
+          if (!ch) { emit({ type: "note", text: "[추격] 모델이 목표 달성·가용 수 exhausted 를 확정 — 종료한다." }); break; }
+          const ranCh = await this.execAction("post", ch, log, runOne, executed, emit);
+          const nowCh = this.infoScore(log);
+          chaseStag = ranCh && nowCh > staleScore ? 0 : chaseStag + 1;
+          staleScore = nowCh;
+          if (chaseStag >= stagLimit) { emit({ type: "note", text: "[추격] 새 소득 없음 — 종료한다." }); break; }
+          continue;
+        }
+        const ranF = await this.execAction("post", a, log, runOne, executed, emit);
+        const nowF = this.infoScore(log);
+        chaseStag = ranF && nowF > staleScore ? 0 : chaseStag + 1;
+        staleScore = nowF;
+        if (chaseStag >= stagLimit) { emit({ type: "note", text: "[추격] 새 소득 없는 시도 연속 — 목표 달성으로 보고 종료한다." }); break; }
+      }
+    }
+
     // 자기발전: 이번 engagement 에서 성공한 흐름을 새 playbook 으로 distill.
     await this.selfImprove(log, emit);
     this.opts.onEvent?.({ type: "done", text: "[완료] engagement 종료.", log });
     return log;
+  }
+
+  /** 새 소득 지표 — 발견·수집 지표(엔드포인트/경로 리스트)·스택 지문의 총량. 증가 = 진행 중. */
+  private infoScore(log: EngagementLog): number {
+    return (
+      log.findings.length * 10 +
+      (log.fingerprint.indicators?.length ?? 0) +
+      (log.fingerprint.tech?.length ?? 0)
+    );
+  }
+
+  /** [안전 가드·비상 브레이크] 총 액션/시간 상한. 일상 종료 조건(목표 달성·정체)이 실패했을 때만 발동된다. */
+  private budgetStop(emit: (e: OrchestratorEvent) => void): boolean {
+    if (this.maxTotal != null && this.totalActions >= this.maxTotal) {
+      emit({ type: "note", text: `[안전 가드] 총 액션 상한(${this.maxTotal}) 도달 — 종료한다. 목표 지향 루프의 비상 브레이크다.` });
+      return true;
+    }
+    if (this.deadline != null && Date.now() > this.deadline) {
+      emit({ type: "note", text: "[안전 가드] 시간 상한 도달 — 종료한다." });
+      return true;
+    }
+    return false;
+  }
+
+  /**
+   * 제안된 액션 1건을 실행한다(중복 제안 스킵·미지 툴 건너뛰기 포함).
+   * 반환: 실제로 실행됐는지(중복/미지 툴은 false — 정체 카운터에 반영된다).
+   */
+  private async execAction(
+    phase: Phase,
+    action: ProposedAction & { fromPlaybook?: string },
+    log: EngagementLog,
+    runOne: (phase: Phase, tool: Tool, toolName: string, args: Record<string, unknown>, rationale: string, fromPlaybook?: string) => Promise<void>,
+    executed: Set<string>,
+    emit: (e: OrchestratorEvent) => void,
+  ): Promise<boolean> {
+    const tool = this.tools.get(action.tool);
+    if (!tool) {
+      emit({ type: "note", text: `[${phase}] 알 수 없는 툴: ${action.tool} — 건너뜀.` });
+      return false;
+    }
+    const key = `${action.tool}|${stableArgs(action.args)}`;
+    if (executed.has(key)) {
+      emit({ type: "note", text: `[${phase}] ${action.tool} 동일 인자 재제안 — 스킵(이미 실행함).` });
+      return false;
+    }
+    executed.add(key);
+    this.totalActions++;
+    await runOne(phase, tool, action.tool, action.args, action.rationale, action.fromPlaybook);
+    return true;
   }
 
   /** 모델에게 다음 액션 하나를 제안받는다. null 이면 단계 종료. */
@@ -282,33 +406,59 @@ export class Orchestrator {
     phase: Phase,
     target: Target,
     goal: string,
-    fp: Fingerprint,
-    playbooks: { id: string; title: string; steps: unknown[] }[],
     log: EngagementLog,
+    playbooks: { id: string; title: string; steps: unknown[] }[],
     emit: (e: OrchestratorEvent) => void,
+    mode?: "challenge" | "free",
   ): Promise<(ProposedAction & { fromPlaybook?: string }) | null> {
     const system =
       "너는 인가된 침투테스트를 돕는 창의적 화이트해커 조수다. 오직 scope 안의 대상만 다룬다. " +
       "파괴적/DoS 행위는 제안하지 않는다. " +
-      "핵심 원칙: 한 가지 방법에 갇히지 말고 서로 다른 공격 표면을 발산적으로 탐색하라. " +
-      "같은 툴/같은 파라미터를 반복하지 말고, 이번 단계에서 아직 시도하지 않은 새로운 벡터를 골라라 " +
-      "(예: 웹이면 XSS·경로조작·오픈리다이렉트·SSRF·IDOR·CORS·노출파일·GraphQL 등 다양한 각도). " +
+      "핵심 원칙: 목표 지향으로 행동하라 — 목표가 달성될 때까지, 또는 시도할 수 있는 것이 사라질 때까지 계속 탐색하라. " +
+      "한 가지 방법에 갇히지 말고 서로 다른 공격 표면을 발산적으로 탐색하되, " +
+      "발견한 것을 재료로 다음 수를 사슬처럼 연결하라(예: 노출 설정 파일 → 자격증명 → 로그인 → 권한 상승, " +
+      "엔드포인트 발견 → 파라미터 주입, 관리자 경로 발견 → 접근통제 점검). " +
+      "종료(done)는 목표가 달성됐거나 정말 시도할 것이 없을 때만 선언하라. 게으른 종료는 추궁된다. " +
       "이미 발견한 fingerprint/엔드포인트가 있으면 그것을 재료로 다음 액션의 인자를 구체화하라. " +
       "응답은 반드시 JSON 하나로만 한다.";
-    const tried = triedTools(log.transcript, phase);
-    const prompt = JSON.stringify({
-      instruction:
+
+    // 이미 시도한 것: free 모드(단계 구조 밖 추격)에선 전체, 아니면 이 단계만.
+    const tried = mode === "free" ? triedTools(log.transcript) : triedTools(log.transcript, phase);
+    const findings = log.findings.slice(-12).map((f) => ({ severity: f.severity, title: f.title }));
+
+    let instruction: string;
+    if (mode === "challenge") {
+      instruction =
+        `직전에 너는 이 단계의 종료를 선언했다. 목표=${goal}. ` +
+        `아래 findings_so_far 와 discovered_surface 를 보라 — 목표 관점에서 아직 시도해보지 않은 수가 하나라도 있으면 그 액션을 제안하라. ` +
+        `정말로 없을 때만 {"done":true,"reason":"..."} 로 확정하라.`;
+    } else if (mode === "free") {
+      instruction =
+        `단계 구조는 끝났다. 목표=${goal}. 이제 단계 구분 없이 자유롭게 행동하라. ` +
+        `지금까지의 발견·수집 목록을 재료로, 목표 달성에 가장 필요한 다음 액션 1개를 제안하라. ` +
+        `더 이상 시도할 것이 없으면 {"done":true,"reason":"..."} 를 반환하라.`;
+    } else {
+      instruction =
         `현재 phase=${phase}. 목표=${goal}. 다음에 실행할 액션 1개를 제안하라. ` +
         `아래 already_tried 에 있는 접근은 피하고 새로운 벡터를 시도하라. ` +
-        `이 단계에서 시도할 만한 서로 다른 벡터를 모두 소진했으면 {\"done\":true} 를 반환하라.`,
+        `목표가 달성됐거나 이 단계에서 시도할 만한 서로 다른 벡터를 모두 소진했을 때만 {"done":true,"reason":"..."} 를 반환하라. ` +
+        `종료 판단은 신중하게 — 게으른 종료는 재검토된다.`;
+    }
+
+    const prompt = JSON.stringify({
+      instruction,
       target,
-      known_fingerprint: fp,
+      goal,
+      phase,
+      known_fingerprint: log.fingerprint,
+      findings_so_far: findings,
+      discovered_surface: (log.fingerprint.indicators ?? []).slice(0, 32),
       recalled_playbooks: playbooks.map((p) => ({ id: p.id, title: p.title })),
       available_tools: this.tools.list().map((t) => ({ name: t.name, intent: t.intent, description: t.description })),
       already_tried: tried,
+      recent_results: log.transcript.filter((l) => l.startsWith("[") && l.includes(": ")).slice(-10),
       hint: tried.length > 0 ? "지금까지 성과가 없다면 관점을 바꿔 다른 부류의 취약점을 노려라(발산/백트래킹)." : undefined,
-      recent_transcript: log.transcript.slice(-8),
-      response_schema: { tool: "string", args: "object", rationale: "string", fromPlaybook: "string?", done: "boolean?" },
+      response_schema: { tool: "string", args: "object", rationale: "string", fromPlaybook: "string?", done: "boolean?", reason: "string?" },
     });
 
     let raw: string;
@@ -367,14 +517,20 @@ export class Orchestrator {
  * transcript 에서 "현재 phase 에 이미 시도한 툴" 이름을 뽑는다.
  * 액션 로그 형식 `[phase] → tool(...)` 를 파싱한다(발산/중복회피 힌트용).
  */
-function triedTools(transcript: string[], phase: Phase): string[] {
+function triedTools(transcript: string[], phase?: Phase): string[] {
   const out = new Set<string>();
-  const re = new RegExp(`^\\[${phase}\\] → (\\w+)\\(`);
+  const re = phase ? new RegExp(`\\[${phase}\\] → (\\w+)\\(`) : /^\[[a-z]+\] → (\w+)\(/;
   for (const line of transcript) {
     const m = re.exec(line);
     if (m) out.add(m[1]);
   }
   return [...out];
+}
+
+/** 액션 중복 판정용 안정 키(인자 키 정렬). */
+function stableArgs(args: Record<string, unknown> | undefined): string {
+  const keys = Object.keys(args ?? {}).sort();
+  return keys.map((k) => `${k}=${JSON.stringify((args ?? {})[k])}`).join("&");
 }
 
 function mergeFingerprint(a: Fingerprint, b: Fingerprint): Fingerprint {

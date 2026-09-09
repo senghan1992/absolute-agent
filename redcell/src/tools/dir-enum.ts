@@ -9,19 +9,25 @@ import type { Tool, ToolContext, ToolResult } from "../core/types.js";
 import { baseUrl, joinPath, authGet } from "./util.js";
 
 const DEFAULT_WORDLIST = [
-  "admin",
-  "login",
-  "administrator",
-  "robots.txt",
-  ".git/HEAD",
-  "backup",
-  "config",
-  "api",
-  "phpinfo.php",
-  "wp-admin",
-  "server-status",
-  "uploads",
-  ".env",
+  // 인증/관리
+  "admin", "login", "administrator", "wp-admin", "dashboard", "manage", "panel", "console", "manager", "control",
+  // 계정/사용자
+  "register", "signup", "account", "profile", "settings", "password", "reset", "users", "user",
+  // API/서비스
+  "api", "api/v1", "api/v2", "rest", "graphql", "actuator", "actuator/health", "health", "status", "info", "metrics", "env",
+  // 프레임워크/도구 흔적
+  "phpinfo.php", "server-status", "swagger.json", "swagger", "api-docs", "openapi.json", "robots.txt", "sitemap.xml", "crossdomain.xml",
+  // 백업/설정/비밀 (secret_scan 과 보완 — 여기는 존재 여부 신호)
+  "backup", "backup.zip", "backup.tar.gz", "config", "config.php", "configuration", ".env", ".env.bak", ".git/HEAD", ".svn/entries", ".htaccess", ".htpasswd", "web.config",
+  // 데이터/덤프
+  "db", "database", "sql", "dump.sql", "db.sql", "dump", "data",
+  // 콘텐츠/업로드/기능
+  "uploads", "upload", "files", "download", "downloads", "media", "images", "img", "static", "assets", "js", "css",
+  "shop", "store", "order", "orders", "cart", "checkout", "payment", "invoice", "report", "reports",
+  // 개발/테스트 흔적
+  "test", "dev", "staging", "old", "new", "demo", "beta", "tmp", "temp", "debug", "logs", "log", "access.log", "error.log",
+  // 기타 흔한 엔트리
+  "home", "about", "contact", "search", "blog", "news", "forum", "wiki", "help", "faq", "mail", "webmail", "cgi-bin/",
 ];
 
 const SENSITIVE = /(admin|\.git|\.env|backup|config|phpinfo|server-status)/i;

@@ -353,6 +353,10 @@ async function cmdAssault(args: Args): Promise<void> {
   --proxy <url>          Burp/ZAP 등 프록시 경유
   --cookie <name=value>  인가된 테스트 세션 쿠키로 "로그인 뒤" 표면 점검(여러 개는 콤마)
   --enable <t[,t]>       opt-in 프로브 활성화 (예: logic_probe,xxe_probe|all)
+  --coverage             전수 커버리지 — 모델 계획 후 남은 기본 툴을 각 단계 1회씩 전부 실행
+                         (부작용성 opt-in 프로브는 제외 — 완전 수동 동의는 --max)
+  --max-actions <n>      전체 액션 안전 상한(비상 브레이크, 기본 150) — 종료는 목표 달성이 기준
+  --max-minutes <m>      시간 안전 상한(기본 20분)
   --target-map <file.json>  아는 경로/파라미터 주입 (정찰 보강)
   --ndjson               이벤트를 NDJSON 로 출력
 
@@ -553,6 +557,10 @@ async function cmdRun(args: Args): Promise<void> {
   // --max: 공격 최대 모드 — 모델 계획 뒤 남은 툴을 phase 별 전수 시도(커버리지) + opt-in
   //   프로브 전체 + python_exec(파이썬 심화/정보추출) 활성. 칼리 대체식 '다 시도' 캠페인.
   const maxAttack = !!args.flags.max;
+  // --coverage: 전수 커버리지만 단독 활성(--max 의 안전한 부분집합). 모델 계획이 소진된 뒤
+  //   각 phase 의 아직 안 쓴 기본 툴을 1회씩 돌려 '모델이 몰라서 놓친 표면'까지 뒤진다.
+  //   부작용성 opt-in 프로브(logic/race/upload 등)나 python_exec 는 켜지 않는다.
+  const coverage = !!args.flags.coverage || maxAttack;
   const enabledOptIns = resolveEnabledOptIns(guard.enabledOptIns, str(args.flags.enable));
   const allOptIns = new Set([...enabledOptIns, ...(maxAttack ? [...OPT_IN_TOOLS] : [])]);
   const enabledOptInsFinal = [...allOptIns];
@@ -730,13 +738,16 @@ async function cmdRun(args: Args): Promise<void> {
   }
 
   const orch = new Orchestrator(guard, memory, model, toolbox, {
-    maxActionsPerPhase: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : maxAttack ? 10 : 4,
+    // 목표 지향 자율 루프 — 단계 길이는 '목표 달성+추궁'과 '소득 정체'가 결정한다.
+    // 아래 숫자는 무한 루프 방지용 비상 브레이크일 뿐(미지정 시 엔진 기본: 150 액션/20분).
+    maxTotalActions: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : undefined,
+    maxMinutes: args.flags["max-minutes"] ? Number(str(args.flags["max-minutes"])) : undefined,
     allowActivePhases: !args.flags["dry-run"],
     onEvent: emit,
     session,
     enabledOptIns: enabledOptInsFinal,
-    // --max: 모델 계획 소진 후 남은 툴을 전수 1회씩(놓친 표면 보강).
-    coverage: maxAttack,
+    // --max/--coverage: 모델 계획 소진 후 남은 툴을 전수 1회씩(놓친 표면 보강).
+    coverage,
     argsFor: argsForFn,
   });
   const log = await orch.run({ host, port }, goal);
