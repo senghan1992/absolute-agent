@@ -1,0 +1,11 @@
+name: vuln-creds
+class: credential-reuse-chain
+source: local
+port: 18092
+start: ["node", "labs/vuln-creds/server.cjs"]
+url: http://127.0.0.1:18092
+expect:
+  findingText: ["자격증명 재사용"]
+  verified: true
+  proofContains: ["관리자 대시보드"]
+  evidenceCategory: endpoint

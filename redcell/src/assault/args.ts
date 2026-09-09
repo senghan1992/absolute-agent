@@ -62,8 +62,10 @@ export function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, u
     case "cache_poison_probe":
       return { paths };
     case "sqli_probe":
+      // 주입 계열: 발견한 경로 전체를 스윕(오류 기반 → UNION 실증 추출까지 도달해야 함).
+      return { paths, ...(params.length ? { params } : {}) };
     case "cors_audit":
-      return { path: path0, ...(params.length ? { params } : {}) };
+      return { path: path0 };
     case "idor_probe": {
       const idPath = endpoints.find((e) => /\/\d+(\/?$)/.test(e.split("?")[0])) ?? first;
       return { path: idPath.split("?")[0] };

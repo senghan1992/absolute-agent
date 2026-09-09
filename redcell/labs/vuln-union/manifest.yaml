@@ -1,0 +1,11 @@
+name: vuln-union-search
+class: sqli
+source: local
+port: 18089
+start: ["node", "labs/vuln-union/server.cjs"]
+url: http://127.0.0.1:18089
+expect:
+  findingText: ["SQL Injection"]
+  verified: true
+  proofContains: ["UNION 실증"]
+  evidenceCategory: error

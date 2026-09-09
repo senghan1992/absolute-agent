@@ -14,6 +14,7 @@
 import type { ToolContext } from "../core/types.js";
 import { authGet, baseUrl, joinPath } from "../tools/util.js";
 import type { EvidenceCategory, EvidenceItem, ToolOutcome } from "./types.js";
+import { verifyExposure } from "./verify.js";
 
 export interface EvidenceOptions {
   /** 항목당 샘플 cap(문자). 기본 1500. */
@@ -181,6 +182,7 @@ function hitsFromFinding(o: ToolOutcome): RawHit[] {
     }
     case "sqli_probe": {
       if (/error|sql|syntax|exception|stack|trace|mysql|postgres|oracle|sqlite/i.test(ev)) {
+        const ext = typeof d.extracted === "string" && d.extracted ? "\nUNION 데이터 추출 실증: " + d.extracted : "";
         return [
           {
             category: "error",
@@ -188,8 +190,9 @@ function hitsFromFinding(o: ToolOutcome): RawHit[] {
             target: pickTarget(d.path),
             severity: f.severity,
             attack:
-              "입력 주입 시 서버가 DB 엔진/쿼리 구조를 오류 문자열로 반환 — 스키마·데이터 추출 공격(UNION 등)의 시작점이다.",
-            sample: ev,
+              "입력 주입 시 서버가 DB 엔진/쿼리 구조를 오류 문자열로 반환 — 스키마·데이터 추출 공격(UNION 등)의 시작점이다." +
+              (ext ? " 추가로 UNION SELECT 로 실제 DB 값 반환까지 실증됨(검증된 착취)." : ""),
+            sample: ev + ext,
             source: o.tool,
           },
         ];
@@ -211,6 +214,101 @@ function hitsFromFinding(o: ToolOutcome): RawHit[] {
         ];
       }
       return [];
+    }
+
+    // ── 익스플로잇 실증(PoC) 계열 ──────────────────────────────────────────
+    // 각 툴의 evidence 는 "공격자가 주입해 관측한 반사/평가/접근 결과" 그 자체다.
+    // 이 문자열을 exploit 카테고리 증거로 남기고 검증 엔진(verifyExploit)이
+    // 실증 단계(verified)로 끌어올린다. verified 는 랩 점수(evidCategory)의 전제.
+    case "xss_probe": {
+      const xm = /\((\/[^,]*), ([^)]+)\):/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: `반사형 XSS — 미이스케이프 반사(${xm?.[2] ?? "문맥 확인"})`,
+          target: xm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "검색/입력 파라미터에 넣은 마커가 HTML/JS 실행 가능 문맥에 필터링 없이 반사됨 → 피해자 브라우저에서 임의 스크립트 실행(세션 탈취·피싱 등).",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "ssti_probe": {
+      const sm = /path=(\/[^,)]*)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "서버측 템플릿 인젝션 — 산술식 서버 평가",
+          target: sm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "템플릿 표현식이 서버측에서 평가되어 결과가 응답에 노출됨 → 임의 객체 접근·명령 실행(RCE)으로 확대 가능.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "ssrf_probe": {
+      const sm = /path=(\/[^,)]*)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "SSRF — 클라우드 메타데이터 접근",
+          target: sm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "서버가 공격자가 준 URL을 대신 요청해 클라우드 메타데이터(자격증명 발급 주소) 응답을 반사함 → IAM 자격증명 탈취로 이어질 수 있음.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "path_traversal": {
+      const tm = /path=(\/[^,)]*)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "경로 조작/LFI — 시스템 파일 시그니처 노출",
+          target: tm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "파일 경로 파라미터에 ../ 시퀀스를 넣자 서버 파일(예: /etc/passwd) 내용이 응답에 노출됨 → 계정/시스템 정보 탈취·소스코드 열람 가능.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "open_redirect": {
+      const ind = (o.fp?.indicators ?? []).find((s) => s.startsWith("open-redirect "));
+      const rm = /open-redirect (\S+)/.exec(ind ?? "");
+      return [
+        {
+          category: "exploit",
+          label: "오픈 리다이렉트 — 외부 도메인 30x 이동",
+          target: rm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "리다이렉트 파라미터에 외부(redcell-canary) 주소를 넣자 서버가 그쪽으로 30x 이동시킴 → 피싱·OAuth 토큰 유출 등 체인 공격의 시작점.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "xxe_probe": {
+      return [
+        {
+          category: "exploit",
+          label: "XXE — XML 내부 엔티티 확장 처리 활성",
+          target: pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "XML 본문의 내부 엔티티가 확장되어 응답에 반사됨 → 외부 엔티티(파일 읽기/SSRF) 처리로 확장 가능(서버측 DTD 비활성 필요).",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
     }
     default:
       // dir_enum 민감 경로 노출 등: evidence 문자열에서 path 목록 추출.
@@ -278,6 +376,9 @@ export async function collectEvidence(
       if (got) grabbed++;
       sample = got;
     }
+    // 검증은 redaction **전** 원본에 대해 수행한다(증거 문자열이 있어야 실증 가능).
+    const verification = verifyExposure(h.category, sample, { redact });
+    const masked = redactSample(sample, { redact });
     items.push({
       id: `ev${String(n).padStart(2, "0")}`,
       category: h.category,
@@ -285,10 +386,11 @@ export async function collectEvidence(
       source: h.source,
       target: h.target,
       severity: h.severity,
-      sample: redactSample(sample, { redact }).slice(0, cap + 200),
-      redacted: redact && /\*\*\*|…/.test(redactSample(sample, { redact })),
+      sample: masked.slice(0, cap + 200),
+      redacted: redact && /\*\*\*|…/.test(masked),
       itemCount: h.itemCount,
       attack: h.attack,
+      verification,
     });
   }
   return { items, grabbed };

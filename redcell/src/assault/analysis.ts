@@ -142,6 +142,15 @@ function deterministicPaths(target: AssaultTarget, exposed: EvidenceItem[], find
     }
   }
 
+  // 검증(실증)된 증거를 참조하는 경로를 우선 노출한다(별점 가중치 없이 스테이블 정렬).
+  const verifiedRefs = new Set<string>();
+  for (const e of exposed) {
+    if (e.verification?.status === "verified") verifiedRefs.add(e.id);
+  }
+  const verifiedPath = (p: AttackPath) =>
+    p.evidenceRefs.some((r) => r.split("+").some((id) => verifiedRefs.has(id)));
+  paths.sort((a, b) => (verifiedPath(b) ? 1 : 0) - (verifiedPath(a) ? 1 : 0));
+
   if (paths.length === 0) {
     n++;
     paths.push({

@@ -1,0 +1,11 @@
+name: vuln-xxe-import
+class: xxe
+source: local
+port: 18098
+start: ["node", "labs/vuln-xxe/server.cjs"]
+url: http://127.0.0.1:18098
+expect:
+  findingText: ['XML External Entity']
+  verified: true
+  proofContains: ['XXE 실증']
+  evidenceCategory: exploit

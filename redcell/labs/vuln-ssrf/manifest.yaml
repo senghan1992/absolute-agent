@@ -1,0 +1,11 @@
+name: vuln-ssrf-metadata
+class: ssrf
+source: local
+port: 18095
+start: ["node", "labs/vuln-ssrf/server.cjs"]
+url: http://127.0.0.1:18095
+expect:
+  findingText: ['SSRF']
+  verified: true
+  proofContains: ['SSRF 실증']
+  evidenceCategory: exploit

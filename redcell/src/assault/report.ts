@@ -6,6 +6,7 @@
  */
 
 import type { AssaultReport, AttackPath, DefenseItem, EvidenceItem, ToolOutcome } from "./types.js";
+import { verificationBadge } from "./verify.js";
 
 export function fmtDur(ms: number): string {
   if (ms < 1000) return `${ms}ms`;
@@ -30,6 +31,7 @@ const CAT_KO: Record<string, string> = {
   backup: "백업/소스",
   error: "오류누설",
   endpoint: "이면경로",
+  exploit: "익스플로잇",
 };
 
 // ── Markdown ─────────────────────────────────────────────────────────────────
@@ -62,6 +64,7 @@ export function toMarkdown(r: AssaultReport): string {
       L.push(`- **분류:** ${CAT_KO[e.category] ?? e.category} · **등급:** ${e.severity} · **출처:** ${e.source}`);
       L.push(`- **위치:** \`${e.target}\``);
       if (e.itemCount !== undefined) L.push(`- **노출 항목 수:** ${e.itemCount}`);
+      if (e.verification) L.push(`- **검증:** ${verificationBadge(e.verification.status)} — ${e.verification.proof}`);
       L.push("");
       L.push("```");
       L.push(e.sample.length > 0 ? e.sample : "(증거 샘플 없음 — 목록/노출 자체가 증거)");
@@ -148,6 +151,7 @@ export function toHtml(r: AssaultReport): string {
       <td>${e.id}</td><td>${esc(e.severity)}</td><td>${esc(CAT_KO[e.category] ?? e.category)}</td>
       <td>${esc(e.label)}</td><td><code>${esc(e.target)}</code></td>
       <td><details><summary>샘플 ${e.redacted ? "🔒 redacted" : ""}</summary><pre>${esc(e.sample || "(샘플 없음)")}</pre>
+      ${e.verification ? `<p class="verify ver-${esc(e.verification.status)}">${verificationBadge(e.verification.status)} — ${esc(e.verification.proof)}</p>` : ""}
       <p class="attack">🔓 ${esc(e.attack)}</p></details></td></tr>`,
   );
 
@@ -195,6 +199,10 @@ td{border-bottom:1px solid #161f2a;padding:6px 8px;vertical-align:top}
 .tag{font-size:11px;border:1px solid var(--line);border-radius:10px;padding:1px 8px;color:var(--dim)}
 .path{background:var(--panel);border:1px solid var(--line);border-left:3px solid var(--accent);border-radius:8px;padding:10px 14px;margin:10px 0}
 .attack{color:var(--md);font-size:12px;margin:8px 0 0}
+.verify{font-size:12px;margin:8px 0 0;padding:4px 8px;border-radius:4px;border:1px solid var(--line)}
+.verify.ver-verified{color:var(--lo);border-color:var(--lo)}
+.verify.ver-partial{color:var(--md);border-color:var(--md)}
+.verify.ver-unverified{color:var(--dim);border-color:var(--line)}
 .refs{color:var(--dim);font-size:12px}
 ul.defs li{margin:6px 0;list-style:none;padding:8px 10px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
 .narrative{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;white-space:pre-wrap}

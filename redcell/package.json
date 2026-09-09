@@ -18,7 +18,8 @@
     "bench:external": "tsx bench/external.ts",
     "typecheck": "tsc --noEmit",
     "bench:rl": "tsx bench/rlbench.ts",
-    "assault": "tsx src/cli.ts assault"
+    "assault": "tsx src/cli.ts assault",
+    "lab-bench": "tsx bench/lab-bench.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.123.0",

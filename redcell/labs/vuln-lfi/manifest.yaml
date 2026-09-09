@@ -1,0 +1,11 @@
+name: vuln-lfi-passwd
+class: lfi
+source: local
+port: 18096
+start: ["node", "labs/vuln-lfi/server.cjs"]
+url: http://127.0.0.1:18096
+expect:
+  findingText: ['Path Traversal']
+  verified: true
+  proofContains: ['LFI 실증']
+  evidenceCategory: exploit

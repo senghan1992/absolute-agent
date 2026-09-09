@@ -1,0 +1,11 @@
+name: vuln-ssti
+class: ssti
+source: local
+port: 18094
+start: ["node", "labs/vuln-ssti/server.cjs"]
+url: http://127.0.0.1:18094
+expect:
+  findingText: ['Server-Side Template Injection']
+  verified: true
+  proofContains: ['SSTI 실증']
+  evidenceCategory: exploit

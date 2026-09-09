@@ -1,0 +1,11 @@
+name: vuln-pyagent
+class: blind-command-injection
+source: local
+port: 18112
+start: ["node", "labs/vuln-pyagent/server.cjs"]
+url: http://127.0.0.1:18112
+expect:
+  findingText: ["명령 실행"]
+  verified: true
+  proofContains: ["FLAG"]
+  evidenceCategory: endpoint

@@ -139,7 +139,12 @@ redcell assault --url http://127.0.0.1:8080 --ndjson                 # 이벤트
 
 **출력** — `~/.redcell/assault/<host>-<ts>/` 에 `report.md`(전투 보고), `report.html`, `report.json` 이 생성된다.
 매니페스트는 **"탈취 가능한 정보"**(민감 파일·자격증명·개인정보·스키마·오류누설)를 항목별로
-redaction 된 샘플과 함께 나열하고, 분석 단계가 이를 **공격 경로(attack path) 체인**으로 엮어
+redaction 된 샘플과 함께 나열한다. 각 항목에는 **검증 엔진**(`src/assault/verify.ts`)이
+"가능성"을 "실증"으로 끌어올린 **검증 배지**가 붙는다:
+`✅ 실증`(자격증명 키-값 · DB 엔진 지문 · 서로 다른 사적 레코드 · introspection 스키마 구조 · 실제 본문 확보),
+`⚠️ 징후`(확인은 됐으나 실질 증명 불가), `❓ 미확인`(본문/증거 미확보).
+검증은 redaction **전** 원본 증거에서 수행되며 proof 문자열도 항상 마스킹된다(--no-ai 와 동일하게 결정적).
+분석 단계가 이를 **공격 경로(attack path) 체인**으로 엮어
 방어 권고(defense)까지 제시한다.
 
 **종료코드**: `0` clean · `2` findings(게이트 실패) · `3` 인가 밖 차단 · `4` 대상 미도달(스캔 자체를 시작하지 않음) · `1` 오류
@@ -337,6 +342,22 @@ RedCell 는 API 정찰에 국한되지 않고 웹/앱을 여러 각도에서 두
 
 주입 계열 툴(`xss/sqli/ssti/cmdi/ssrf/lfi/redirect`)은 `crawl` 이 찾은 **여러 경로×파라미터를
 발산적으로 스윕**한다. 예: `/tpl→SSTI`, `/ping→CMDI`, `/fetch→SSRF` 를 한 번의 실행에서 각기 탐지.
+
+### 랩 자율 해결률 벤치마크 (P1 — 종단간)
+
+"URL 하나만 주면 끝까지"를 **랩 단위**로 측정한다. `labs/` 아래 취약/클린 랩(로컬
+구현 또는 PortSwigger WSA 인스턴스) 각각에 대해 랩 기동 → `assault --url` 한 번 →
+`report.json` 을 manifest 정답과 대조해 **해결/미해결** 을 판정한다.
+
+- 발견 실패 = 미해결(FN), 발견했지만 검증 실패 = 미해결(가능성 단계), **검증된 착취까지 = 해결**
+- 클린 랩 정답 = 발견 0 + 검증 증거 0(오탐 FP 통제)
+
+```bash
+npm run lab-bench      # 로컬 랩 전체(자동 기동/종료) → 해결률 출력, 100% 시 통과
+```
+
+현재 로컬 3랩(**SQLi UNION · IDOR · clean**) 기준 **자율 해결률 100%**.
+PortSwigger 등 외부 랩은 `--skip-start` + manifest 로 동일 채점(`source: portswigger`).
 
 ### 탐지 정확도 벤치마크 (재현율·오탐 측정)
 

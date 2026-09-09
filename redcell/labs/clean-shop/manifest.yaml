@@ -1,0 +1,8 @@
+name: clean-shop
+class: none
+source: local
+port: 18091
+start: ["node", "labs/clean-shop/server.cjs"]
+url: http://127.0.0.1:18091
+expect:
+  clean: true

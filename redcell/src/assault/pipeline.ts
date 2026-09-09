@@ -29,6 +29,8 @@ import { authorizeTarget, parseAssaultUrl } from "./url.js";
 import { makeArgsFor } from "./args.js";
 import type { TargetMap } from "../core/target-map.js";
 import { collectEvidence } from "./evidence.js";
+import { runChain } from "./chain.js";
+import { runPyAgent } from "./pyagent.js";
 import { analyze } from "./analysis.js";
 import { logLine, toHtml, toJson, toMarkdown } from "./report.js";
 import type { AssaultReport, AssaultStage, AssaultTarget, StageStatus, ToolOutcome } from "./types.js";
@@ -305,6 +307,41 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
   const { items: exposed, grabbed } = await collectEvidence(outcomes, lastCtx, { cap, maxItems, redact });
   for (const item of exposed) emit({ type: "note", text: `[증거] ${item.id} ${item.label} (${item.category})` });
   transcript.push(logLine("evidence", `탈취 가능 정보 ${exposed.length}건 (샘플 ${grabbed}건 재확인, redaction ${redact ? "ON" : "OFF"})`));
+
+  // 7.5 다단계 체이닝(검증된 노출 → 다음 공격 단계 재사용).
+  const chainRes = await runChain(lastCtx, outcomes, { maxPages: 12, maxPairs: 8 });
+  if (chainRes.attempts > 0) {
+    const okN = chainRes.items.length;
+    for (const item of chainRes.items) {
+      exposed.push(item);
+      emit({ type: "note", text: `[체이닝] ${item.id} ${item.label} (${item.category}, verified)` });
+    }
+    for (const f of chainRes.findings) {
+      if (!findings.some((x) => x.title === f.title)) {
+        findings.push(f);
+        emit({ type: "finding", finding: f, text: `[발견] (${f.severity}) ${f.title}` });
+      }
+    }
+    transcript.push(logLine("chain", `체이닝: 자격증명 재사용 시도 ${chainRes.attempts}건 → 성공 ${okN}건`));
+  }
+
+  // 7.6 python_exec 에이전트 루프(모델 없이 결정적 코드 생성 → broker 실행 → 발견).
+  //      "absolute-agent 코어"의 --no-ai 결정적 버전: 후보 파라미터 엔드포인트마다
+  //      블라인드 명령 주입 탐사 프로그램을 생성·실행하고, 검증된 증거만 채택한다.
+  const pyRes = await runPyAgent(lastCtx, outcomes, { guard, target: { host: t0.host, port: t0.port } });
+  if (pyRes.attempts > 0) {
+    for (const item of pyRes.items) {
+      exposed.push(item);
+      emit({ type: "note", text: `[python] ${item.id} ${item.label} (${item.category}, verified)` });
+    }
+    for (const f of pyRes.findings) {
+      if (!findings.some((x) => x.title === f.title)) {
+        findings.push(f);
+        emit({ type: "finding", finding: f, text: `[발견] (${f.severity}) ${f.title}` });
+      }
+    }
+    transcript.push(logLine("python", `python 에이전트: 실행 ${pyRes.attempts}회 → 요청 ${pyRes.requests}, 발견 ${pyRes.findings.length}건, 증거 ${pyRes.items.length}건`));
+  }
 
   // 8. 분석 (AI → 결정적 폴백).
   const ai = opts.ai !== false;

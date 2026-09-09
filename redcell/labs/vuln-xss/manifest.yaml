@@ -1,0 +1,11 @@
+name: vuln-xss-reflected
+class: xss
+source: local
+port: 18093
+start: ["node", "labs/vuln-xss/server.cjs"]
+url: http://127.0.0.1:18093
+expect:
+  findingText: ['Reflected XSS']
+  verified: true
+  proofContains: ['XSS 실증']
+  evidenceCategory: exploit

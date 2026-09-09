@@ -49,7 +49,7 @@ export const crawl: Tool = {
         const norm = sameOriginPath(m[1], host, path);
         if (!norm) continue;
         const [p, q] = splitQuery(norm);
-        if (q) {
+        if (q.length) {
           for (const param of q) endpoints.add(`${p}?${param}=`);
         } else {
           endpoints.add(p);

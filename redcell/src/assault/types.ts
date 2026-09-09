@@ -54,7 +54,8 @@ export type EvidenceCategory =
   | "config"    // 설정/요청 추적/디버그 노출
   | "backup"    // 백업/소스/아카이브 파일
   | "error"     // DB/스택 오류 문자열(내부 정보 누설)
-  | "endpoint"; // 비인가 접근 가능한 관리/민감 엔드포인트
+  | "endpoint"  // 비인가 접근 가능한 관리/민감 엔드포인트
+  | "exploit";  // 익스플로잇 실증(XSS/SSTI/SSRF/LFI/리다이렉트/XXE PoC)
 
 /** 탈취 가능 정보 매니페스트의 한 항목. */
 export interface EvidenceItem {
@@ -75,6 +76,8 @@ export interface EvidenceItem {
   itemCount?: number;
   /** 공격자 관점 설명: "왜 탈취 가능한가 / 무엇이 얻어지는가". */
   attack: string;
+  /** 검증 엔진 결과 — "가능성"인지 "실증"인지(proof 포함, 마스킹 적용됨). */
+  verification?: import("./verify.js").Verification;
 }
 
 /** 공격 경로 — "이 서비스는 이렇게 뚫린다" 체인. */

@@ -6,3 +6,4 @@ config/authorization.yaml
 .prime/
 # 자동 학습된 playbook 은 로컬 산출물(seed 는 추적).
 knowledge/playbooks/pb_[0-9a-z]*_*.json
+.lab-bench/

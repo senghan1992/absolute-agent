@@ -1,0 +1,11 @@
+name: vuln-redirect
+class: redirect
+source: local
+port: 18097
+start: ["node", "labs/vuln-redirect/server.cjs"]
+url: http://127.0.0.1:18097
+expect:
+  findingText: ['Open Redirect']
+  verified: true
+  proofContains: ['리다이렉트 실증']
+  evidenceCategory: exploit
