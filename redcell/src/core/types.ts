@@ -48,6 +48,11 @@ export interface ToolContext {
    * DNS rebinding 을 차단한다. 보통 ScopeGuard.checkResolvedIp 로 구성되어 주입된다.
    */
   validateIp?: (hostname: string, ip: string) => boolean;
+  /**
+   * 산출물 저장 디렉터리(목표 에이전트 전용). download_file/write_output 툴이
+   * 이 디렉터리 아래에만 파일을 쓴다(경로 조작 차단). 지정되지 않으면 두 툴은 거부된다.
+   */
+  resultsDir?: string;
 }
 
 export interface Tool {

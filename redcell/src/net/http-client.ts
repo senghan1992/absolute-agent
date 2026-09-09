@@ -63,6 +63,11 @@ export interface HttpRequestOpts {
   cap?: number;
   /** 타임아웃 ms(기본 8000). */
   timeoutMs?: number;
+  /**
+   * 바이너리 응답 모드: body 를 UTF-8 이 아니라 base64 문자열로 돌려준다(파일 다운로드용).
+   * 텍스트 본문 파괴 없이 원본 바이트를 보존하려면 반드시 이 옵션을 켠다.
+   */
+  binary?: boolean;
   /** "manual"(기본): 3xx 를 따라가지 않음. "follow": 최대 5회 추적. */
   redirect?: "manual" | "follow";
   /** 프록시 URL(예: http://127.0.0.1:8080). env REDCELL_PROXY 로도 지정 가능. */
@@ -139,7 +144,7 @@ async function once(rawUrl: string, opt: HttpRequestOpts, depth: number): Promis
     headers["content-length"] = String(Buffer.byteLength(opt.body));
   }
 
-  const res = await transport(u, method, headers, opt.body, timeoutMs, proxy, opt.rejectUnauthorized ?? false, cap, opt.validateIp);
+  const res = await transport(u, method, headers, opt.body, timeoutMs, proxy, opt.rejectUnauthorized ?? false, cap, opt.validateIp, opt.binary ?? false);
   absorbCookies(opt.jar, u, res.setCookies);
 
   // 리다이렉트 추적(follow, 최대 5회).
@@ -190,11 +195,12 @@ function transport(
   rejectUnauthorized: boolean,
   cap: number,
   validateIp: ((hostname: string, ip: string) => boolean) | undefined,
+  binary = false,
 ): Promise<RawRes> {
   const isHttps = u.protocol === "https:";
   // 프록시 경유 시 이름 해석은 프록시가 담당하므로 여기서 IP 핀/검증을 하지 않는다.
-  if (proxy) return viaProxy(u, method, headers, body, timeoutMs, proxy, rejectUnauthorized, cap, isHttps);
-  return direct(u, method, headers, body, timeoutMs, rejectUnauthorized, cap, isHttps, validateIp);
+  if (proxy) return viaProxy(u, method, headers, body, timeoutMs, proxy, rejectUnauthorized, cap, isHttps, binary);
+  return direct(u, method, headers, body, timeoutMs, rejectUnauthorized, cap, isHttps, validateIp, binary);
 }
 
 async function direct(
@@ -207,6 +213,7 @@ async function direct(
   cap: number,
   isHttps: boolean,
   validateIp: ((hostname: string, ip: string) => boolean) | undefined,
+  binary = false,
 ): Promise<RawRes> {
   const mod = isHttps ? https : http;
   const reqHeaders = { ...headers };
@@ -236,7 +243,7 @@ async function direct(
     headers: reqHeaders,
     ...(isHttps ? { rejectUnauthorized, servername: u.hostname } : {}),
   };
-  return send(mod, options, body, timeoutMs, cap);
+  return send(mod, options, body, timeoutMs, cap, binary);
 }
 
 /**
@@ -253,6 +260,7 @@ async function viaProxy(
   rejectUnauthorized: boolean,
   cap: number,
   isHttps: boolean,
+  binary = false,
 ): Promise<RawRes> {
   const p = new URL(proxy);
   if (!isHttps) {
@@ -265,7 +273,7 @@ async function viaProxy(
       headers: { ...headers, host: u.host },
     };
     if (p.username) options.headers = { ...options.headers, "proxy-authorization": basicAuth(p) };
-    return send(http, options, body, timeoutMs, cap);
+    return send(http, options, body, timeoutMs, cap, binary);
   }
   // TLS: CONNECT 터널 → TLS 소켓 → 요청.
   const socket = await connectTunnel(p, u, timeoutMs);
@@ -276,7 +284,7 @@ async function viaProxy(
     headers,
     createConnection: () => tlsSocket as unknown as net.Socket,
   };
-  return send(https, options, body, timeoutMs, cap);
+  return send(https, options, body, timeoutMs, cap, binary);
 }
 
 function connectTunnel(p: URL, target: URL, timeoutMs: number): Promise<net.Socket> {
@@ -309,6 +317,7 @@ function send(
   body: string | undefined,
   timeoutMs: number,
   cap: number,
+  binary = false,
 ): Promise<RawRes> {
   return new Promise((resolve, reject) => {
     const req = mod.request(options, (res) => {
@@ -334,7 +343,8 @@ function send(
           status: res.statusCode ?? 0,
           headers: h,
           setCookies,
-          body: Buffer.concat(chunks).toString("utf8").slice(0, cap),
+          // binary 모드면 base64(원본 바이트 보존 — 파일 저장용), 아니면 UTF-8 텍스트.
+          body: binary ? Buffer.concat(chunks).toString("base64") : Buffer.concat(chunks).toString("utf8").slice(0, cap),
         });
       });
       res.on("error", reject);

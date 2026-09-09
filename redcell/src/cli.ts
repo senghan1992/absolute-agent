@@ -27,6 +27,7 @@ import { PythonAgent } from "./py/python-agent.js";
 import { MockCoder } from "./py/mock-coder.js";
 import { ContextualBandit } from "./explore/bandit.js";
 import { BanditStore } from "./explore/bandit-store.js";
+import { GoalAgent } from "./core/goal-agent.js";
 import { DefaultToolBox, DEFAULT_TOOLS, OPT_IN_TOOLS } from "./tools/toolbox.js";
 import { pythonTool } from "./tools/python-tool.js";
 import { OsintAgent } from "./osint/agent.js";
@@ -355,6 +356,8 @@ async function cmdAssault(args: Args): Promise<void> {
   --enable <t[,t]>       opt-in 프로브 활성화 (예: logic_probe,xxe_probe|all)
   --coverage             전수 커버리지 — 모델 계획 후 남은 기본 툴을 각 단계 1회씩 전부 실행
                          (부작용성 opt-in 프로브는 제외 — 완전 수동 동의는 --max)
+  --task                 작업형 목표 강제(읽기·추적·다운로드·파일 저장 — 목표 에이전트)
+  --scan                 취약점 스캔 강제(작업형 키워드가 있어도 스캔으로)
   --max-actions <n>      전체 액션 안전 상한(비상 브레이크, 기본 150) — 종료는 목표 달성이 기준
   --max-minutes <m>      시간 안전 상한(기본 20분)
   --target-map <file.json>  아는 경로/파라미터 주입 (정찰 보강)
@@ -734,6 +737,33 @@ async function cmdRun(args: Args): Promise<void> {
       if (gov.verdict === "findings") process.exit(2);
       if (gov.verdict === "inconclusive") process.exit(4);
     }
+    return;
+  }
+
+  // ── 작업형 목표 라우팅 ─────────────────────────────────────────────────────
+  // "합격자 목록을 파일로 뽑아줘" 처럼 취약점 스캔이 아닌 **작업**(읽기·추적·다운로드·
+  // 정리 저장)이 목표이면 목표 에이전트(GoalAgent)로 보낸다. prime-agent(pi) 가 하던
+  // 것을 엔진이 네이티브로 수행한다. --task 로 강제, --scan 으로 취약점 스캔 강제.
+  const TASK_GOAL_RE = /(뽑아|추출|다운로드|다운받|가져와|불러와|목록|리스트|정리해|요약해|모아|파일로|저장해|만들어줘|정리본|extract|download|scrape|collect|summari[sz]e)/i;
+  const taskGoal = !!args.flags.task || (!args.flags.scan && TASK_GOAL_RE.test(goal));
+  if (taskGoal) {
+    emit?.({ type: "note", text: "[모드] 작업형 목표로 판단 — 목표 에이전트(GoalAgent)로 실행합니다. 취약점 스캔은 --scan." });
+    const resultsDir = path.join(redcellHome(), "results", `${host}-${Date.now()}`);
+    const agent = new GoalAgent({
+      guard,
+      model,
+      resultsDir,
+      session,
+      onEvent: emit,
+      maxTotalActions: args.flags["max-actions"] ? Number(str(args.flags["max-actions"])) : undefined,
+      maxMinutes: args.flags["max-minutes"] ? Number(str(args.flags["max-minutes"])) : undefined,
+    });
+    const gr = await agent.run({ host, port }, goal);
+    await panel?.close();
+    if (!ndjson) {
+      console.log("\n" + gr.summary + "\n");
+    }
+    audit?.end({ verdict: gr.achieved ? "clean" : "inconclusive", reason: `goal-agent 산출물 ${gr.artifacts.length}건` });
     return;
   }
 
