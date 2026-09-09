@@ -24,16 +24,25 @@ RedCell 엔진을 감싸는 **Rust(Tauri v2) 데스크톱 앱**. ChatGPT 데스�
   확인·추가·제거한다. `~/.redcell/authorization.list`(또는 설정된 auth 경로)를 관리하며,
   `run`/`pyrun` 은 이 목록을 자동 우선 감지한다.
 - **세션 헤더의 host 란**에 IP·도메인·URL(`http://host:port/path` 형식도 가능)을 넣고
-  실행하면 **인가 목록에 자동 추가**된다. 추가된 대상은 🛡 패널에서 바로 제거할 수 있다.
+  실행하면 **인가 목록에 자동 추가**된다. 이때 DNS 해석된 **실제 IP 도 함께 허용**한다 —
+  사내망 호스트(예: `axhack.lge.com` → `10.x.x.x`)처럼 사설 대역으로 해석되는 대상도
+  그대로 실행된다(ScopeGuard 의 연결시점 IP 검증 통과). 추가된 대상은 🛡 패널에서 바로
+  제거할 수 있다.
 - 세션은 앱 데이터 폴더에 JSON 으로 저장되어 언제든 다시 열람 가능하다.
 
 ## 동작 원리
 
 이 앱은 **표시/세션 관리 계층**이다. 공격력을 새로 만들지 않는다.
 세션 실행 시 형제 프로젝트 [`../redcell`](../redcell) 의 CLI 를
-`run --ndjson` 으로 스폰하고, stdout 의 NDJSON 이벤트를 파싱해 UI 로 스트리밍한다.
+스폰하고, stdout 의 NDJSON 이벤트를 파싱해 UI 로 스트리밍한다.
 모든 액션은 redcell 의 `ScopeGuard`(authorization.yaml)를 그대로 통과하므로,
 **인가된 대상만** 다뤄진다.
+
+엔진 모드는 3가지로 정리돼 있다:
+
+- **tools** — 고정 툴박스 자율 에이전트(`run --ndjson`, 기본값)
+- **python(코드실행)** — absolute-agent(`pyrun`, 코드 작성→실행 반복)
+- **prime-agent(pi)** — pi CLI 직접 실행(대화형, 같은 인가 목록 적용)
 
 ```
 redcell-desktop (Tauri, Rust)

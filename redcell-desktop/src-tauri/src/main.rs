@@ -1062,6 +1062,12 @@ fn remove_auth(app: AppHandle, target: String) -> Result<auth::AuthList, String>
 
 /// 실행 전 자동 인가 — 입력한 host/URL 을 허용 목록에 추가하고 결과를 알린다.
 /// (파일이 정식 YAML 이면 아무것도 건드리지 않고 yaml=true 만 알린다 — 게이트는 엔진이 수행)
+///
+/// "URL 입력 = 그 대상 인가" 계약을 이름뿐 아니라 실제 접속 IP 까지 채운다: host 를 DNS 로
+/// 해석해 나온 IP 도 함께 목록에 추가한다. 그래야 엔진 ScopeGuard 의 연결시점 IP 검증
+/// (checkResolvedIp) 을 통과한다 — 특히 사설 대역(10.x 등 사내망 호스트)으로 해석되는
+/// 대상은 IP 가 명시 인가돼 있지 않으면 측면이동 방지 기본값에 막히므로, 실행할 때마다
+/// "가 인가 IP 로 해석되지 않습니다" 오류가 났었다.
 #[derive(serde::Serialize)]
 struct AuthEnsureResult {
     added: bool,
@@ -1070,6 +1076,10 @@ struct AuthEnsureResult {
     path: String,
     yaml: bool,
     reason: Option<String>,
+    /// 이번에 DNS 해석해 새로 추가한 IP 목록.
+    ips_added: Vec<String>,
+    /// 이미 목록에 있던 IP 목록(재추가 안 함).
+    ips_known: Vec<String>,
 }
 
 #[tauri::command]
@@ -1085,29 +1095,34 @@ fn auth_ensure(app: AppHandle, host: String) -> Result<AuthEnsureResult, String>
             path: loaded.path,
             yaml: true,
             reason: Some("인가 파일이 정식 YAML 입니다 — 자동 추가하지 않습니다.".into()),
+            ips_added: vec![],
+            ips_known: vec![],
         });
     }
-    if loaded.allows.iter().any(|a| a == &normalized) {
-        return Ok(AuthEnsureResult {
-            added: false,
-            existed: true,
-            host: normalized,
-            path: loaded.path,
-            yaml: false,
-            reason: None,
-        });
-    }
-    auth::ensure_allowed(&path, &host)?;
+    let host_added = if loaded.allows.iter().any(|a| a == &normalized) {
+        false
+    } else {
+        auth::ensure_allowed(&path, &host)?;
+        true
+    };
+
+    // DNS 해석 → 해석된 IP 도 허용 목록에 (중복 제외).
+    // 해석 실패(오프라인/존재하지 않는 이름)면 조용히 이름만 추가하고 넘어간다 —
+    // 엔진이 실행 시점에 다시 검증한다(fail-closed 유지).
+    let (ips_added, ips_known) = auth::resolve_and_allow(&path, &normalized, &loaded.allows);
     Ok(AuthEnsureResult {
-        added: true,
-        existed: false,
+        added: host_added,
+        existed: !host_added,
         host: normalized,
-        path: loaded.path,
+        path: auth::load(&path).path,
         yaml: false,
         reason: None,
+        ips_added,
+        ips_known,
     })
 }
 
+/// host 를 DNS 해석해 나온 IP 를 인가 목록에 추가한다. 반환: (새로 추가한 IP, 이미 있던 IP).
 fn main() {
     tauri::Builder::default()
         .manage(IoGuard(Mutex::new(())))

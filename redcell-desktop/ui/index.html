@@ -75,11 +75,9 @@
             <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더">
               <option value="">— provider 선택 —</option>
             </select>
-            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스, python=absolute-agent(코드 작성→실행 반복), rlm=RLM(영구 REPL + 재귀 서브콜 + 기억), osint=웹 뒤지기(정보 수집), prime=prime-agent(pi) 직접 실행 — 인가 목록은 동일하게 적용">
+            <select id="shMode" class="sh-input sh-mode" title="엔진 모드: tools=고정 툴박스 자율 에이전트(기본), python=absolute-agent(코드 작성→실행 반복), prime=prime-agent(pi) 직접 실행 — 인가 목록은 동일하게 적용">
               <option value="tools">tools</option>
-              <option value="python">python(RLM)</option>
-              <option value="rlm">rlm(재귀 REPL)</option>
-              <option value="osint">osint(뒤지기)</option>
+              <option value="python">python(코드실행)</option>
               <option value="prime">prime-agent(pi)</option>
             </select>
             <label class="sh-max" title="공격 최대 모드(tools 전용): 모델 계획 후 남은 툴을 단계별 전수 1회씩 + opt-in 프로브 전체 + 파이썬 심화 실행 활성 — 칼리 대체식 다각 공격">

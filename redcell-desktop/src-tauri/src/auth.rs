@@ -330,6 +330,39 @@ pub fn ensure_allowed(path: &PathBuf, host: &str) -> Result<(bool, String), Stri
     Ok((true, target))
 }
 
+/// host 를 DNS 로 해석해 나온 IP 를 인가 목록에 추가한다(중복 제외).
+/// 반환: (새로 추가한 IP, 이미 목록에 있던 IP).
+///
+/// 왜 필요한가: 엔진 ScopeGuard 는 연결시점에 "해석된 IP" 를 다시 검증한다. 사내망
+/// 호스트(예: axhack.lge.com → 10.x.x.x)는 이름만 인가돼 있으면 사설 대역 측면이동
+/// 방지 기본값에 막혀 "가 인가 IP 로 해석되지 않습니다" 가 난다. "URL 입력 = 그 대상
+/// 인가" 계약에 따라 이름이 가리키는 실제 IP 도 함께 허용해 실행이 막히지 않게 한다.
+/// 해석 실패(오프라인 등)면 조용히 빈 결과를 돌린다 — 엔진이 실행 시점에 재검증한다.
+pub fn resolve_and_allow(path: &PathBuf, host: &str, current_allows: &[String]) -> (Vec<String>, Vec<String>) {
+    let (mut added, mut known) = (Vec::new(), Vec::new());
+    if host.is_empty() {
+        return (added, known);
+    }
+    use std::net::ToSocketAddrs;
+    let mut seen: Vec<String> = Vec::new();
+    let Ok(addrs) = (host, 80u16).to_socket_addrs() else {
+        return (added, known);
+    };
+    for a in addrs {
+        let ip = a.ip().to_string();
+        if seen.contains(&ip) {
+            continue;
+        }
+        seen.push(ip.clone());
+        if current_allows.iter().any(|x| x == &ip) {
+            known.push(ip);
+        } else if add(path, &ip, false).is_ok() {
+            added.push(ip);
+        }
+    }
+    (added, known)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -387,6 +420,38 @@ mod tests {
         let list = "# 주석\n127.0.0.1\n";
         assert!(is_yaml_file(yaml));
         assert!(!is_yaml_file(list));
+    }
+
+    #[test]
+    fn resolve_and_allow_adds_resolved_ips_once() {
+        let p = tmp_file("resolve");
+        let _ = std::fs::remove_file(&p);
+        // localhost 는 오프라인에서도 해석된다(127.0.0.1 또는 ::1).
+        add(&p, "localhost", false).unwrap();
+        let allows = load(&p).allows.clone();
+        assert!(allows.contains(&"localhost".to_string()));
+
+        let (added, known) = resolve_and_allow(&p, "localhost", &allows);
+        // 해석에 성공했으면 IP 가 목록에 생긴다(첫 호출: added, 두 번째 호출: known).
+        if added.is_empty() && known.is_empty() {
+            // 해석 실패 환경(이론상 드묾) — 목록은 여전히 유효해야 한다.
+            assert!(load(&p).allows.contains(&"localhost".to_string()));
+            return;
+        }
+        let allows2 = load(&p).allows.clone();
+        assert!(allows2.iter().any(|x| added.contains(x) || known.contains(x)));
+        // 재호출 — 같은 IP 는 known 로 분류되고 중복 추가되지 않는다.
+        let (added2, known2) = resolve_and_allow(&p, "localhost", &allows2);
+        assert!(added2.is_empty());
+        assert_eq!(known.len() + added.len(), known2.len() + added2.len());
+    }
+
+    #[test]
+    fn resolve_and_allow_empty_host_is_noop() {
+        let p = tmp_file("resolve-empty");
+        let _ = std::fs::remove_file(&p);
+        let (added, known) = resolve_and_allow(&p, "", &[]);
+        assert!(added.is_empty() && known.is_empty());
     }
 
     #[test]

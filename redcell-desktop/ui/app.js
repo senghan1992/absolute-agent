@@ -90,7 +90,18 @@ function renderActive() {
   $("shPort").value = s.port ?? "";
   $("shGoal") && ($("shGoal").value = s.goal || "");
   $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
-  $("shMode") && ($("shMode").value = s.mode || "tools");
+  // 정리된 모드 리스트에 없는 기존 세션(rlm/osint 등)은 옵션을 임시 보존해 값이 유실되지 않게 한다.
+  if ($("shMode")) {
+    const sel = $("shMode");
+    const mv = s.mode || "tools";
+    if (mv && !sel.querySelector(`option[value="${mv}"]`)) {
+      const o = document.createElement("option");
+      o.value = mv;
+      o.textContent = `${mv}(기존 세션)`;
+      sel.appendChild(o);
+    }
+    sel.value = mv;
+  }
   $("shMax") && ($("shMax").checked = !!s.max);
   const chatInput = $("chatInput");
   if (chatInput) {
@@ -538,10 +549,15 @@ async function ensureTargetAuthorized() {
     const r = await invoke("auth_ensure", { host });
     if (r.yaml) {
       await pushAssistant(s.id, `인가 파일이 정식 YAML 입니다 — 대상 ${r.host} 을(를) 자동 추가하지 않았습니다. 인가 범위는 엔진(ScopeGuard)이 그대로 강제합니다.`);
-    } else if (r.added) {
-      await pushAssistant(s.id, `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다. 빼려면 🛡 인가 대상 관리에서 제거하세요.`);
-    } else if (r.existed) {
-      await pushAssistant(s.id, `대상 ${r.host} 은(는) 이미 인가된 대상입니다.`);
+    } else {
+      const ipNote = (r.ips_added && r.ips_added.length)
+        ? ` 해석된 IP 도 함께 허용: ${r.ips_added.join(", ")}`
+        : (r.ips_known && r.ips_known.length ? ` (해석된 IP ${r.ips_known.join(", ")} 이미 허용됨)` : "");
+      if (r.added) {
+        await pushAssistant(s.id, `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다.${ipNote} 빼려면 🛡 인가 대상 관리에서 제거하세요.`);
+      } else if (r.existed) {
+        await pushAssistant(s.id, `대상 ${r.host} 은(는) 이미 인가된 대상입니다.${ipNote}`);
+      }
     }
   } catch (e) {
     await pushAssistant(s.id, `대상 자동 인가 실패: ${e} — 인가 범위는 엔진이 계속 강제합니다.`);
