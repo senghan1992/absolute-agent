@@ -134,6 +134,7 @@ redcell assault --url http://127.0.0.1:8080 --ndjson                 # 이벤트
 | `--evidence-max <n>` | 매니페스트 최대 항목 수 (기본 40) |
 | `--proxy <url>` | Burp/ZAP 등 프록시 경유 (env `REDCELL_PROXY` 도 가능) |
 | `--enable <t[,t]>` | opt-in 프로브 활성화 (예: `logic_probe,xxe_probe` 또는 `all`) |
+| `--cookie <n=v[,n=v]>` | 인가된 테스트 세션 쿠키 — "로그인 뒤" 표면(캐시 기만·세션 결함)까지 점검 |
 | `--target-map <file.json>` | 아는 경로/파라미터를 주입해 정찰 보강 |
 | `--ndjson` | 이벤트(진행/발견/차단)를 NDJSON 으로 출력 |
 
@@ -290,7 +291,7 @@ redcell run --host 127.0.0.1 --port 8080 --provider mock
 | `src/core/` | **Orchestrator**(모델 계획) + **AutoPilot**(밴딧 자율, 모델 없음) + **MockModel**(발산형 규칙 플래너) |
 | `src/core/payload-forge.ts` | **PayloadForge** — 핑거프린트/WAF 반영 동적 페이로드 생성(주입 통로) |
 | `src/core/credential-harvest.ts` | 실행 중 노출된 자격증명 수확 → 이후 요청 재사용(발견 체이닝) |
-| `src/tools/` `src/report/` | 32개 다각 공격 표면 툴(아래 표) / Markdown 보고서 + **공격 체인 합성**(`report/chains.ts`) |
+| `src/tools/` `src/report/` | 37개 다각 공격 표면 툴(아래 표) / Markdown 보고서 + **공격 체인 합성**(`report/chains.ts`) |
 | `prime-agent/` | **prime-agent 확장** — 커스텀 툴 + 슬래시 명령 + 방법론 프롬프트 + scope 훅 |
 | `skills/pentest-lab/` | prime-agent 마크다운 스킬(방법론 + 자기발전 지침) |
 | `knowledge/playbooks/` | 학습된/기본 제공 전술(JSON) |
@@ -303,7 +304,7 @@ RedCell 는 API 정찰에 국한되지 않고 웹/앱을 여러 각도에서 두
 비파괴적으로 동작한다. 탐지는 상태코드가 아니라 **내용 시그니처** 기반이라 포괄-200
 서버에서도 오탐이 적다.
 
-**32개 툴**, 취약점 계열마다 다른 각도로 두드린다:
+**37개 툴**, 취약점 계열마다 다른 각도로 두드린다:
 
 | 단계 | 툴 | 노리는 것 |
 | --- | --- | --- |
@@ -339,6 +340,9 @@ RedCell 는 API 정찰에 국한되지 않고 웹/앱을 여러 각도에서 두
 | exploit | `param_pollution` | HTTP 파라미터 오염(HPP) — 접근통제/WAF 우회 근거 |
 | exploit | `cache_poison_probe` | 웹 캐시 포이즈닝 — 고유 cache-buster 2단계 확인(실사용자 무영향·비파괴) |
 | exploit | `logic_probe` | 비즈니스 로직(가격/수량/권한류) 검증 부재 신호 — 읽기 전용·수동확인 |
+| exploit | `smuggle_probe` | HTTP Request Smuggling — CL.TE 스톨·중복 CL·TE 난독화 차등 관찰(잔여 바이트 0·비파괴) |
+| exploit | `cache_deception_probe` | 웹 캐시 기만 — 개인 페이지의 정적 확장자 경로 캐시 → 무인증 재요청 차등 실증(피해자=자기 세션) |
+| exploit | `jwt_attack` | JWT 능동 위조 실증 — alg=none/약한 시크릿 role=admin 재서명 토큰의 서버 수용(3요청 차등·오탐 통제) |
 
 주입 계열 툴(`xss/sqli/ssti/cmdi/ssrf/lfi/redirect`)은 `crawl` 이 찾은 **여러 경로×파라미터를
 발산적으로 스윕**한다. 예: `/tpl→SSTI`, `/ping→CMDI`, `/fetch→SSRF` 를 한 번의 실행에서 각기 탐지.
@@ -356,7 +360,7 @@ RedCell 는 API 정찰에 국한되지 않고 웹/앱을 여러 각도에서 두
 npm run lab-bench      # 로컬 랩 전체(자동 기동/종료) → 해결률 출력, 100% 시 통과
 ```
 
-현재 로컬 3랩(**SQLi UNION · IDOR · clean**) 기준 **자율 해결률 100%**.
+현재 로컬 14랩(**SQLi UNION · IDOR · SSTI · SSRF · LFI · XSS · XXE · 리다이렉트 · 자격증명 체이닝 · 블라인드 CMDI · Request Smuggling · 캐시 기만 · JWT 위조 · clean**) 기준 **자율 해결률 100%**.
 PortSwigger 등 외부 랩은 `--skip-start` + manifest 로 동일 채점(`source: portswigger`).
 
 ### 탐지 정확도 벤치마크 (재현율·오탐 측정)
@@ -535,6 +539,49 @@ redcell audit verify ~/.redcell/audit/<...>.jsonl   # 해시 체인·순번 무�
 `SSRF+메타데이터=클라우드 크리덴셜 탈취`)과 그 영향·방어 우선순위를 제시한다. 모두
 비파괴 원칙을 지켜 **실제 피해를 내지 않고 서술만** 한다.
 
+### 공격 경로 플래너 (`src/assault/routes.ts`) — 발견을 "능력"으로 승격해 다음 수를 예측
+
+해커는 발견을 끝으로 보지 않는다 — **능력을 연결해 목표까지 간다.** 공격 경로 플래너는
+발견·증거를 공격자 능력(파일 열람·자격증명·세션 탈취·내부망 접근·트래픽 납치…)으로
+번역하고, 체인 규칙(예: `파일 열람 → 설정에서 자격증명 → 로그인 → 관리자 장악`)으로
+왕관 목표(서버 장악·관리자 권한·트래픽 납치)까지의 다단계 루트를 합성한다.
+
+- **결정적**(규칙 기반, 오프라인)이며 실제 실행은 하지 않는 **계획 전용** 엔진이다.
+- 각 단계에 **다음 수**(공격자가 시도할 행동)와 **방어법**(이 전이를 끊는 조치)이 붙는다.
+- 보유 능력 자체가 왕관이면 0단계 경로로 확정한다(스머글링 = 트래픽 납치 능력 확보).
+- 리포트의 `🗺️ 공격 경로 지도` 섹션(ASCII 체인 그림)과 `report.json` 의 `attackRoutes` 로 출력.
+
+```bash
+redcell assault --url http://127.0.0.1:8080 --no-ai
+# → 리포트에서 공격 경로 지도 확인: "SSRF → 메타데이터 자격증명 → 세션 → 관리자 장악"
+```
+
+### 해킹 학습 투어 (`redcell learn`) — 허들을 낮춘다
+
+"해킹은 허들이 높다"를 부수는 레이어. 인가된 로컬 랩(labs/)에서 **실제 취약점을
+안내받으며 직접 뚫어본다**: 이야기(왜 위험한가) → 공격 그림(ASCII) → 단계 실습(툴 실행
+→ 발견 확인 → 관찰 해설) → 확인 퀴즈 → 방어법. 진행도는
+`~/.redcell/learn/progress.json` 에 누적된다(✅ 표시).
+
+```bash
+redcell learn                     # 강의 목록(진행도 표시)
+redcell learn start sql-injection # 대표 입문 강의 — UNION SELECT 데이터 추출 실습
+redcell learn start request-smuggling
+redcell learn start jwt-forgery
+redcell learn progress | reset <id>
+```
+
+6개 강의(입문 3: SQLi·IDOR·XSS / 중급 3: Request Smuggling·캐시 기만·JWT 위조)가
+labs/ 의 로컬 랩과 1:1 대응하며, **외부 대상은 아예 받지 않는다**(127.0.0.1 고정).
+비대화형 실행은 `--auto`(퀴즈 자동 정답) — 테스트와 CI 에서도 완주 가능하다.
+
+### 인증된 표면 스캔 (`--cookie`)
+
+캐시 기만·세션 결함처럼 "로그인 뒤"에만 보이는 취약점을 점검하려면 인가된 테스트 세션을
+넘긴다. `--cookie "sid=..."`(콤마 복수) 로 세션을 주입하면 인증 표면까지 점검하고,
+무인증 차등(예: `/profile` 차단 vs `/profile/x.css` 개인 본문)을 증거로 남긴다.
+인가 파일의 `login:` 블록(실제 로그인 플로우)과도 결합된다.
+
 ### 초보자 시각 상황판 (ASCII) — 보안 신입·비전문 개발자도 판단 가능
 
 리포트 맨 위에 **문자로 그린 상황판**을 얹는다(색·이미지 없이 `─▶█` 등으로만 그려 어떤
@@ -577,7 +624,7 @@ npx tsx src/cli.ts run --host 127.0.0.1 --port 8080 --auto --goal "웹 취약점
 ```bash
 cd redcell
 npm install
-npm test                     # 299개 테스트: scope(+연결시점 IP검증·rebinding)/메모리/탐색/MCTS/32개 툴/웹벡터/페이로드생성/인증스캔/체이닝/발산플래너/프로바이더/정확도벤치+적대적미끼/탐지심화 FN-트랩/피해반경/정찰→공격 자동배선(+target-map 오버라이드)/중복요청 억제/역직렬화·세션강도·캐시포이즈닝·로직결함 신규툴/scope차단/게이트 신뢰성/서명리포트·waiver·직무분리/변조탐지 감사추적/초보자 시각 상황판/외부 취약앱 블라인드 검증/absolute-agent(pyrun 코드실행 안전·OS격리 fail-closed·scope 강제)/e2e
+npm test                     # 432개 테스트: scope(+연결시점 IP검증·rebinding)/메모리/탐색/MCTS/37개 툴(스머글링·캐시기만·JWT위조 포함)/웹벡터/페이로드생성/인증스캔/체이닝/발산플래너/공격경로플래너/프로바이더/정확도벤치+적대적미끼/탐지심화 FN-트랩/피해반경/정찰→공격 자동배선(+target-map 오버라이드)/중복요청 억제/역직렬화·세션강도·캐시포이즈닝·로직결함 신규툴/scope차단/게이트 신뢰성/서명리포트·waiver·직무분리/변조탐지 감사추적/초보자 시각 상황판/외부 취약앱 블라인드 검증/해킹 학습 투어(learn)/absolute-agent(pyrun 코드실행 안전·OS격리 fail-closed·scope 강제)/e2e
 
 # 인가 파일 준비 후 로컬 대상에 실행
 cp config/authorization.example.yaml config/authorization.yaml

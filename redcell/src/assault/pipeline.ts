@@ -19,6 +19,7 @@ import path from "node:path";
 import { classifyTarget, DEFAULT_LIST_FILE } from "../scope/ip-list.js";
 import { loadAuthorization } from "../scope/load-auth.js";
 import { performLogin } from "../net/login.js";
+import { newJar } from "../net/http-client.js";
 import { DefaultToolBox, OPT_IN_TOOLS } from "../tools/toolbox.js";
 import { decideVerdict } from "../core/autopilot.js";
 import type { Coverage, EngagementFinding, ModelAdapter, ToolContext } from "../core/types.js";
@@ -32,6 +33,7 @@ import { collectEvidence } from "./evidence.js";
 import { runChain } from "./chain.js";
 import { runPyAgent } from "./pyagent.js";
 import { analyze } from "./analysis.js";
+import { planRoutes } from "./routes.js";
 import { logLine, toHtml, toJson, toMarkdown } from "./report.js";
 import type { AssaultReport, AssaultStage, AssaultTarget, StageStatus, ToolOutcome } from "./types.js";
 
@@ -48,6 +50,8 @@ export interface AssaultOptions {
   modelLabel?: string;
   /** 프록시(Burp/ZAP): "http://127.0.0.1:8080" 또는 env REDCELL_PROXY. */
   proxy?: string;
+  /** 인가된 테스트 세션 쿠키("sid=abc" 형식, 콤마 복수) — "로그인 뒤" 표면까지 점검. */
+  cookie?: string;
   /** AI 전투 해석 사용(기본 true — --no-ai 로 끔). */
   ai?: boolean;
   /** 샘플 redaction 끄기(--full-exposure). 기본 false(마스킹). */
@@ -85,6 +89,8 @@ const ENUMERATE_TOOLS = [
 const EXPLOIT_TOOLS = [
   "sqli_probe", "xss_probe", "path_traversal", "open_redirect", "ssrf_probe", "idor_probe",
   "ssti_probe", "cmdi_probe", "xxe_probe", "access_control_probe", "param_pollution",
+  "nosql_probe", "crlf_probe", "proto_pollution_probe", "stored_xss_probe", "upload_verify", "race_probe",
+  "smuggle_probe", "cache_deception_probe", "jwt_attack",
 ];
 /** opt-in(대상별 승인)이 필요한 프록브 — DEFAULT 에 있어도 승인 없이 실행하지 않는다. */
 const OPT_IN_REQUIRED = new Set<string>(OPT_IN_TOOLS);
@@ -170,6 +176,21 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
     session = { auth: lr.headers, jar: lr.jar, proxy };
   } else if (proxy) {
     session = { proxy };
+  }
+  // --cookie: 운영자가 제공한 인가된 테스트 세션을 jar 로 주입(프록시 세션과 결합 가능).
+  if (opts.cookie) {
+    const scheme = t0.port === 443 || t0.port === 8443 ? "https" : "http";
+    const origin = `${scheme}://${t0.host}${t0.port && t0.port !== 80 && t0.port !== 443 ? `:${t0.port}` : ""}`;
+    const jar = newJar();
+    const m = jar.store.get(origin) ?? new Map<string, string>();
+    for (const pair of opts.cookie.split(",")) {
+      const eq = pair.indexOf("=");
+      if (eq > 0) m.set(pair.slice(0, eq).trim(), pair.slice(eq + 1).trim());
+    }
+    jar.store.set(origin, m);
+    session = { ...(session ?? {}), jar };
+    transcript.push(logLine("session", `--cookie 세션 주입 (${opts.cookie.split(",").length}개 쿠키) → 인증 표면 점검 활성`));
+    emit({ type: "note", text: "[session] 테스트 세션 쿠키 주입 — 로그인 뒤 표면까지 점검합니다" });
   }
 
   const toolbox = new DefaultToolBox();
@@ -346,6 +367,13 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
   // 8. 분석 (AI → 결정적 폴백).
   const ai = opts.ai !== false;
   const analysis = await analyze(opts.model, { target: t0, findings, exposed, outcomes }, ai);
+  // 8.5 공격 경로 플래너 — 발견을 능력으로 승격해 왕관(서버 장악·관리자·트래픽 납치)까지의
+  //     다단계 루트를 합성한다. 결정적(규칙 기반)이며 실제 실행은 하지 않는다(계획 전용).
+  const attackRoutes = planRoutes(findings, exposed);
+  if (attackRoutes.length > 0) {
+    emit({ type: "note", text: `[경로] 능력 기반 공격 루트 ${attackRoutes.length}건 합성 — 최우선: ${attackRoutes[0].goal}` });
+    transcript.push(logLine("routes", `공격 루트 합성 ${attackRoutes.length}건 (최우선: ${attackRoutes[0].goal})`));
+  }
   const finishedAt = new Date().toISOString();
   const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
 
@@ -362,6 +390,7 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
     verdictReason: v.reason,
     exposed,
     attackPaths: analysis.attackPaths,
+    attackRoutes,
     defense: analysis.defense,
     narrative: analysis.narrative,
     transcript,
@@ -429,6 +458,7 @@ function stubReport(
     verdictReason: blocked ? `SCOPE 차단: ${reason}` : `대상 미도달: ${reason}`,
     exposed: [],
     attackPaths: [],
+    attackRoutes: [],
     defense: [],
     narrative: blocked
       ? `대상 ${target.host} 는 인가 목록에 없어 어떤 요청도 보내지 않았다. 인가 파일: ${authFile}`

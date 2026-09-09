@@ -38,7 +38,7 @@ const VECTOR_ORDER: Record<string, string[]> = {
   // waf_detect·crawl 을 앞에 둬서 "WAF 맥락"과 "실제 파라미터"를 먼저 확보 → 이후 페이로드가 정교해짐.
   recon: ["http_probe", "waf_detect", "crawl", "header_audit", "api_discover", "cookie_audit", "jwt_audit"],
   enumerate: ["api_probe", "dir_enum", "port_scan", "secret_scan", "graphql_probe", "cors_audit", "csrf_audit", "upload_probe", "http_method_audit", "host_header_audit", "deserialize_probe", "auth_session_probe"],
-  exploit: ["sqli_probe", "xss_probe", "ssti_probe", "cmdi_probe", "idor_probe", "path_traversal", "open_redirect", "ssrf_probe", "xxe_probe", "access_control_probe", "param_pollution", "cache_poison_probe", "logic_probe"],
+  exploit: ["sqli_probe", "xss_probe", "ssti_probe", "cmdi_probe", "idor_probe", "path_traversal", "open_redirect", "ssrf_probe", "xxe_probe", "access_control_probe", "param_pollution", "nosql_probe", "crlf_probe", "proto_pollution_probe", "cache_poison_probe", "logic_probe", "stored_xss_probe", "upload_verify", "race_probe", "smuggle_probe", "cache_deception_probe", "jwt_attack"],
   post: [],
 };
 

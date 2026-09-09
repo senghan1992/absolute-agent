@@ -51,7 +51,13 @@ export function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, u
       return { paths };
     case "ssti_probe":
     case "cmdi_probe":
-    case "logic_probe": {
+    case "logic_probe":
+    case "nosql_probe":
+    case "crlf_probe":
+    case "proto_pollution_probe":
+    case "upload_verify":
+    case "race_probe":
+    case "stored_xss_probe": {
       const a: Record<string, unknown> = { paths };
       if (params.length) a.params = params;
       return a;
@@ -60,6 +66,11 @@ export function autoArgsFor(toolName: string, fp: Fingerprint): Record<string, u
     case "deserialize_probe":
     case "auth_session_probe":
     case "cache_poison_probe":
+    case "smuggle_probe":
+      return { paths };
+    case "cache_deception_probe":
+      return { paths: paths.length ? paths : ["/"] };
+    case "jwt_attack":
       return { paths };
     case "sqli_probe":
       // 주입 계열: 발견한 경로 전체를 스윕(오류 기반 → UNION 실증 추출까지 도달해야 함).

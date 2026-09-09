@@ -1,0 +1,13 @@
+name: vuln-cache-deception
+class: cache-deception
+source: local
+port: 18114
+start: ["node", "labs/vuln-cache-deception/server.cjs"]
+url: http://127.0.0.1:18114
+# 캐시 기만은 인증된(로그인 뒤) 표면 결함 — 테스트 세션 쿠키로 점검한다.
+assaultArgs: ["--cookie", "sid=sid-lee-2026"]
+expect:
+  findingText: ["웹 캐시 기만"]
+  verified: true
+  proofContains: ["캐시 기만 실증"]
+  evidenceCategory: exploit

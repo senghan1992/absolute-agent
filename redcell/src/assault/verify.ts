@@ -167,13 +167,22 @@ function verifySchema(raw: string, redact: boolean): Verification {
 // 각 툴 evidence 의 결정적 마커로, "주입한 것이 실제로 서버에서 처리되었다"를
 // 증명한다. proof 접두사(XSS 실증/SSTI 실증/…)가 랩 점수의 proofContains 가 된다.
 
-const EXPLOIT_MARKERS: Array<{ cls: "xss" | "ssti" | "ssrf" | "lfi" | "redirect" | "xxe"; re: RegExp }> = [
+const EXPLOIT_MARKERS: Array<{ cls: "xss" | "ssti" | "ssrf" | "lfi" | "redirect" | "xxe" | "nosql" | "crlf" | "proto" | "stored" | "upload" | "race" | "smuggle" | "cache-deception" | "jwt"; re: RegExp }> = [
   { cls: "xss", re: /무해 마커가 HTML\/JS 컨텍스트에 실행 가능하게 반사됨/ },
   { cls: "ssti", re: /산술식이 서버에서 평가되어 결과 (\d+) 노출/ },
   { cls: "ssrf", re: /메타데이터 시그니처가 응답에 반사됨/ },
   { cls: "lfi", re: /시그니처 노출 \(path=[^)]*\): (root:[^\n]*)/ },
   { cls: "redirect", re: /HTTP \d+ Location: [^\n]*redcell-canary/i },
   { cls: "xxe", re: /내부 엔티티가 확장되어 마커 반사됨/ },
+  { cls: "nosql", re: /NoSQL 실증: \$ne\/\$regex 우회로 인증 통과/ },
+  { cls: "crlf", re: /CRLF 실증: 응답 헤더 분할/ },
+  { cls: "proto", re: /프로토타입 오염 실증: 병합 지점에서 오염 키 반영/ },
+  { cls: "stored", re: /저장형 XSS 실증: 제2 요청에서 미이스케이프 저장 반사/ },
+  { cls: "upload", re: /업로드 실증: 파일 저장\+ 실행 가능 컨텍스트 제공/ },
+  { cls: "race", re: /경쟁 조건 실증: 동시 2요청으로 상태 이중 반영/ },
+  { cls: "smuggle", re: /스머글링 실증: 프레이밍 모호성으로 (백엔드 대기|차등 응답)/ },
+  { cls: "cache-deception", re: /캐시 기만 실증: 무인증 요청에 개인 본문 반환/ },
+  { cls: "jwt", re: /JWT 실증: 위조 토큰\(.+\)이 유효 세션으로 수용/ },
 ];
 
 const EXPLOIT_SIGNAL = /반사|주입|노출|평가|Location|엔티티|실행/i;
@@ -208,15 +217,62 @@ function verifyExploit(raw: string, redact: boolean): Verification {
           proof: `LFI 실증: ${uid0 ? "UID 0(root) 계정 라인이 포함된 /etc/passwd" : "시스템 파일"} 시그니처 노출 — 서버 로컬 파일 열람 성공`,
         };
       }
-      case "redirect":
+      case "redirect": {
+        const loc = /Location:\s*(\S+)/.exec(raw)?.[1] ?? "";
         return {
           status: "verified",
-          proof: "오픈 리다이렉트 실증: 외부 오리진(redcell-canary.example.net)으로 30x 이동 — Location 헤더가 canary 도메인을 가리킴",
+          proof: `오픈 리다이렉트 실증: 302 Location 이 외부 canary 도메인으로 반환됨 (${redactSample(loc)}) — 사용자를 공격자 도메인으로 유도 가능(피싱·토큰 탈취 체인)`,
         };
+      }
       case "xxe":
         return {
           status: "verified",
           proof: "XXE 실증: XML 내부 엔티티 확장 처리 활성 — 외부 엔티티(파일 읽기/SSRF)로 확장 가능(서버측 DTD 비활성 필요)",
+        };
+      case "nosql":
+        return {
+          status: "verified",
+          proof: "NoSQL 실증: $ne/$regex 우회로 인증 통과 (baseline 차등 + 성공 지수) — NoSQL 연산자 주입으로 논리 우회가 성립함",
+        };
+      case "crlf":
+        return {
+          status: "verified",
+          proof: "CRLF 실증: 응답 헤더 분할 — 주입한 CRLF 가 응답 헤더에 실제 반영(Set-Cookie/헤더 주입 확인)",
+        };
+      case "proto":
+        return {
+          status: "verified",
+          proof: "프로토타입 오염 실증: 병합 지점에서 오염 키 반영 (baseline 부재) — 서버측 객체 병합이 대입 연산자를 처리함",
+        };
+      case "stored":
+        return {
+          status: "verified",
+          proof: "저장형 XSS 실증: 제2 요청에서 미이스케이프 저장 반사 — 저장(POST)→렌더(GET) 2차 반사 확인",
+        };
+      case "upload":
+        return {
+          status: "verified",
+          proof: "업로드 실증: 파일 저장 + 실행 가능 컨텍스트 제공 — 업로드된 파일이 저장·서빙되어 스크립트 실행이 가능",
+        };
+      case "race":
+        return {
+          status: "verified",
+          proof: "경쟁 조건 실증: 동시 2요청으로 상태 이중 반영 — 비원자적 상태 변경 확인(Δ단일·Δ동시 수치 attached)",
+        };
+      case "smuggle":
+        return {
+          status: "verified",
+          proof: "Request Smuggling 실증: 프레이밍 모호성 요청에 차등 관측(CL.TE 스톨/난독화 차등) — 프론트·백엔드 파서 불일치 확인(비파괴 검증)",
+        };
+      case "cache-deception":
+        return {
+          status: "verified",
+          proof: "캐시 기만 실증: 무인증 요청에 개인 본문 반환 — 정적 확장자 경로로 캐시된 개인 페이지 확인(무인증 차등)",
+        };
+      case "jwt":
+        return {
+          status: "verified",
+          proof: "JWT 위조 실증: 위조 토큰(alg=none 또는 약한 시크릿 재서명)이 유효 세션으로 수용 — 3요청 차등(무토큰/원본/위조)으로 인증 우회 확인",
         };
     }
   }

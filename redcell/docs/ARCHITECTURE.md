@@ -203,6 +203,29 @@ RedCell 산출물을 같은 채점기(lab-score)로 비교해 **recall · FP · 
 동등 이상**인지 판정한다. `--sim` 으로 게이트 자체를 검증(항상 통과). 실제 평가 절차·양식은
 `docs/P3-humans-vs-redcell.md`. 2026-09-08 시뮬레이션 5/5 통과.
 
+## 공격 경로 플래너 (`src/assault/routes.ts`) — 능력 그래프
+
+발견을 "공격자 능력"으로 승격해 다단계 공격 루트를 합성하는 결정적 엔진.
+
+```
+발견/증거 ──▶ 능력 추출(CAP_RULES) ──▶ 체인 규칙(CHAIN_RULES) ──▶ 왕관 경로 열거(DFS ≤4)
+                                              (code-exec·admin-access·traffic-hijack·data-exfil)
+```
+
+- `capabilitiesOf()` — 발견 제목(툴의 안정적 한글 제목)·증거 분류(secret/backup/pii) → 능력 매핑.
+- `CHAIN_RULES` — 능력 전이 지식(다음 수 + 방어법). 예: `file-read → creds(설정 열람)`,
+  `internal-net → creds(메타데이터)`, `session-hijack → admin-access(재검증 부재)`.
+- 보유 능력이 왕관이면 0단계 경로로 확정(스머글링 = 트래픽 납치 능력).
+- 파이프라인 8.5 단계에서 실행되어 `report.attackRoutes` 로 출력(마크다운·HTML·JSON).
+- 실행은 하지 않는 **계획 전용** — 비파괴 서술만 남는다.
+
+## 해킹 학습 투어 (`src/learn/`) — `redcell learn`
+
+초보자 접근성 레이어. `lessons.ts`(강의 카탈로그: 이야기·ASCII 공격 그림·단계·퀴즈·방어)
++ `runner.ts`(랩 기동 → 단계별 툴 실행 → 발견 확인 → 퀴즈 → 진행도 저장). labs/ 의 로컬
+랩(127.0.0.1)에서만 동작하며, 진행도는 `~/.redcell/learn/progress.json` 에 누적된다.
+6개 강의(입문 3 · 중급 3)가 랩과 1:1 대응하고 `--auto` 로 비대화형 완주(CI) 가능.
+
 ## 모델 계층 (`src/models/`)
 
 `ModelAdapter` 하나로 추상화. `createModelFromEnv()` 가 자격증명으로 선택:

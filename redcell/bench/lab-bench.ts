@@ -107,7 +107,8 @@ async function main(): Promise<void> {
       const t0 = Date.now();
       const homeDir = path.join(home, man.name);
       fs.mkdirSync(homeDir, { recursive: true });
-      const run = spawnSync("npx", ["tsx", CLI, "assault", "--url", man.url, "--authorize", "--no-ai"], {
+      const extra: string[] = Array.isArray((man as unknown as { assaultArgs?: string[] }).assaultArgs) ? (man as unknown as { assaultArgs: string[] }).assaultArgs : [];
+      const run = spawnSync("npx", ["tsx", CLI, "assault", "--url", man.url, "--authorize", "--no-ai", ...extra], {
         cwd: ROOT, env: { ...process.env, REDCELL_HOME: homeDir }, encoding: "utf8", timeout: 300000,
       });
       row.durationMs = Date.now() - t0;

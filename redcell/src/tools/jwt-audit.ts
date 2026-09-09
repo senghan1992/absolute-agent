@@ -15,7 +15,7 @@ import { authGet, baseUrl, joinPath } from "./util.js";
 
 const JWT_RE = /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/g; // header.payload.sig (base64url)
 /** 약한 시크릿 소형 사전(오프라인 HMAC 검증용). 흔한 개발/예제 값. */
-const WEAK_SECRETS = ["secret", "password", "123456", "changeme", "jwt", "key", "admin", "test", "your-256-bit-secret", "supersecret"];
+export const WEAK_SECRETS = ["secret", "password", "123456", "changeme", "jwt", "key", "admin", "test", "your-256-bit-secret", "supersecret"];
 
 export const jwtAudit: Tool = {
   name: "jwt_audit",
@@ -81,7 +81,7 @@ export const jwtAudit: Tool = {
   },
 };
 
-function collect(s: string, into: Set<string>): void {
+export function collect(s: string, into: Set<string>): void {
   if (!s) return;
   const m = s.match(JWT_RE);
   if (m) for (const t of m) into.add(t);
@@ -97,7 +97,7 @@ function b64urlToJson(seg: string): Record<string, unknown> | null {
   }
 }
 
-function parseJwt(tok: string): { header: Record<string, unknown>; payload: Record<string, unknown> } | null {
+export function parseJwt(tok: string): { header: Record<string, unknown>; payload: Record<string, unknown> } | null {
   const parts = tok.split(".");
   if (parts.length < 2) return null;
   const header = b64urlToJson(parts[0]);
@@ -107,7 +107,7 @@ function parseJwt(tok: string): { header: Record<string, unknown>; payload: Reco
 }
 
 /** 소형 사전으로 HMAC 서명을 오프라인 재현해 약한 시크릿인지 확인. */
-function crackHs(tok: string, alg: string): string | null {
+export function crackHs(tok: string, alg: string): string | null {
   const bits = alg === "hs384" ? "sha384" : alg === "hs512" ? "sha512" : "sha256";
   const [h, p, sig] = tok.split(".");
   if (!sig) return null;

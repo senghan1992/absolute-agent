@@ -1,0 +1,11 @@
+name: vuln-smuggle
+class: request-smuggling
+source: local
+port: 18113
+start: ["node", "labs/vuln-smuggle/server.cjs"]
+url: http://127.0.0.1:18113
+expect:
+  findingText: ["HTTP Request Smuggling"]
+  verified: true
+  proofContains: ["Request Smuggling 실증"]
+  evidenceCategory: exploit

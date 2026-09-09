@@ -1,0 +1,11 @@
+name: vuln-jwt
+class: jwt-forgery
+source: local
+port: 18115
+start: ["node", "labs/vuln-jwt/server.cjs"]
+url: http://127.0.0.1:18115
+expect:
+  findingText: ["JWT 위조 실증"]
+  verified: true
+  proofContains: ["JWT 위조 실증"]
+  evidenceCategory: exploit

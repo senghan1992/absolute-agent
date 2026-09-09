@@ -296,6 +296,60 @@ function classify(title: string): VulnInfo {
       fix: "신뢰할 수 없는 데이터를 역직렬화하지 말고, 허용 타입 화이트리스트·서명 검증을 쓰세요.",
       owner: OWNER.code,
     };
+  if (has("stored xss", "저장형 xss"))
+    return {
+      ko: "저장형 스크립트 삽입 (Stored XSS)",
+      cat: "other",
+      simple: "게시판·댓글 같은 곳에 저장된 내용이 다른 사용자 화면에서 '스크립트'로 실행됩니다.",
+      why: "여러 사용자에게 반복 실행돼 세션 탈취·계정 탈취·악성 확산으로 이어집니다.",
+      fix: "저장할 때와 출력할 때 모두 이스케이프하고, CSP 를 켜고, 입력 길이·종류를 제한하세요.",
+      owner: OWNER.code,
+    };
+  if (has("nosql"))
+    return {
+      ko: "NoSQL 인젝션 (NoSQL Injection)",
+      cat: "other",
+      simple: "아이디·검색어 같은 값에 연산자($ne/$regex)를 넣으면 인증·검색 조건을 우회합니다.",
+      why: "아이디/비밀번호 없이 로그인하거나 비밀 데이터 조건을 무력화할 수 있습니다.",
+      fix: "사용자 입력을 쿼리 연산자로 해석하지 말고 값을 화이트리스트로 검증·타입을 고정하세요.",
+      owner: OWNER.code,
+    };
+  if (has("crlf", "헤더 분할"))
+    return {
+      ko: "CRLF 헤더 분할 (Header Injection)",
+      cat: "other",
+      simple: "입력값의 줄바꿈(%0d%0a)이 응답 헤더에 그대로 들어가 새 헤더를 만들 수 있습니다.",
+      why: "Set-Cookie 주입(세션 고정)·캐시 오염·리다이렉트 조작으로 이어집니다.",
+      fix: "입력값에서 CR/LF(%0d%0a)를 제거하거나 인코딩하고 헤더 값 생성을 금지하세요.",
+      owner: OWNER.code,
+    };
+  if (has("프로토타입 오염"))
+    return {
+      ko: "프로토타입 오염 (Prototype Pollution)",
+      cat: "other",
+      simple: "JSON 객체를 합칠 때 __proto__ 같은 키를 심으면 객체 '기본값'을 오염시킵니다.",
+      why: "서버 로직·설정이 오염돼 권한 상승·RCE 로 확대될 수 있는 깊은 결함입니다.",
+      fix: "병합 시 __proto__/constructor/prototype 키를 차단하고 깊은 복사를 금지(객체 키 화이트리스트)하세요.",
+      owner: OWNER.code,
+    };
+  if (has("업로드"))
+    return {
+      ko: "안전하지 않은 파일 업로드 (Unrestricted Upload)",
+      cat: "rce",
+      simple: "파일 종류 제한 없이 아무 파일이나 올릴 수 있습니다.",
+      why: "악성 스크립트를 올려 서버에서 실행시킬 수 있습니다.",
+      fix: "확장자·MIME 화이트리스트, 실행 불가 경로 저장, 파일명 무작위화를 적용하세요.",
+      owner: OWNER.code,
+    };
+  if (has("경쟁 조건", "race"))
+    return {
+      ko: "경쟁 조건 (Race Condition)",
+      cat: "other",
+      simple: "동시 요청을 쏘면 상태 확인과 변경 사이에 '틈'이 생겨 두 번 반영됩니다.",
+      why: "잔액·재고·쿠폰을 두 번 쓰거나 무한 적립으로 금전 피해가 납니다.",
+      fix: "상태 변경을 DB 트랜잭션·원자적 연산(INCR/DECR)·유일 제약으로 묶고 재시도별 멱등키를 쓰세요.",
+      owner: OWNER.code,
+    };
   if (has("sql"))
     return {
       ko: "SQL 주입 (SQL Injection)",
@@ -366,15 +420,6 @@ function classify(title: string): VulnInfo {
       simple: "사용자가 모르는 사이에 그 사람 권한으로 요청이 나갑니다.",
       why: "피해자 몰래 송금·비밀번호 변경 같은 행동을 시킬 수 있습니다.",
       fix: "상태를 바꾸는 요청에는 CSRF 토큰(1회용 값) 확인을 넣으세요.",
-      owner: OWNER.code,
-    };
-  if (has("upload"))
-    return {
-      ko: "안전하지 않은 파일 업로드 (Unrestricted Upload)",
-      cat: "rce",
-      simple: "파일 종류 제한 없이 아무 파일이나 올릴 수 있습니다.",
-      why: "악성 스크립트를 올려 서버에서 실행시킬 수 있습니다.",
-      fix: "확장자·MIME 화이트리스트, 실행 불가 경로 저장, 파일명 무작위화를 적용하세요.",
       owner: OWNER.code,
     };
   if (has("cors"))

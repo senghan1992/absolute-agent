@@ -50,6 +50,8 @@ import type { ModelAdapter, EngagementFinding, Coverage, GateVerdict } from "./c
 import { execFileSync } from "node:child_process";
 import type { ScopeGuard } from "./scope/scope-guard.js";
 import { AuditLog, verifyAuditFile } from "./audit/audit-log.js";
+import { runLesson, listLessons, loadProgress, progressPath } from "./learn/runner.js";
+import { LESSONS } from "./learn/lessons.js";
 
 // ── 인자 파서 ────────────────────────────────────────────────────────────────
 interface Args {
@@ -349,6 +351,7 @@ async function cmdAssault(args: Args): Promise<void> {
 
 진행:
   --proxy <url>          Burp/ZAP 등 프록시 경유
+  --cookie <name=value>  인가된 테스트 세션 쿠키로 "로그인 뒤" 표면 점검(여러 개는 콤마)
   --enable <t[,t]>       opt-in 프로브 활성화 (예: logic_probe,xxe_probe|all)
   --target-map <file.json>  아는 경로/파라미터 주입 (정찰 보강)
   --ndjson               이벤트를 NDJSON 로 출력
@@ -402,6 +405,7 @@ async function cmdAssault(args: Args): Promise<void> {
 
   const targetMap = args.flags["target-map"] ? await loadTargetMapFlag(str(args.flags["target-map"])) : undefined;
   const enabledOptIns = resolveEnabledOptIns([], str(args.flags.enable));
+  const cookie = str(args.flags.cookie);
 
   const res = await runAssault({
     url,
@@ -410,6 +414,7 @@ async function cmdAssault(args: Args): Promise<void> {
     model,
     modelLabel: label,
     proxy: str(args.flags.proxy),
+    cookie,
     ai: !args.flags["no-ai"],
     fullExposure: !!args.flags["full-exposure"] || !!args.flags["no-redact"],
     evidenceCap: args.flags["evidence-cap"] ? Number(str(args.flags["evidence-cap"])) : undefined,
@@ -920,6 +925,54 @@ async function loadTargetMapFlag(pathArg: string | undefined): Promise<TargetMap
 
 
 
+/** learn — 초보자 해킹 학습 투어(로컬 랩 안내). */
+async function cmdLearn(args: Args): Promise<void> {
+  const [op, id] = args._;
+  if (!op || op === "ls" || op === "list") {
+    await listLessons();
+    return;
+  }
+  if (op === "progress") {
+    const prog = await loadProgress();
+    console.log(JSON.stringify(prog, null, 2));
+    console.error(`\n진행도 파일: ${progressPath()}`);
+    return;
+  }
+  if (op === "reset") {
+    const { promises: lfs } = await import("node:fs");
+    const p = progressPath();
+    if (id) {
+      const prog = await loadProgress();
+      delete prog[id];
+      await lfs.mkdir(path.dirname(p), { recursive: true });
+      await lfs.writeFile(p, JSON.stringify(prog, null, 2), "utf8");
+      console.log(`진행도 초기화: ${id}`);
+    } else {
+      await lfs.rm(p, { force: true });
+      console.log("전체 진행도를 초기화했습니다.");
+    }
+    return;
+  }
+  if (op === "start") {
+    if (!id) {
+      console.error("강의 id 를 지정하세요. 예: redcell learn start sql-injection");
+      console.error(`사용 가능: ${LESSONS.map((l) => l.id).join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    const r = await runLesson(id, { autoQuiz: !!args.flags.auto });
+    if (!r) {
+      console.error(`강의를 찾을 수 없습니다: ${id}\n사용 가능: ${LESSONS.map((l) => l.id).join(", ")}`);
+      process.exitCode = 1;
+      return;
+    }
+    process.exitCode = r.solved ? 0 : 1;
+    return;
+  }
+  console.error("사용법: redcell learn [ls|start <id>|progress|reset [id]]");
+  process.exitCode = 1;
+}
+
 async function cmdConfig(args: Args): Promise<void> {
   const [op, key, value] = args._;
   const cfg = await loadConfig();
@@ -1278,6 +1331,11 @@ function help(): void {
 사용법: redcell <command> [options]
 
 Commands:
+  learn        해킹 학습 투어 — 인가된 로컬 랩에서 취약점을 안내받으며 직접 뚫어본다
+                 redcell learn                  강의 목록(진행도 표시)
+                 redcell learn start <id>       강의 시작 (예: learn start sql-injection)
+                 redcell learn progress         진행도 보기 · redcell learn reset <id>
+                 [--auto] 퀴즈 자동 정답(비대화형)
   assault      URL 한 줄 → 자동 공격 캠페인 (재구성·열거·공격·증거·AI 분석·전투보고)
                  --url <http(s)://host[:port][/path]>  (필수)
                  [--authorize]  입력 URL 의 호스트를 인가 목록에 기록 후 즉시 진행
@@ -1384,6 +1442,7 @@ async function main(): Promise<void> {
     case "audit": return void (await cmdAudit(args));
     case "explore": return void (await cmdExplore(args));
     case "mcts": return void (await cmdMcts(args));
+    case "learn": return void (await cmdLearn(args));
     case "config": return void (await cmdConfig(args));
     case undefined:
     case "help": return help();

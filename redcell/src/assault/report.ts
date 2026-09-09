@@ -5,7 +5,8 @@
  * 다크 "미션 컨트롤" 스타일. 출력 경로는 실행 시 콘솔에 인쇄된다.
  */
 
-import type { AssaultReport, AttackPath, DefenseItem, EvidenceItem, ToolOutcome } from "./types.js";
+import type { AssaultReport, AttackPath, AttackRoute, DefenseItem, EvidenceItem, ToolOutcome } from "./types.js";
+import { CAPABILITY_KO } from "./routes.js";
 import { verificationBadge } from "./verify.js";
 
 export function fmtDur(ms: number): string {
@@ -86,6 +87,10 @@ export function toMarkdown(r: AssaultReport): string {
     for (const ref of p.evidenceRefs) L.push(`   - 증거: ${ref}`);
     L.push("");
   }
+
+  // 2.5 능력 기반 공격 경로 지도(공격 경로 플래너).
+  L.push(renderRouteMapMd(r.attackRoutes));
+  L.push("");
 
   // 3. 발견
   L.push(`## 🚨 발견 내역 (${r.findings.length})`);
@@ -204,6 +209,7 @@ td{border-bottom:1px solid #161f2a;padding:6px 8px;vertical-align:top}
 .verify.ver-partial{color:var(--md);border-color:var(--md)}
 .verify.ver-unverified{color:var(--dim);border-color:var(--line)}
 .refs{color:var(--dim);font-size:12px}
+.routemap{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--accent);margin:6px 0}
 ul.defs li{margin:6px 0;list-style:none;padding:8px 10px;background:var(--panel);border:1px solid var(--line);border-radius:6px}
 .narrative{background:var(--panel);border:1px solid var(--line);border-radius:8px;padding:14px 16px;white-space:pre-wrap}
 .log{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:11px;color:var(--dim);border-bottom:1px solid #141c26;padding:1px 0}
@@ -224,6 +230,13 @@ ${kpi("공격 경로", String(r.attackPaths.length), `방어 권고 ${r.defense.
 ${r.exposed.length === 0 ? "<p>확인된 탈취 가능 데이터 없음.</p>" : `<table><tr><th>id</th><th>등급</th><th>분류</th><th>항목</th><th>위치</th><th>샘플</th></tr>${evRows.join("")}</table>`}
 <h2>⚔️ 공격 경로</h2>
 ${pathBlocks.join("")}
+<h2>🗺️ 공격 경로 지도 — 능력 기반 다단계 루트</h2>
+${(r.attackRoutes ?? []).length === 0 ? "<p>합성 가능한 다단계 루트 없음.</p>" : (r.attackRoutes ?? []).map((route: AttackRoute) => `<div class="path ${route.goalSeverity === "critical" ? "sev-hi" : "sev-md"}">
+  <h4>🎯 ${esc(route.goal)} <span class="tag">${esc(route.goalSeverity)}</span></h4>
+  <pre class="routemap">${esc([CAPABILITY_KO[route.entry], ...route.steps.map((s) => CAPABILITY_KO[s.to])].join(" ──▶ "))}</pre>
+  <ol>${route.steps.map((s) => `<li><b>${esc(CAPABILITY_KO[s.from])} → ${esc(CAPABILITY_KO[s.to])}</b> — ${esc(s.how)}<br><span class="refs">근거: ${esc(s.via)} · 방어: ${esc(s.defense)}</span></li>`).join("")}</ol>
+  <p class="attack">💥 ${esc(route.impact)}</p>
+</div>`).join("")}
 <h2>🚨 발견 내역</h2>
 ${r.findings.length === 0 ? "<p>미탐.</p>" : `<table><tr><th>심각도</th><th>단계</th><th>제목</th><th>근거</th></tr>${findRows.join("")}</table>`}
 <h2>🛡️ 방어 권고</h2>
@@ -247,4 +260,36 @@ export function toJson(r: AssaultReport): string {
 /** 실행 로그 한 줄(transcript 에 기록). */
 export function logLine(tool: string, m: string): string {
   return `[${new Date().toISOString().slice(11, 19)}] ${tool.padEnd(18)} ${m}`;
+}
+
+// ── 공격 경로 지도(능력 기반) ────────────────────────────────────────────────────
+
+/** 능력 기반 공격 루트를 ASCII 경로 그림 + 다음 수 + 방어로 렌더링(markdown). */
+export function renderRouteMapMd(routes: AttackRoute[] | undefined): string {
+  const rs = routes ?? [];
+  const L: string[] = [];
+  L.push(`## 🗺️ 공격 경로 지도 — 능력 기반 다단계 루트 (${rs.length})`);
+  L.push("");
+  if (rs.length === 0) {
+    L.push("_합성 가능한 다단계 루트 없음 — 발견이 단독으로 끝나거나 연결 규칙이 없다._");
+    return L.join("\n");
+  }
+  for (const route of rs) {
+    const chain = [CAPABILITY_KO[route.entry], ...route.steps.map((s) => CAPABILITY_KO[s.to])].join(" ──▶ ");
+    L.push(`### ${route.goalSeverity === "critical" ? "🔴" : "🟠"} ${route.goal} — ${SEV_BADGE[route.goalSeverity]}`);
+    L.push("");
+    L.push("```text");
+    L.push(chain);
+    L.push("```");
+    L.push("");
+    route.steps.forEach((s, i) => {
+      L.push(`${i + 1}. **${CAPABILITY_KO[s.from]} → ${CAPABILITY_KO[s.to]}** (근거: ${s.via})`);
+      L.push(`   - 다음 수: ${s.how}`);
+      L.push(`   - 방어: ${s.defense}`);
+    });
+    L.push("");
+    L.push(`> 💥 도달 시 피해: ${route.impact}`);
+    L.push("");
+  }
+  return L.join("\n");
 }

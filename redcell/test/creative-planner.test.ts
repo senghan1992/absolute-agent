@@ -69,7 +69,7 @@ describe("MockModel 발산형 플래너", () => {
 
   it("벡터를 모두 소진하면 done 을 반환한다", async () => {
     const model = new MockModel();
-    const picked = await drain(model, "exploit", "탐색", [], undefined, 20);
+    const picked = await drain(model, "exploit", "탐색", [], undefined, 30);
     // 등록된 exploit 툴 수만큼만 시도하고 종료.
     const exploitCount = TOOLS.filter((t) => t.intent === "exploit").length;
     expect(picked.length).toBe(exploitCount);

@@ -48,6 +48,9 @@ export const CASES: Case[] = [
   { tool: "host_header_audit", args: { path: "/reset" }, klass: "Host Header Injection", minSev: "high" },
   { tool: "access_control_probe", args: { path: "/admin" }, klass: "Broken Access Control", minSev: "high" },
   { tool: "param_pollution", args: { path: "/hpp", param: "q" }, klass: "HTTP Parameter Pollution", minSev: "medium" },
+  // JWT 능동 위조: 약한 시크릿 role=admin 재서명 토큰이 /api/me 에서 수용됨(critical).
+  // hardened 앱은 강한 시크릿 + none 거부 → 위조가 전부 거부되므로 오탐이 없어야 한다.
+  { tool: "jwt_attack", args: { paths: ["/", "/api/me"] }, klass: "JWT Forgery", minSev: "critical" },
 
   // ── 적대적 미끼(decoy) 케이스 — 정상 동작을 취약으로 오탐하지 않는지 감시 ──────────
   // 공개 상품 카탈로그: 인접 id 가 서로 다른 공개 객체를 반환하지만 개인정보가 없다 → IDOR 아님.

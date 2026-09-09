@@ -310,6 +310,141 @@ function hitsFromFinding(o: ToolOutcome): RawHit[] {
         },
       ];
     }
+    case "nosql_probe": {
+      const pm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "NoSQL 인젝션 — 연산자 주입 인증 우회",
+          target: pm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "쿼리/폼 파라미터에 $ne/$regex 연산자를 넣자 서버가 이를 조건으로 해석해 인증·검색 논리를 우회함 → 임의 계정 로그인·데이터 필터 우회로 확대 가능.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "crlf_probe": {
+      const cm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "CRLF 헤더 분할 — 응답 헤더 주입",
+          target: cm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "파라미터에 CRLF 를 넣자 응답 헤더에 주입 헤더/Set-Cookie 가 생성됨 → 세션 고정·캐시 오염·XSS 체인(헤더 기반)의 시작점.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "proto_pollution_probe": {
+      const ppm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "서버측 프로토타입 오염 — 병합 지점 반영",
+          target: ppm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "객체 병합 지점이 __proto__/constructor[prototype] 키를 받아들이고 응답에 반영함 → 서버 로직 우회·RCE(템플릿/설정 오염)로 확대 가능한 결함.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "stored_xss_probe": {
+      const sm = /path=(\/[^)\s]*)/.exec(ev) ?? /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "저장형 XSS — 제2 요청 미이스케이프 반사",
+          target: sm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "저장(POST)한 마커가 별도 요청(GET 렌더)에서 이스케이프 없이 반사됨 → 다른 사용자 브라우저에서 임의 스크립트 실행(세션 탈취·확산).",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "upload_verify": {
+      const um = /url=([^\s,)]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "제한 없는 파일 업로드 — 저장 + 실행 가능",
+          target: um?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "업로드된 파일이 저장·서빙되어 실행 가능 컨텍스트(svg inline/php)를 제공함 → 악성 파일을 올려 서버/사용자 브라우저에서 실행(RCE/스토어드 XSS).",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "race_probe": {
+      const rm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "경쟁 조건 — 상태 이중 반영",
+          target: rm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "동시 요청으로 상태(잔액/재고/쿠폰)가 두 번 반영됨 → 무제한 적립·무료 구매·이중 지급으로 확대 가능한 비원자적 처리 결함.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "smuggle_probe": {
+      const sm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "HTTP Request Smuggling — 프레이밍 파서 불일치",
+          target: sm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "프론트와 백엔드가 요청 길이(CL)/청크(TE)를 다르게 해석함 → 다른 사용자 요청 밀반입, 캐시 오염·인증 우회·세션 탈취로 확대 가능.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "cache_deception_probe": {
+      const cm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "웹 캐시 기만 — 개인 페이지의 공개 캐시 저장",
+          target: cm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "개인 페이지가 정적 확장자 경로로 캐시됨 → 공격자가 피해자를 그 URL 로 유도해 캐시에서 개인정보(이메일·계정)를 탈취 가능.",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
+    case "jwt_attack": {
+      const jm = /(\/[^\s,]+)/.exec(ev);
+      return [
+        {
+          category: "exploit",
+          label: "JWT 위조 실증 — 위조 토큰 유효 세션 수용",
+          target: jm?.[1] ?? pickTarget(d.path),
+          severity: f.severity,
+          attack:
+            "alg=none/약한 시크릿 재서명 토큰이 서버에서 수용됨 → 임의 계정 사칭·관리자 승격·만료 조작이 가능(인증 완전 우회).",
+          sample: ev,
+          source: o.tool,
+        },
+      ];
+    }
     default:
       // dir_enum 민감 경로 노출 등: evidence 문자열에서 path 목록 추출.
       if (o.tool === "dir_enum" && /노출/.test(f.title)) {

@@ -102,6 +102,9 @@ export interface DefenseItem {
   detail: string;
 }
 
+/** 능력 기반 다단계 공격 루트(공격 경로 플래너 산출). */
+export type AttackRoute = import("./routes.js").AttackRoute;
+
 /** assault 실행의 최종 산출물(전투 보고). */
 export interface AssaultReport {
   target: AssaultTarget;
@@ -121,6 +124,8 @@ export interface AssaultReport {
   exposed: EvidenceItem[];
   /** 공격 경로. */
   attackPaths: AttackPath[];
+  /** 능력 기반 다단계 공격 루트(공격 경로 플래너). */
+  attackRoutes: AttackRoute[];
   /** 방어 권고. */
   defense: DefenseItem[];
   /** 실행 요약 내러티브(ai 또는 결정적 합성). */

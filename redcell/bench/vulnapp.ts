@@ -27,12 +27,29 @@ function signHs256(header: object, payload: object, secret: string): string {
 
 // 약한 시크릿("secret")으로 서명 + exp 없음 → jwt_audit 가 high 로 잡아야 함(취약).
 const WEAK_JWT = signHs256({ alg: "HS256", typ: "JWT" }, { sub: "1001", user: "alice" }, "secret");
-// 강한 무작위 시크릿 + exp 존재 → 취약 설정 없음(견고).
+// 강한 무작위 시크릿 + exp 존재 → 취약 설정 없음(견고). /api/me 검증과 같은 시크릿을 쓴다.
+const STRONG_JWT_SECRET = randomBytes(32).toString("hex");
 const STRONG_JWT = signHs256(
   { alg: "HS256", typ: "JWT" },
   { sub: "1001", iat: 1_700_000_000, exp: 1_700_003_600 },
-  randomBytes(32).toString("hex"),
+  STRONG_JWT_SECRET,
 );
+
+/** 벤치 앱의 토큰 검증 — vuln: 약한 시크릿 + alg=none 수용(위조 통과) / hardened: 강한 시크릿 + none 거부. */
+function verifyJwt(tok: string, hardened: boolean): { user?: string; role?: string } | null {
+  const parts = String(tok).split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const header = JSON.parse(Buffer.from(parts[0], "base64url").toString("utf8")) as { alg?: string };
+    const payload = JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as { user?: string; role?: string };
+    if (header.alg === "none") return hardened ? null : payload;
+    const secret = hardened ? STRONG_JWT_SECRET : "secret";
+    const expected = createHmac("sha256", secret).update(`${parts[0]}.${parts[1]}`).digest("base64url");
+    return expected === parts[2] ? payload : null;
+  } catch {
+    return null;
+  }
+}
 
 function htmlEscape(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
@@ -286,6 +303,14 @@ export function startApp(mode: Mode): Promise<RunningApp> {
     if (path === "/graphql") {
       if (hardened) return send(400, JSON.stringify({ errors: [{ message: "introspection is disabled" }] }));
       return send(200, INTROSPECTION);
+    }
+
+    // ── JWT 능동 위조: /api/me 취약(약한 시크릿 + alg=none 수용) · hardened(강한 시크릿 + none 거부)
+    if (path === "/api/me") {
+      const tok = (req.headers.authorization ?? "").replace(/^Bearer\s+/i, "");
+      const payload = verifyJwt(tok, hardened);
+      if (!payload) return send(401, JSON.stringify({ error: "unauthorized", detail: "signature invalid" }));
+      return send(200, JSON.stringify({ user: payload.user, role: payload.role ?? "user" }));
     }
 
     // ── secret_scan: /.env 취약 노출 · hardened(404) ────────────────────────
