@@ -89,7 +89,9 @@ function renderActive() {
   $("shHost").value = s.host || "";
   $("shPort").value = s.port ?? "";
   $("shGoal") && ($("shGoal").value = s.goal || "");
-  $("shProvider").value = s.provider && s.provider !== "mock" ? s.provider : "";
+  const pb = $("providerBadge");
+  const prov = s.provider && s.provider !== "mock" ? s.provider : settings.default_provider || "";
+  if (pb) { pb.textContent = prov ? `⚙ ${prov}` : ""; pb.classList.toggle("hidden", !prov); }
   const chatInput = $("chatInput");
   if (chatInput) {
     chatInput.placeholder =
@@ -498,7 +500,7 @@ async function persistHeader(overrides = {}) {
     host: norm.host || hostRaw,
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
-    provider: $("shProvider").value,
+    provider: s.provider && s.provider !== "mock" ? s.provider : (settings.default_provider || ""),
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
   };
@@ -632,8 +634,8 @@ let envReadyMap = {}; // get_providers 의 ready_env (시스템 환경변수 감
 let expandedProvider = null;
 
 function activeProvider() {
-  const sel = $("shProvider");
-  const v = sel && sel.value ? sel.value.trim() : "";
+  const s = cur();
+  const v = (s && s.provider ? s.provider : settings.default_provider || "").trim();
   return v && v !== "mock" ? v : "";
 }
 function showProviderModal() {
@@ -789,21 +791,12 @@ async function refreshProviders() {
   envReadyMap = {};
   list.forEach((p) => { envReadyMap[p.name] = !!p.ready_env; });
   const connected = PROVIDER_CATALOG.filter(providerConnected);
-  const sel = $("shProvider");
-  if (sel) {
-    const prev = sel.value;
-    sel.innerHTML = `<option value="">— provider 선택 —</option>`
-      + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
-    const want = (cur() && cur().provider) || settings.default_provider || "";
-    sel.value = connected.some((p) => p.name === want) ? want
-      : (prev && connected.some((p) => p.name === prev) ? prev : "");
-  }
   const hint = $("providerHint");
   if (hint) {
     const names = connected.map((p) => p.name);
     hint.textContent = names.length
-      ? `연결됨: ${names.join(", ")} — 상단 드롭다운에서 선택하세요. 지시가 실제 LLM 추론에 반영됩니다.`
-      : "연결된 프로바이더가 없습니다 — 설정(⚙) > 모델 연결 에서 API 키를 입력하고 [연결 저장] 하세요. 키는 이 PC에만 저장되고 실행 시 자동 주입됩니다.";
+      ? `LLM 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
+      : "LLM 프로바이더 미연결 — ⚙ 설정에서 API 키를 등록하세요.";
   }
 }
 
@@ -1038,7 +1031,7 @@ function wire() {
     $("chatInput").value = b.dataset.goal || b.textContent.trim();
     sendChat();
   });
-  ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
+  ["shName", "shHost", "shPort"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }
 

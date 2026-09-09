@@ -524,16 +524,21 @@ fn hide_window(cmd: &mut Command) {
 /// **단일 프로세스**로 직접 실행한다. `--import tsx` 는 cwd 기준으로 해석된다.
 
 /** prime-agent(pi) CLI 위치 탐색 — Windows .cmd 전환 문제 회피를 위해 dist/cli.js 를 직접 node 로. */
-/// pi CLI(prime-agent) 경로 탐색. 우선순위:
-///   1) PI_PACKAGE_DIR 환경변수
+/// pi CLI(prime-agent) 경로 탐색 후보 목록. 우선순위:
+///   1) REDCELL_PI_DIR / PI_PACKAGE_DIR 환경변수
 ///   2) redcell_dir/node_modules (로컬 설치)
-///   3) APPDATA/npm (Windows), nvm($HOME/.nvm/versions/node/*), pnpm($HOME/.local/share/...),
-///      bun($HOME/.bun/install/global), 시스템 위치(/usr·/usr/local·/opt/homebrew)
-///   4) 마지막 보루: `npm root -g` 실행 결과(어느 패키지 매니저로 전역 설치됐든 찾는다)
-fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
+///   3) APPDATA/npm (Windows), NVM_DIR·$HOME/.nvm/versions/node/* (nvm),
+///      pnpm($HOME/.local/share/...), bun($HOME/.bun/install/global), 시스템 위치(/usr·/usr/local·/opt/homebrew)
+///   4) PATH 위의 `pi` 실행파일(심볼릭 링크 해석 — nvm/cmd 의 bin/pi → dist/cli.js)
+///   5) PATH 위의 `node` 옆 `npm` 의 `npm root -g`
+fn prime_cli_candidates(redcell_dir: &str) -> Vec<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
-    if let Some(d) = std::env::var_os("PI_PACKAGE_DIR") {
-        cands.push(PathBuf::from(d).join("dist").join("cli.js"));
+    for envk in ["REDCELL_PI_DIR", "PI_PACKAGE_DIR"] {
+        if let Some(d) = std::env::var_os(envk) {
+            let b = PathBuf::from(d);
+            cands.push(b.join("dist").join("cli.js"));
+            cands.push(b.join("cli.js"));
+        }
     }
     cands.push(
         PathBuf::from(redcell_dir)
@@ -554,12 +559,16 @@ fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
                 .join("cli.js"),
         );
     }
-    // nvm: $HOME/.nvm/versions/node/<version>/lib/node_modules/...
-    // 전역 설치가 흔한 곳(스캔은 존재하는 디렉터리만).
-    if let Some(home) = std::env::var_os("HOME") {
-        let home = PathBuf::from(home);
-        let nvm_versions = home.join(".nvm").join("versions").join("node");
-        if let Ok(entries) = std::fs::read_dir(&nvm_versions) {
+    // NVM_DIR + HOME/.nvm/versions/node/<ver>/lib/node_modules/...
+    for nvm_home in [
+        std::env::var_os("NVM_DIR").map(PathBuf::from),
+        std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".nvm")),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        let versions = nvm_home.join("versions").join("node");
+        if let Ok(entries) = std::fs::read_dir(&versions) {
             for e in entries.flatten() {
                 cands.push(
                     e.path()
@@ -572,23 +581,24 @@ fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
                 );
             }
         }
-        // pnpm 전역 스토어: ~/.local/share/pnpm((/pnpm)? global/<ver>/node_modules ...)
+    }
+    // pnpm 전역 스토어: ~/.local/share/pnpm[/pnpm]/<ver>/node_modules ...
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
         let pnpm_base = home.join(".local").join("share").join("pnpm");
         if let Ok(entries) = std::fs::read_dir(&pnpm_base) {
             for e in entries.flatten() {
                 for sub in [e.path(), e.path().join("pnpm")] {
-                    if sub.is_dir() {
-                        if let Ok(children) = std::fs::read_dir(&sub) {
-                            for c in children.flatten() {
-                                cands.push(
-                                    c.path()
-                                        .join("node_modules")
-                                        .join("@earendil-works")
-                                        .join("pi-coding-agent")
-                                        .join("dist")
-                                        .join("cli.js"),
-                                );
-                            }
+                    if let Ok(children) = std::fs::read_dir(&sub) {
+                        for c in children.flatten() {
+                            cands.push(
+                                c.path()
+                                    .join("node_modules")
+                                    .join("@earendil-works")
+                                    .join("pi-coding-agent")
+                                    .join("dist")
+                                    .join("cli.js"),
+                            );
                         }
                     }
                 }
@@ -613,25 +623,91 @@ fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
     ] {
         cands.push(PathBuf::from(p));
     }
-    // 우선순위 순서대로 존재 확인.
-    if let Some(found) = cands.into_iter().find(|p| p.is_file()) {
-        return Some(found);
+    // PATH 위의 `pi`/`pi.cmd` 실행파일 → 실제 cli.js 경로로 해석.
+    for bin in ["pi", "pi.cmd"] {
+        if let Some(p) = first_on_path(bin) {
+            let canon = std::fs::canonicalize(&p).unwrap_or(p);
+            if canon.to_string_lossy().ends_with("cli.js") {
+                cands.push(canon);
+            } else {
+                // bin/pi → 같은 패키지의 dist/cli.js 를 추측.
+                cands.push(canon.join("dist").join("cli.js"));
+                if let Some(dir) = canon.parent() {
+                    cands.push(dir.join("node_modules").join("@earendil-works").join("pi-coding-agent").join("dist").join("cli.js"));
+                }
+            }
+        }
     }
-    // 마지막 보루: npm root -g (네트워크 없음, ~100ms). 실패하면 None.
-    let out = Command::new("npm")
-        .args(["root", "-g"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .filter(|s| !s.is_empty());
-    out.and_then(|root| {
-        let p = PathBuf::from(root)
-            .join("@earendil-works")
-            .join("pi-coding-agent")
-            .join("dist")
-            .join("cli.js");
-        p.is_file().then_some(p)
-    })
+    cands
+}
+
+/// PATH 에서 실행 파일을 찾는다(존재 확인 후 정규화 시도).
+fn first_on_path(bin: &str) -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path) {
+        let p = dir.join(bin);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    None
+}
+
+/// pi CLI 경로 탐색. 실패 시 사람이 바로 알 수 있는 진단(탐색 후보·환경)을 함께 돌려준다.
+fn prime_cli_path(redcell_dir: &str) -> Result<PathBuf, String> {
+    let mut cands = prime_cli_candidates(redcell_dir);
+    // 마지막 보루: PATH 위 `node` 옆 `npm` 의 `npm root -g` (전역 node_modules 실제 위치).
+    if let Some(node) = first_on_path("node") {
+        if let Some(npm) = node.parent().map(|d| d.join("npm")).filter(|p| p.is_file()) {
+            if let Ok(out) = Command::new(&npm).args(["root", "-g"]).output() {
+                let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                if !root.is_empty() {
+                    cands.push(
+                        PathBuf::from(root)
+                            .join("@earendil-works")
+                            .join("pi-coding-agent")
+                            .join("dist")
+                            .join("cli.js"),
+                    );
+                }
+            }
+        }
+    } else {
+        for npm in ["/usr/bin/npm", "/usr/local/bin/npm"] {
+            let p = PathBuf::from(npm);
+            if p.is_file() {
+                if let Ok(out) = Command::new(&p).args(["root", "-g"]).output() {
+                    let root = String::from_utf8_lossy(&out.stdout).trim().to_string();
+                    if !root.is_empty() {
+                        cands.push(
+                            PathBuf::from(root)
+                                .join("@earendil-works")
+                                .join("pi-coding-agent")
+                                .join("dist")
+                                .join("cli.js"),
+                        );
+                    }
+                }
+                break;
+            }
+        }
+    }
+    if let Some(found) = cands.iter().find(|p| p.is_file()) {
+        return Ok(found.clone());
+    }
+    // 진단: 후보 + 환경 요약을 모아 에러로.
+    let mut diag = Vec::new();
+    for c in cands.iter().take(12) {
+        diag.push(format!("  - {}", c.display()));
+    }
+    let home = std::env::var_os("HOME").map(|h| h.to_string_lossy().into_owned()).unwrap_or_else(|| "(미설정)".into());
+    Err(format!(
+        "prime-agent(pi) 를 찾을 수 없습니다.\n확인한 후보:\n{}\n환경: HOME={}, PATH 포함 pi/node: {}/{} \n해결: `npm i -g @earendil-works/pi-coding-agent` 후 앱 재시작, 또는 REDCELL_PI_DIR 환경변수로 패키지 디렉터리 지정.",
+        diag.join("\n"),
+        home,
+        first_on_path("pi").map(|p| p.display().to_string()).unwrap_or_else(|| "없음".into()),
+        first_on_path("node").map(|p| p.display().to_string()).unwrap_or_else(|| "없음".into()),
+    ))
 }
 
 /** prime 모드 cwd: .pi/agent/extensions/redcell 이 있으면 프로젝트 루트(확장 로드), 아니면 redcell_dir. */
@@ -654,9 +730,7 @@ fn run_prime(
     redcell: &str,
     provider: &str,
 ) -> Result<(), String> {
-    let cli = prime_cli_path(redcell).ok_or(
-        "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정). nvm/pnpm/bun 전역 설치와 `npm root -g` 까지 자동 탐색합니다.".to_string(),
-    )?;
+    let cli = prime_cli_path(redcell)?;
 
     // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
     // CLI 처럼 이전 대화를 이어간다(첫 턴에 생성·저장, 이후 턴은 재사용).
@@ -1054,7 +1128,7 @@ mod tests {
             .or_else(|| std::env::var("REDCELL_DIR").ok().map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from("/opt/workspace/local/bsh/workspace/absolute-agent/redcell"));
         let found = prime_cli_path(&redcell.to_string_lossy());
-        assert!(found.is_some(), "pi CLI 를 찾아야 한다 (nvm/pnpm/bun/npm root -g 탐색)");
+        assert!(found.is_ok(), "pi CLI 를 찾아야 한다 (nvm/pnpm/bun/npm root -g 탐색) — {found:?}");
         let p = found.unwrap();
         assert!(p.is_file(), "찾은 경로가 실제 파일이어야 한다: {p:?}");
         assert!(p.to_string_lossy().contains("pi-coding-agent"), "pi-coding-agent 경로여야 한다: {p:?}");
