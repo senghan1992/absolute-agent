@@ -416,8 +416,10 @@ fn get_providers() -> Value {
     )
 }
 
-/// 저장된 연결 정보를 자식 프로세스 환경변수로 주입한다.
-/// (Windows 사용자는 시스템 환경변수를 직접 다루기 어려우므로 앱이 대신 처리)
+/// 저장된 연결 정보를 자식 프로세스(pi) 환경변수로 주입한다.
+/// pi 는 환경변수(REDCELL_* 는 무시한다!) 대신 자체 규칙으로 자격증명을 읽는다:
+///   1순위 CLI --api-key → 2순위 ~/.pi/agent/auth.json → 3순위 표준 env(ANTHROPIC_API_KEY 등)
+/// 그래서 키는 (a) 표준 env 주입 + (b) --api-key CLI 인자 두 경로로 넘긴다.
 fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
     if let Some(p) = PROVIDER_CATALOG.iter().find(|p| p.name == provider) {
         if !conn.api_key.trim().is_empty() {
@@ -426,13 +428,79 @@ fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
                 cmd.env(k, conn.api_key.trim());
             }
         }
-        if provider == "custom" && !conn.base_url.trim().is_empty() {
-            cmd.env("REDCELL_OPENAI_BASE_URL", conn.base_url.trim());
+    }
+}
+
+/// pi 의 커스텀 프로바이더(baseUrl 기반)는 `~/.pi/agent/models.json` 에만 선언할 수 있다.
+/// (docs/models.md: custom providers) 프로바이더 "custom"/"ollama" 는 baseUrl·apiKey·models 를
+/// 여기에 기록해야 pi 가 프로바이더로 인식하고 키 없음 오류가 나지 않는다.
+/// 사용자의 기존 파일(다른 프로바이더·이름·compat 등)은 보존하고 같은 이름만 병합(upsert)한다.
+fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: &str, model: &str) -> Result<(), String> {
+    let mut root: Value = fs::read_to_string(path)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_else(|| json!({ "providers": {} }));
+    if root.get("providers").is_none() {
+        root["providers"] = json!({});
+    }
+    let existing = root["providers"].get(provider).cloned().unwrap_or_else(|| json!({}));
+    let mut prov: serde_json::Map<String, Value> = existing.as_object().cloned().unwrap_or_default();
+    if !base_url.trim().is_empty() {
+        prov.insert("baseUrl".into(), Value::String(base_url.trim().to_string()));
+    }
+    if prov.get("api").is_none() {
+        prov.insert("api".into(), Value::String("openai-completions".into()));
+    }
+    // apiKey 는 반드시 비어있지 않은 문자열로 남긴다 — pi 는 빈 apiKey 가 있으면
+    // 프로바이더 자체를 목록에서 내려버리므로, 미설정이면 placeholder 를 쓴다
+    // (키 없는 로컬 서버는 헤더를 무시하므로 문제없고, 실제 키는 --api-key 로 우선 주입).
+    prov.insert(
+        "apiKey".into(),
+        Value::String(if api_key.trim().is_empty() {
+            "redcell-placeholder".to_string()
+        } else {
+            api_key.trim().to_string()
+        }),
+    );
+    // models 목록 upsert (지정한 모델 id 가 없으면 추가, 기존 목록 보존).
+    let mut models: Vec<Value> = prov
+        .get("models")
+        .and_then(|m| m.as_array())
+        .cloned()
+        .unwrap_or_default();
+    if !model.trim().is_empty() {
+        let id = model.trim().to_string();
+        let exists = models.iter().any(|m| m.get("id").and_then(|i| i.as_str()) == Some(id.as_str()));
+        if !exists {
+            models.push(json!({ "id": id }));
         }
     }
-    if !conn.model.trim().is_empty() {
-        cmd.env("REDCELL_MODEL", conn.model.trim()); // 모든 프로바이더 공통 모델 지정
+    if models.is_empty() {
+        return Err(format!(
+            "프로바이더 '{provider}' 에 모델이 지정되지 않았습니다 — ⚙ 설정 > 모델 연결 에서 모델명을 입력하세요."
+        ));
     }
+    prov.insert("models".into(), Value::Array(models));
+    root["providers"][provider] = Value::Object(prov);
+    if let Some(dir) = path.parent() {
+        fs::create_dir_all(dir).map_err(|e| format!("pi 설정 디렉터리 생성 실패: {e}"))?;
+    }
+    let mut text = serde_json::to_string_pretty(&root).map_err(|e| e.to_string())?;
+    text.push('\n');
+    fs::write(path, &text).map_err(|e| format!("models.json 기록 실패: {e}"))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// 프라이빗 설정 경로: pi 는 ~/.pi(Windows: %USERPROFILE%\.pi) 를 사용한다.
+fn pi_models_json_path() -> Result<PathBuf, String> {
+    user_home()
+        .map(|h| h.join(".pi").join("agent").join("models.json"))
+        .ok_or_else(|| "홈 디렉터리(HOME/USERPROFILE)를 찾을 수 없습니다.".to_string())
 }
 
 /// 연결 테스트 — node fetch 로 대상 엔드포인트 도달성/키 인증을 확인한다.
@@ -878,18 +946,33 @@ fn run_prime(
     ];
     args.push("--provider".into());
     args.push(provider.to_string());
-    if provider != "custom" {
-        if let Some(m) = settings.providers.get(provider).and_then(|c| {
-            let m = c.model.trim();
-            if m.is_empty() {
-                None
-            } else {
-                Some(format!("{provider}/{m}"))
-            }
-        }) {
+    let conn = settings.providers.get(provider).cloned().unwrap_or_default();
+    // 커스텀/로컬(baseUrl 필요) 프로바이더: pi 는 models.json 에만 존재할 수 있으므로
+    // 앱 설정(base URL·키·모델)을 ~/.pi/agent/models.json 에 병합해 항상 동기화한다.
+    if provider == "custom" || provider == "ollama" {
+        let mpath = pi_models_json_path()?;
+        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model)?;
+    }
+    // 모델 지정: custom/ollama 도 --model 로 명시( pi 모델 패턴 "provider/id" 또는 순수 id ).
+    {
+        let m = conn.model.trim().to_string();
+        if !m.is_empty() {
             args.push("--model".into());
-            args.push(m);
+            args.push(if provider == "custom" || provider == "ollama" { m } else { format!("{provider}/{m}") });
+        } else if provider == "anthropic" || provider == "openai" || provider == "openrouter" {
+            if let Some(d) = PROVIDER_CATALOG.iter().find(|x| x.name == provider) {
+                if !d.default_model.is_empty() {
+                    let d = d.default_model.to_string();
+                    args.push("--model".into());
+                    args.push(format!("{provider}/{d}"));
+                }
+            }
         }
+    }
+    // 키: CLI --api-key 가 pi 해석 1순위(GUI 환경에선 env 가 안 보일 수 있어 가장 확실).
+    if !conn.api_key.trim().is_empty() {
+        args.push("--api-key".into());
+        args.push(conn.api_key.trim().to_string());
     }
 
     {
@@ -1282,6 +1365,49 @@ mod tests {
             Err(diag) => assert!(diag.contains("USERPROFILE"), "진단에 USERPROFILE 포함 필요: {diag}"),
         }
         restore(&saved);
+    }
+
+    /// models.json 병합: 기존 프로바이더는 보존, custom/ollama 는 baseUrl·apiKey·models
+    /// 가 기록되고, 같은 모델 재호출 시 중복이 생기지 않아야 한다(pi 커스텀 프로바이더의
+    /// "No API key found / Unknown provider" 문제의 직접 회귀 테스트).
+    #[test]
+    fn sync_pi_models_json_merges_and_upserts() {
+        let dir = std::env::temp_dir().join(format!("rc-models-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":{"databricks":{"baseUrl":"https://db.example","api":"openai-completions","apiKey":"keep-me","models":[{"id":"db-model"}]}}}"#,
+        )
+        .unwrap();
+        // 첫 호출: custom 신규 추가.
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model").unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let providers = root["providers"].as_object().unwrap();
+        // 기존 프로바이더 보존.
+        assert_eq!(providers["databricks"]["apiKey"], "keep-me");
+        assert_eq!(providers["databricks"]["models"][0]["id"], "db-model");
+        // custom 필드 기록.
+        assert_eq!(providers["custom"]["baseUrl"], "http://llm.corp.lge:8080/v1");
+        assert_eq!(providers["custom"]["apiKey"], "sk-test");
+        assert_eq!(providers["custom"]["api"], "openai-completions");
+        assert_eq!(providers["custom"]["models"][0]["id"], "my-model");
+        // 두 번째 호출: 같은 모델 중복 없음 + 새 모델 추가.
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model").unwrap();
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "second-model").unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let models = root["providers"]["custom"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2, "모델은 업서트(중복 없이 2개)여야 한다: {models:?}");
+        assert_eq!(models[1]["id"], "second-model");
+        // 모델 없는 새 프로바이더는 오류.
+        let err = sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "x", "").unwrap_err();
+        assert!(err.contains("모델"), "모델 미지정 시 안내 오류: {err}");
+        // 키 미설정이어도 placeholder 로 프로바이더가 살아남는다.
+        sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "", "llama3.1").unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["providers"]["ollama"]["apiKey"], "redcell-placeholder");
+        assert_eq!(root["providers"]["ollama"]["models"][0]["id"], "llama3.1");
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// Windows npm 전역 설치(%APPDATA%\npm\node_modules\...)를 실제 파일로 만들고

@@ -78,6 +78,13 @@ cargo build
 앱을 처음 열면 `⚙ 설정`에서 **redcell 경로**를 확인/지정한다(기본 자동 탐색).
 `⚙ 설정 > 프로바이더`에서 LLM API 키를 등록한다(Claude/GPT/OpenRouter 등).
 
+**custom / ollama 프로바이더** — API 키·base URL·모델명을 앱에서 저장하면, 실행 시
+자동으로 pi 의 `~/.pi/agent/models.json`(Windows: `%USERPROFILE%\.pi\agent\models.json`)에
+병합 기록하고 `--api-key`/`--model` 로 전달한다. 기존 파일의 다른 프로바이더 설정은
+보존되며, pi 가 인식하지 못하는 `custom` 프로바이더로 인한
+"Unknown provider / No API key found" 오류가 나지 않는다. 키를 안 쓰는 로컬 서버
+(vLLM·Ollama)도 모델명만 지정하면 동작한다(placeholder 키 자동 기록).
+
 ## 세션 데이터 위치
 - Linux: `~/.local/share/dev.redcell.desktop/sessions/*.json`
 - macOS: `~/Library/Application Support/dev.redcell.desktop/sessions/*.json`
