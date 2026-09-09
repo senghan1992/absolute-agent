@@ -524,6 +524,12 @@ fn hide_window(cmd: &mut Command) {
 /// **단일 프로세스**로 직접 실행한다. `--import tsx` 는 cwd 기준으로 해석된다.
 
 /** prime-agent(pi) CLI 위치 탐색 — Windows .cmd 전환 문제 회피를 위해 dist/cli.js 를 직접 node 로. */
+/// pi CLI(prime-agent) 경로 탐색. 우선순위:
+///   1) PI_PACKAGE_DIR 환경변수
+///   2) redcell_dir/node_modules (로컬 설치)
+///   3) APPDATA/npm (Windows), nvm($HOME/.nvm/versions/node/*), pnpm($HOME/.local/share/...),
+///      bun($HOME/.bun/install/global), 시스템 위치(/usr·/usr/local·/opt/homebrew)
+///   4) 마지막 보루: `npm root -g` 실행 결과(어느 패키지 매니저로 전역 설치됐든 찾는다)
 fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
     let mut cands: Vec<PathBuf> = Vec::new();
     if let Some(d) = std::env::var_os("PI_PACKAGE_DIR") {
@@ -548,6 +554,58 @@ fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
                 .join("cli.js"),
         );
     }
+    // nvm: $HOME/.nvm/versions/node/<version>/lib/node_modules/...
+    // 전역 설치가 흔한 곳(스캔은 존재하는 디렉터리만).
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        let nvm_versions = home.join(".nvm").join("versions").join("node");
+        if let Ok(entries) = std::fs::read_dir(&nvm_versions) {
+            for e in entries.flatten() {
+                cands.push(
+                    e.path()
+                        .join("lib")
+                        .join("node_modules")
+                        .join("@earendil-works")
+                        .join("pi-coding-agent")
+                        .join("dist")
+                        .join("cli.js"),
+                );
+            }
+        }
+        // pnpm 전역 스토어: ~/.local/share/pnpm((/pnpm)? global/<ver>/node_modules ...)
+        let pnpm_base = home.join(".local").join("share").join("pnpm");
+        if let Ok(entries) = std::fs::read_dir(&pnpm_base) {
+            for e in entries.flatten() {
+                for sub in [e.path(), e.path().join("pnpm")] {
+                    if sub.is_dir() {
+                        if let Ok(children) = std::fs::read_dir(&sub) {
+                            for c in children.flatten() {
+                                cands.push(
+                                    c.path()
+                                        .join("node_modules")
+                                        .join("@earendil-works")
+                                        .join("pi-coding-agent")
+                                        .join("dist")
+                                        .join("cli.js"),
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        // bun 전역: ~/.bun/install/global/node_modules
+        cands.push(
+            home.join(".bun")
+                .join("install")
+                .join("global")
+                .join("node_modules")
+                .join("@earendil-works")
+                .join("pi-coding-agent")
+                .join("dist")
+                .join("cli.js"),
+        );
+    }
     for p in [
         "/usr/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
         "/usr/local/lib/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
@@ -555,7 +613,25 @@ fn prime_cli_path(redcell_dir: &str) -> Option<PathBuf> {
     ] {
         cands.push(PathBuf::from(p));
     }
-    cands.into_iter().find(|p| p.is_file())
+    // 우선순위 순서대로 존재 확인.
+    if let Some(found) = cands.into_iter().find(|p| p.is_file()) {
+        return Some(found);
+    }
+    // 마지막 보루: npm root -g (네트워크 없음, ~100ms). 실패하면 None.
+    let out = Command::new("npm")
+        .args(["root", "-g"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .filter(|s| !s.is_empty());
+    out.and_then(|root| {
+        let p = PathBuf::from(root)
+            .join("@earendil-works")
+            .join("pi-coding-agent")
+            .join("dist")
+            .join("cli.js");
+        p.is_file().then_some(p)
+    })
 }
 
 /** prime 모드 cwd: .pi/agent/extensions/redcell 이 있으면 프로젝트 루트(확장 로드), 아니면 redcell_dir. */
@@ -579,7 +655,7 @@ fn run_prime(
     provider: &str,
 ) -> Result<(), String> {
     let cli = prime_cli_path(redcell).ok_or(
-        "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정)".to_string(),
+        "prime-agent(pi) 를 찾을 수 없습니다 — `npm i -g @earendil-works/pi-coding-agent` 후 재시도 (또는 PI_PACKAGE_DIR 설정). nvm/pnpm/bun 전역 설치와 `npm root -g` 까지 자동 탐색합니다.".to_string(),
     )?;
 
     // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
@@ -959,4 +1035,28 @@ fn main() {
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 회귀 테스트: pi CLI(prime-agent) 경로 탐색은 nvm 전역 설치를 포함해 반드시 찾는다.
+    /// (이 환경: HOME/.nvm/versions/node/*/lib/node_modules/... — 과거엔 못 찾아
+    ///  "prime-agent(pi) 를 찾을 수 없습니다" 가 났다.)
+    #[test]
+    fn prime_cli_path_finds_pi_installation() {
+        let redcell = std::env::current_dir()
+            .unwrap()
+            .ancestors()
+            .find(|p| p.join("src").join("cli.ts").exists())
+            .map(|p| p.to_path_buf())
+            .or_else(|| std::env::var("REDCELL_DIR").ok().map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from("/opt/workspace/local/bsh/workspace/absolute-agent/redcell"));
+        let found = prime_cli_path(&redcell.to_string_lossy());
+        assert!(found.is_some(), "pi CLI 를 찾아야 한다 (nvm/pnpm/bun/npm root -g 탐색)");
+        let p = found.unwrap();
+        assert!(p.is_file(), "찾은 경로가 실제 파일이어야 한다: {p:?}");
+        assert!(p.to_string_lossy().contains("pi-coding-agent"), "pi-coding-agent 경로여야 한다: {p:?}");
+    }
 }

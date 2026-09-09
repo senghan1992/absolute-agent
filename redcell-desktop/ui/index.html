@@ -80,39 +80,9 @@
           <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
         </div>
 
-        <!-- 진행 리본: 단계 스테퍼 + 메트릭 -->
-        <div class="ribbon">
-          <div id="stepper" class="stepper">
-            <div class="step" data-phase="recon"><span class="s-dot"></span>recon</div>
-            <div class="step" data-phase="enumerate"><span class="s-dot"></span>enumerate</div>
-            <div class="step" data-phase="exploit"><span class="s-dot"></span>exploit</div>
-            <div class="step" data-phase="post"><span class="s-dot"></span>post</div>
-          </div>
-          <div id="metrics" class="metrics">
-            <span class="metric"><b id="mEvents">0</b> events</span>
-            <span class="metric sev-critical"><b id="mCrit">0</b> crit</span>
-            <span class="metric sev-high"><b id="mHigh">0</b> high</span>
-            <span class="metric sev-medium"><b id="mMed">0</b> med</span>
-            <span class="metric sev-low"><b id="mLow">0</b> low</span>
-            <span class="metric blocked"><b id="mBlocked">0</b> blocked</span>
-          </div>
-        </div>
+        <!-- 진행 리본은 pi 셸에 맞게 제거(해킹 단계 스테퍼/취약점 메트릭은 prime 모드에서 무의미) -->
 
-        <!-- 현재 활동: 에이전트가 지금 하는 일을 사람 말로 -->
-        <div id="activityBar" class="activity hidden">
-          <span class="activity-dot"></span>
-          <span id="activityText" class="activity-text"></span>
-        </div>
-
-        <!-- 서브탭 -->
-        <div class="subtabs">
-          <button class="subtab active" data-view="live">라이브 캡처</button>
-          <button class="subtab" data-view="findings">발견 <span id="cntFindings" class="count">0</span></button>
-          <button class="subtab" data-view="intel">인텔</button>
-          <button class="subtab" data-view="next">다음 단계</button>
-        </div>
-
-        <!-- 라이브 캡처: 테이블 + 상세 (prime 모드는 아래 pi 콘솔로 대체) -->
+        <!-- 서브뷰: pi 터미널(라이브) 하나만 — 발견/인텔/다음 단계 탭은 제거 -->
         <div id="view-live" class="view active live">
           <div class="capture">
             <table class="cap-table">
@@ -137,12 +107,6 @@
           <div id="piConsole" class="pi-console hidden">
             <pre id="piConsoleBody" class="pi-console-body"></pre>
           </div>
-        </div>
-
-        <div class="view-scroll-wrap">
-          <div id="view-findings" class="view"></div>
-          <div id="view-intel" class="view"></div>
-          <div id="view-next" class="view"></div>
         </div>
       </section>
 

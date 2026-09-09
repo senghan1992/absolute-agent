@@ -117,13 +117,14 @@ function setBadge(status) {
   btn.dataset.mode = running ? "stop" : "run";
   btn.classList.toggle("btn-run", !running);
   btn.classList.toggle("btn-stop", running);
-  btn.title = running ? "실행 중지" : "현재 목표로 엔진 실행";
+  btn.title = running ? "실행 중지" : "prime-agent 실행 — URL 을 위에, 지시는 오른쪽 패널에서";
   $("runIcon").innerHTML = '<use href="#' + (running ? "i-stop" : "i-play") + '"/>';
   $("runLabel").textContent = running ? "중지" : status === "idle" ? "실행" : "재실행";
   const state = $("agentState");
   state.textContent = running ? "작동 중" : (status === "done" ? "완료" : status === "error" ? "오류" : status === "stopped" ? "중지됨" : "대기");
   state.className = "agent-state" + (running ? " busy" : "");
-  if (running) setActivity($("activityText").textContent || "에이전트가 계획을 세우는 중…");
+  const actEl = $("activityText");
+  if (running && actEl) setActivity(actEl.textContent || "prime-agent 가 작업 중…");
   else hideActivity();
 }
 
@@ -178,6 +179,7 @@ function wireRows() {
 }
 
 function renderStepper(s) {
+  if (!document.querySelector(".step")) return;
   const evs = eventsOf(s);
   const seen = new Set(evs.filter((e) => e.type === "phase").map((e) => e.phase));
   const lastPhase = [...evs].reverse().find((e) => e.type === "phase");
@@ -195,6 +197,7 @@ function renderStepper(s) {
 }
 
 function renderMetrics(s) {
+  if (!$("mEvents")) return;
   const evs = eventsOf(s);
   const fs = findingsOf(s);
   const c = { critical: 0, high: 0, medium: 0, low: 0 };
@@ -242,6 +245,7 @@ function renderDetail(ev) {
 // ── 발견 ─────────────────────────────────────────────────────────────────────
 function renderFindings(s) {
   const el = $("view-findings");
+  if (!el) return;
   const fs = findingsOf(s);
   if (!fs.length) { el.innerHTML = `<div class="placeholder">아직 발견된 항목이 없습니다.<br/>오른쪽 에이전트에게 목표를 지시하세요.</div>`; return; }
   el.innerHTML = fs.map((f) => `
@@ -259,6 +263,7 @@ function renderFindings(s) {
 // ── 인텔(핑거프린트 + 학습) ──────────────────────────────────────────────────
 function renderIntel(s) {
   const el = $("view-intel");
+  if (!el) return;
   const fp = fingerprintOf(s);
   const pb = playbooksOf(s);
   const chips = (arr) => (arr && arr.length ? arr.map((x) => `<span class="chip">${esc(x)}</span>`).join("") : `<span style="color:var(--faint)">—</span>`);
@@ -311,7 +316,9 @@ function nextSteps(s) {
   return steps;
 }
 function renderNext(s) {
-  $("view-next").innerHTML = nextSteps(s).map(([t, d], i) =>
+  const el = $("view-next");
+  if (!el) return;
+  el.innerHTML = nextSteps(s).map(([t, d], i) =>
     `<div class="next-item"><div class="num">${i + 1}</div><div class="body"><b>${esc(t)}</b><br/><span>${esc(d)}</span></div></div>`).join("");
 }
 
@@ -803,10 +810,12 @@ async function refreshProviders() {
 // ── 뷰 전환 ──────────────────────────────────────────────────────────────────
 function switchView(name) {
   document.querySelectorAll(".subtab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
-  const isLive = name === "live";
-  $("view-live").classList.toggle("active", isLive);
-  document.querySelector(".view-scroll-wrap").style.display = isLive ? "none" : "flex";
-  ["findings", "intel", "next"].forEach((v) => $("view-" + v).classList.toggle("active", v === name));
+  const isLive = name !== "live";
+  const live = $("view-live");
+  if (live) live.classList.toggle("active", !isLive);
+  const wrap = document.querySelector(".view-scroll-wrap");
+  if (wrap) wrap.style.display = isLive ? "flex" : "none";
+  ["findings", "intel", "next"].forEach((v) => { const el = $("view-" + v); if (el) el.classList.toggle("active", v === name); });
 }
 
 // ── 설정 ─────────────────────────────────────────────────────────────────────
