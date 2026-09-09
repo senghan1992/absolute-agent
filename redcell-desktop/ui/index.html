@@ -80,7 +80,11 @@
 
         <!-- 진행 리본은 pi 셸에 맞게 제거(해킹 단계 스테퍼/취약점 메트릭은 prime 모드에서 무의미) -->
 
-        <!-- 서브뷰: pi 터미널(라이브) 하나만 — 발견/인텔/다음 단계 탭은 제거 -->
+        <!-- 서브뷰: 라이브(pi 터미널) / 결과(Markdown 렌더) -->
+        <div class="subtabs">
+          <button class="subtab active" data-view="live">라이브</button>
+          <button class="subtab" data-view="results">결과<span class="count" id="resultsCount" style="display:none">0</span></button>
+        </div>
         <div id="view-live" class="view active live">
           <div class="capture">
             <table class="cap-table">
@@ -106,6 +110,11 @@
             <pre id="piConsoleBody" class="pi-console-body"></pre>
           </div>
         </div>
+
+        <!-- 결과: 에이전트가 만든 마크다운을 렌더링 -->
+        <section id="view-results" class="view results-view">
+          <div id="resultsBody" class="results-body"></div>
+        </section>
       </section>
 
       <!-- 오른쪽: 에이전트 패널 -->

@@ -7,7 +7,7 @@
  * 이 확장이 하는 일:
  *   1) [안전 핵심] tool_call 훅에서 모든 액션의 대상 호스트를 검사하여
  *      authorization.yaml scope 밖이면 {block:true} 로 차단한다(harness 레벨 가드).
- *   2) 인가된 대상 전용 정찰 툴(recon_http)을 등록한다.
+ *   2) 인가된 대상 전용 정찰 툴(recon_http, web_fetch)을 등록한다.
  *   3) /scope, /engage, /playbooks 슬래시 명령을 등록한다.
  *   4) 인가 대상 전용 시스템 프롬프트(범용 조수 — scope 안에서 자유로운 작업 수행) 를 주입한다.
  *
@@ -54,6 +54,10 @@ const METHODOLOGY = `
 - 대상(URL)이 인가되어 있으면 조사·탐색·파일 추출 등 사용자가 시킨 일을 자유롭게 수행하고
   결과를 정리해 사용자에게 전달한다. 해킹/취약점만 강제하는 것이 아니라, 그 대상에 대한
   모든 종류의 업무를 수행한다.
+- **웹 조사는 반드시 web_fetch 툴로**: URL 대상의 조사·정보 수집·페이지 열람은 전부
+  web_fetch 툴을 사용한다. **로컬 컴퓨터(bash/read/edit/write)는 조사 대상이 아니다** —
+  결과물 파일 저장 외에 이 머신의 파일/폴더를 뒤지지 말 것. bash 로 웹 요청을 대신하지
+  말 것(리다이렉트·범위 검사가 빠져 위험하다).
 - 파일로 만들어 달라는 요청은 실제 파일로 저장해 저장 경로를 알려준다.
 `.trim();
 
@@ -151,7 +155,173 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
     }),
   );
 
-  // 4) 슬래시 명령.
+  // 4) 인가된 웹 대상 전용 페이지 조회 툴 — pi 자체엔 웹 조회 툴이 없어서(코딩 에이전트)
+  //     LLM 이 로컬 bash 로 URL 을 치거나 **이 머신의 파일을 뒤지는** 잘못된 흐름이 생긴다.
+  //     이 툴로 "URL 입력 → 그 대상만 조사"가 성립한다. 비파괴 GET/HEAD 만 허용,
+  //     리다이렉트 홉마다 scope 재검사(다른 origin 도약 차단), 본문 크기 제한.
+  const webFetchErr = (msg: string) =>
+    ({ content: [{ type: "text", text: msg }], details: { blocked: true }, isError: true }) as any;
+
+  pi.registerTool?.(
+    defineTool({
+      name: "web_fetch",
+      label: "웹 페이지 조회(인가 대상 전용)",
+      description:
+        "인가된 웹 대상(URL)에 GET/HEAD 를 보내 본문·링크·폼 정보를 읽는다(비파괴, scope 강제). 웹사이트 조사는 반드시 이 툴을 사용한다.",
+      parameters: Type.Object({
+        url: Type.String({ description: "http(s) URL — 호스트가 인가 목록에 있어야 함" }),
+        method: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("HEAD")], { default: "GET" })),
+        maxBytes: Type.Optional(Type.Integer({ minimum: 1000, maximum: 2_000_000, default: 400_000 })),
+      }),
+      async execute(_id, params: { url: string; method?: "GET" | "HEAD"; maxBytes?: number }) {
+        await ensureGuard();
+        if (!guard) {
+          return webFetchErr(authError ?? "인가 게이트 준비 안 됨");
+        }
+        let u: URL;
+        try {
+          u = new URL(params.url.trim());
+        } catch {
+          return webFetchErr(`URL 해석 실패: ${params.url}`);
+        }
+        if (u.protocol !== "http:" && u.protocol !== "https:") {
+          return webFetchErr(`http(s) URL 만 허용됩니다: ${u.protocol}//`);
+        }
+        const method = params.method ?? "GET";
+        if (method !== "GET" && method !== "HEAD") {
+          return webFetchErr(`허용 메서드는 GET/HEAD 뿐입니다: ${method}`);
+        }
+        const maxBytes = Math.min(Math.max(params.maxBytes ?? 400_000, 1_000), 2_000_000);
+        const hostOf = (x: URL) => x.hostname.replace(/^\[|\]$/g, "");
+        const head = guard.check({ host: hostOf(u), intent: "recon" });
+        if (!head.allowed) {
+          return webFetchErr(`인가되지 않은 대상입니다: ${head.reason}`);
+        }
+
+        // 리다이렉트 홉마다 scope 재검사(같은 인가 흐름만 허용, 최대 6홉).
+        const hops: string[] = [];
+        let cur = u;
+        let res: Response | undefined;
+        for (let i = 0; i < 6; i++) {
+          const d = guard.check({ host: hostOf(cur), intent: "recon" });
+          if (!d.allowed) {
+            return webFetchErr(`리다이렉트 대상이 인가 범위 밖입니다(차단): ${cur.host}`);
+          }
+          hops.push(cur.toString());
+          try {
+            res = await fetch(cur.toString(), {
+              method,
+              redirect: "manual",
+              signal: AbortSignal.timeout(20_000),
+              headers: {
+                "user-agent": "Mozilla/5.0 (RedCell authorized-agent)",
+                accept: "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+                "accept-language": "ko-KR,ko;q=0.9,en;q=0.8",
+              },
+            });
+          } catch (e) {
+            return webFetchErr(`요청 실패: ${e instanceof Error ? e.message : String(e)}`);
+          }
+          if ([301, 302, 303, 307, 308].includes(res.status)) {
+            const loc = res.headers.get("location");
+            if (!loc) break;
+            let next: URL;
+            try {
+              next = new URL(loc, cur);
+            } catch {
+              break;
+            }
+            if (next.protocol !== "http:" && next.protocol !== "https:") break;
+            cur = next;
+            continue;
+          }
+          break;
+        }
+        if (!res) return webFetchErr("응답을 받지 못했습니다.");
+
+        // 본문 수집(크기 제한).
+        let text = "";
+        let truncated = false;
+        let bytes = 0;
+        if (method === "HEAD") {
+          bytes = Number(res.headers.get("content-length") ?? 0) || 0;
+        } else if (res.body) {
+          const reader = res.body.getReader();
+          const chunks: Uint8Array[] = [];
+          let total = 0;
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) {
+              const room = maxBytes - total;
+              if (room <= 0) {
+                truncated = true;
+                await reader.cancel().catch(() => {});
+                break;
+              }
+              const take = value.subarray(0, Math.min(value.byteLength, room));
+              chunks.push(take);
+              total += take.byteLength;
+              if (take.byteLength < value.byteLength) {
+                truncated = true;
+                await reader.cancel().catch(() => {});
+                break;
+              }
+            }
+          }
+          bytes = total;
+          text = Buffer.concat(chunks).toString("utf8");
+        }
+
+        const ct = (res.headers.get("content-type") ?? "").toLowerCase();
+        const isTextual =
+          text.length === 0 || /text\//.test(ct) || /json|xml|javascript|svg|form-urlencoded/i.test(ct) || ct === "";
+        if (!isTextual) {
+          text = `[바이너리 응답 — 본문 생략] (${bytes} bytes, ${ct || "알 수 없음"})`;
+        }
+
+        // 링크/폼 추출(마지막 URL 기준 절대화, 중복 제거).
+        const links: string[] = [];
+        {
+          const seen = new Set<string>();
+          for (const m of text.slice(0, 300_000).matchAll(/(?:href|src)\s*=\s*["']([^"'#][^"']*)["']/gi)) {
+            if (links.length >= 120) break;
+            let abs: string;
+            try {
+              abs = new URL(m[1], cur).toString();
+            } catch {
+              continue;
+            }
+            if (seen.has(abs)) continue;
+            seen.add(abs);
+            links.push(abs);
+          }
+        }
+        const forms: { action: string; method: string }[] = [];
+        for (const m of text.matchAll(/<form\b[^>]*>/gi)) {
+          if (forms.length >= 30) break;
+          const tag = m[0];
+          const action = /action\s*=\s*["']([^"']*)["']/i.exec(tag)?.[1] ?? "";
+          const methodv = (/method\s*=\s*["']([^"']+)["']/i.exec(tag)?.[1] ?? "get").toLowerCase();
+          forms.push({ action, method: methodv });
+        }
+
+        const summary = [
+          `${res.status} ${res.statusText}`, 
+          `URL: ${cur}`, 
+          `Content-Type: ${ct || "-"} · bytes: ${bytes}${truncated ? ` (${maxBytes} 초과분 잘림)` : ""}`, 
+          `링크 ${links.length}개 · 폼 ${forms.length}개`,
+        ].join("\n");
+        return {
+          content: [{ type: "text", text: `${summary}\n\n${text}` }],
+          details: { url: cur.toString(), status: res.status, contentType: ct, bytes, truncated, links, forms, hops },
+          isError: res.status >= 400,
+        } as any;
+      },
+    }),
+  );
+
+  // 5) 슬래시 명령.
   pi.registerCommand?.("scope", {
     description: "현재 인가(scope) 상태를 출력",
     handler: async (ctx: ExtensionContext) => {

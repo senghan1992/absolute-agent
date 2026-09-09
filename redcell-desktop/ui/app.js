@@ -132,6 +132,7 @@ function setBadge(status) {
 
 // ── 캡처 테이블 ──────────────────────────────────────────────────────────────
 function renderCapture(s) {
+  if (resultsTabActive()) renderResults();
   const body = $("capBody");
   const evs = eventsOf(s);
   body.innerHTML = evs.map((e, i) => rowHtml(e, i)).join("");
@@ -427,6 +428,7 @@ function onLiveEvent(event) {
 
   // pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
   if (s) renderPiConsole(s);
+  if (resultsTabActive()) renderResults();
 
   renderStepper(s);
   renderMetrics(s);
@@ -527,26 +529,36 @@ function normalizeTargetInput(raw) {
   return { host, port };
 }
 
+// 인가 안내 메시지는 세션당 한 번만 띄운다(매 지시마다 auth_ensure 는 계속 호출되지만,
+// "이미 인가된 대상입니다" 같은 반복 안내는 더 이상 알림으로 추가하지 않는다).
+const authNotified = {};
+
 async function ensureTargetAuthorized() {
   const s = cur(); if (!s) return;
   const host = (s.host || "").trim();
   if (!host) return;
   try {
     const r = await invoke("auth_ensure", { host });
-    if (r.yaml) {
-      await pushAssistant(s.id, `인가 파일이 정식 YAML 입니다 — 대상 ${r.host} 을(를) 자동 추가하지 않았습니다. 인가 범위는 엔진(ScopeGuard)이 그대로 강제합니다.`);
-    } else {
-      const ipNote = (r.ips_added && r.ips_added.length)
-        ? ` 해석된 IP 도 함께 허용: ${r.ips_added.join(", ")}`
-        : (r.ips_known && r.ips_known.length ? ` (해석된 IP ${r.ips_known.join(", ")} 이미 허용됨)` : "");
-      if (r.added) {
-        await pushAssistant(s.id, `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다.${ipNote} 빼려면 🛡 인가 대상 관리에서 제거하세요.`);
-      } else if (r.existed) {
-        await pushAssistant(s.id, `대상 ${r.host} 은(는) 이미 인가된 대상입니다.${ipNote}`);
-      }
+    // 실제 인가 목록 반영(자동 추가)은 매번 수행 — 알림만 1회로 제한.
+    const msg = r.yaml
+      ? `인가 파일이 정식 YAML 입니다 — 대상 ${r.host} 을(를) 자동 추가하지 않았습니다. 인가 범위는 엔진(ScopeGuard)이 그대로 강제합니다.`
+      : (() => {
+          const ipNote = (r.ips_added && r.ips_added.length)
+            ? ` 해석된 IP 도 함께 허용: ${r.ips_added.join(", ")}`
+            : (r.ips_known && r.ips_known.length ? ` (해석된 IP ${r.ips_known.join(", ")} 이미 허용됨)` : "");
+          if (r.added) return `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다.${ipNote} 빼려면 🛡 인가 대상 관리에서 제거하세요.`;
+          if (r.existed) return `대상 ${r.host} 은(는) 이미 인가된 대상입니다.${ipNote}`;
+          return null;
+        })();
+    if (msg && !authNotified[s.id]) {
+      authNotified[s.id] = true;
+      await pushAssistant(s.id, msg);
     }
   } catch (e) {
-    await pushAssistant(s.id, `대상 자동 인가 실패: ${e} — 인가 범위는 엔진이 계속 강제합니다.`);
+    if (!authNotified[s.id]) {
+      authNotified[s.id] = true;
+      await pushAssistant(s.id, `대상 자동 인가 실패: ${e} — 인가 범위는 엔진이 계속 강제합니다.`);
+    }
   }
 }
 
@@ -803,12 +815,147 @@ async function refreshProviders() {
 // ── 뷰 전환 ──────────────────────────────────────────────────────────────────
 function switchView(name) {
   document.querySelectorAll(".subtab").forEach((b) => b.classList.toggle("active", b.dataset.view === name));
-  const isLive = name !== "live";
   const live = $("view-live");
-  if (live) live.classList.toggle("active", !isLive);
-  const wrap = document.querySelector(".view-scroll-wrap");
-  if (wrap) wrap.style.display = isLive ? "flex" : "none";
-  ["findings", "intel", "next"].forEach((v) => { const el = $("view-" + v); if (el) el.classList.toggle("active", v === name); });
+  if (live) live.classList.toggle("active", name === "live");
+  const rv = $("view-results");
+  if (rv) rv.classList.toggle("active", name === "results");
+  if (name === "results") renderResults();
+}
+
+// ── 결과 탭: 에이전트가 만들어낸 마크다운을 렌더링해 보여준다 ──────────────────
+// pi stdout 의 text_end 가 note 이벤트로 들어온다. [sys]/[pi-툴]/[오류]/[완료] 같은
+// 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
+function resultDocs(s) {
+  const out = [];
+  const seen = new Set();
+  for (const e of eventsOf(s)) {
+    const t = (e.text || "").trim();
+    if (!t) continue;
+    if (/^\[(sys|pi-툴|오류|완료|인텔)\]/.test(t)) continue;
+    if (/^대상 .*(인가|자동 추가)/.test(t)) continue;
+    const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ seq: e._seq, ts: e.ts, text: t });
+  }
+  return out;
+}
+
+function resultsTabActive() {
+  const rv = $("view-results");
+  return !!(rv && rv.classList.contains("active"));
+}
+
+function renderResults() {
+  const s = cur();
+  const el = $("resultsBody");
+  const cnt = $("resultsCount");
+  const docs = s ? resultDocs(s) : [];
+  if (cnt) { cnt.textContent = String(docs.length); cnt.style.display = docs.length ? "inline-flex" : "none"; }
+  if (!el) return;
+  if (!docs.length) {
+    el.innerHTML = `<div class="placeholder">아직 표시할 결과가 없습니다.<br/>에이전트가 정리한 마크다운 결과가 여기에 렌더링되어 표시됩니다.</div>`;
+    return;
+  }
+  el.innerHTML = docs.map((d) =>
+    `<article class="md-card">
+       <header class="md-card-head">
+         <span class="md-card-seq">#${d.seq != null ? d.seq : "·"}</span>
+         <span class="md-card-ts">${hhmm(d.ts)}</span>
+       </header>
+       <div class="md-body">${mdToHtml(d.text)}</div>
+     </article>`).join("");
+}
+
+function escHtml(s) {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/* 미니 마크다운 → HTML (의존성 없음). 입력은 먼저 이스케이프한 뒤 변환하므로 안전. */
+function inlineMd(s) {
+  s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+  s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  s = s.replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>");
+  s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
+    if (/^(javascript|data|vbscript):/i.test(url)) return m;
+    return `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`;
+  });
+  return s;
+}
+
+function mdToHtml(src) {
+  const lines = src.split(/\r?\n/);
+  const out = [];
+  let para = [];
+  const flushPara = () => { if (para.length) { out.push(`<p>${inlineMd(para.join(" "))}</p>`); para = []; } };
+  const splitRow = (r) => r.trim().replace(/^\||\|$/g, "").split("|").map((c) => inlineMd(c.trim()));
+  const isSep = (r) => /^\s*\|[\s:|-]+\|\s*$/.test(r) && /-/.test(r);
+  let i = 0;
+  while (i < lines.length) {
+    const raw = lines[i];
+    // fenced code
+    if (/^```|^~~~/.test(raw)) {
+      flushPara();
+      const buf = [];
+      i++;
+      while (i < lines.length && !/^(```|~~~)\s*$/.test(lines[i])) { buf.push(lines[i]); i++; }
+      i++;
+      out.push(`<pre><code>${escHtml(buf.join("\n"))}</code></pre>`);
+      continue;
+    }
+    // pipe table
+    if (/^\s*\|/.test(raw) && i + 1 < lines.length && isSep(lines[i + 1])) {
+      flushPara();
+      const rows = [raw];
+      i += 2; // 헤더 + 구분선 소비
+      while (i < lines.length && /^\s*\|/.test(lines[i])) { rows.push(lines[i]); i++; }
+      let html = "<table><thead><tr>";
+      for (const c of splitRow(rows[0])) html += `<th>${c}</th>`;
+      html += "</tr></thead><tbody>";
+      for (const r of rows.slice(1)) {
+        if (!r.trim()) continue;
+        html += "<tr>";
+        for (const c of splitRow(r)) html += `<td>${c}</td>`;
+        html += "</tr>";
+      }
+      html += "</tbody></table>";
+      out.push(html);
+      continue;
+    }
+    const h = /^(#{1,6})\s+(.*)$/.exec(raw);
+    if (h) { flushPara(); const lv = h[1].length; out.push(`<h${lv}>${inlineMd(escHtml(h[2]))}</h${lv}>`); i++; continue; }
+    if (/^\s*(-{3,}|\*{3,})\s*$/.test(raw)) { flushPara(); out.push("<hr/>"); i++; continue; }
+    if (/^>\s?/.test(raw)) {
+      flushPara();
+      const buf = [];
+      while (i < lines.length && /^>\s?/.test(lines[i])) { buf.push(lines[i].replace(/^>\s?/, "")); i++; }
+      out.push(`<blockquote>${inlineMd(escHtml(buf.join(" ")))}</blockquote>`);
+      continue;
+    }
+    const ul = /^\s*[-*+]\s+(.*)$/.exec(raw);
+    if (ul) {
+      flushPara();
+      const items = [ul[1]];
+      i++;
+      while (i < lines.length) { const m2 = /^\s*[-*+]\s+(.*)$/.exec(lines[i]); if (!m2) break; items.push(m2[1]); i++; }
+      out.push(`<ul>${items.map((x) => `<li>${inlineMd(escHtml(x))}</li>`).join("")}</ul>`);
+      continue;
+    }
+    const ol = /^\s*\d+[.)]\s+(.*)$/.exec(raw);
+    if (ol) {
+      flushPara();
+      const items = [ol[1]];
+      i++;
+      while (i < lines.length) { const m2 = /^\s*\d+[.)]\s+(.*)$/.exec(lines[i]); if (!m2) break; items.push(m2[1]); i++; }
+      out.push(`<ol>${items.map((x) => `<li>${inlineMd(escHtml(x))}</li>`).join("")}</ol>`);
+      continue;
+    }
+    if (raw.trim() === "") { flushPara(); i++; continue; }
+    para.push(escHtml(raw));
+    i++;
+  }
+  flushPara();
+  return out.join("\n");
 }
 
 // ── 설정 ─────────────────────────────────────────────────────────────────────

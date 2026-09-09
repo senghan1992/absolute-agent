@@ -923,7 +923,7 @@ fn run_prime(
             _ => String::new(),
         };
         format!(
-            "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘."
+            "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘.\n중요: 웹 조사는 반드시 web_fetch 툴로 수행한다. 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니라 — 결과물 저장 외에 로컬 머신을 뒤지지 마라."
         )
     };
 
