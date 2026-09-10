@@ -89,9 +89,14 @@ function renderActive() {
   $("shHost").value = s.host || "";
   $("shPort").value = s.port ?? "";
   $("shGoal") && ($("shGoal").value = s.goal || "");
-  const pb = $("providerBadge");
-  const prov = s.provider && s.provider !== "mock" ? s.provider : settings.default_provider || "";
-  if (pb) { pb.textContent = prov ? `⚙ ${prov}` : ""; pb.classList.toggle("hidden", !prov); }
+  const psel = $("shProvider");
+  if (psel) {
+    const want = s.provider && s.provider !== "mock" ? s.provider : settings.default_provider || "";
+    if (want && ![...psel.options].some((o) => o.value === want)) {
+      psel.insertAdjacentHTML("beforeend", `<option value="${esc(want)}">${esc(want)} (저장됨)</option>`);
+    }
+    psel.value = want;
+  }
   const chatInput = $("chatInput");
   if (chatInput) {
     chatInput.placeholder =
@@ -502,7 +507,7 @@ async function persistHeader(overrides = {}) {
     host: norm.host || hostRaw,
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
-    provider: s.provider && s.provider !== "mock" ? s.provider : (settings.default_provider || ""),
+    provider: ($("shProvider") && $("shProvider").value) || (s.provider && s.provider !== "mock" ? s.provider : (settings.default_provider || "")),
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
   };
@@ -646,6 +651,8 @@ let envReadyMap = {}; // get_providers 의 ready_env (시스템 환경변수 감
 let expandedProvider = null;
 
 function activeProvider() {
+  const sel = $("shProvider");
+  if (sel && sel.value) { const v = sel.value.trim(); return v && v !== "mock" ? v : ""; }
   const s = cur();
   const v = (s && s.provider ? s.provider : settings.default_provider || "").trim();
   return v && v !== "mock" ? v : "";
@@ -679,7 +686,7 @@ function renderProviderCards() {
   if (!el) return;
   el.innerHTML = PROVIDER_CATALOG.map((p) => {
     const st = providerConnState(p);
-    const keyLabel = p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "";
+    const keyLabel = p.name === "custom" ? "API Key" : (p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "");
     const basePlaceholder = p.name === "ollama" ? "http://localhost:11434/v1" : "https://your-endpoint/v1";
     const modelPh = p.default_model || "예: gpt-4o";
     const open = expandedProvider === p.name;
@@ -803,6 +810,19 @@ async function refreshProviders() {
   envReadyMap = {};
   list.forEach((p) => { envReadyMap[p.name] = !!p.ready_env; });
   const connected = PROVIDER_CATALOG.filter(providerConnected);
+  // 헤더 프로바이더 셀렉트: 연결된 것 + 현재 세션/기본값 유지(custom 등).
+  const psel = $("shProvider");
+  if (psel) {
+    const prev = psel.value || ((cur() && cur().provider) || settings.default_provider || "");
+    psel.innerHTML = `<option value="">— provider 선택 —</option>`
+      + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+    if (prev && connected.some((p) => p.name === prev)) {
+      psel.value = prev;
+    } else if (prev) {
+      psel.insertAdjacentHTML("beforeend", `<option value="${esc(prev)}">${esc(prev)} (저장됨)</option>`);
+      psel.value = prev;
+    }
+  }
   const hint = $("providerHint");
   if (hint) {
     const names = connected.map((p) => p.name);
@@ -1178,7 +1198,7 @@ function wire() {
     $("chatInput").value = b.dataset.goal || b.textContent.trim();
     sendChat();
   });
-  ["shName", "shHost", "shPort"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
+  ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }
 
