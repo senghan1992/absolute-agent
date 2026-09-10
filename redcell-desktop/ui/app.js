@@ -156,12 +156,15 @@ function renderPiConsole(s) {
   if (!live || !body) return;
   live.classList.add("pi-mode");
   const lines = [];
+  let prevLine = null; // 연속 중복(이중 저장) 노트는 1개만
   for (const m of (s.chat || [])) {
     if (m.role === "user" && m.content.trim()) lines.push({ cls: "pi-user", text: m.content });
   }
   for (const e of eventsOf(s)) {
     const t = (e.text || e.reason || "").trim();
     if (!t) continue;
+    if (t === prevLine) continue;
+    prevLine = t;
     if (/^\[pi-툴\]/.test(t)) lines.push({ cls: "pi-tool", text: t });
     else if (/^\[sys\]/.test(t)) lines.push({ cls: "pi-sys", text: t });
     else if (e.type === "error" || /^\[오류\]/.test(t)) lines.push({ cls: "pi-error", text: t });
@@ -852,6 +855,7 @@ function switchView(name) {
 function resultDocs(s) {
   const out = [];
   const seen = new Set();
+  let prevText = null; // text_end/message_end 이중 저장 등 연속 중복은 1개만
   for (const e of eventsOf(s)) {
     const t = (e.text || "").trim();
     if (!t) continue;
@@ -860,6 +864,8 @@ function resultDocs(s) {
     const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
     if (seen.has(key)) continue;
     seen.add(key);
+    if (t === prevText) continue; // 같은 결과가 연속 2번 저장된 경우
+    prevText = t;
     out.push({ seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t });
   }
   return out;

@@ -1028,6 +1028,7 @@ fn run_prime(
         let id = id.to_string();
         thread::spawn(move || {
             let mut buf = String::new();
+            let mut last_text: Option<String> = None; // text_end/message_end 중복 노트 방지
             for line in BufReader::new(stdout).lines().map_while(Result::ok) {
                 let line = line.trim();
                 if line.is_empty() {
@@ -1051,10 +1052,12 @@ fn run_prime(
                                 }
                             }
                             Some("text_end") => {
-                                if !buf.trim().is_empty() {
-                                    let ev2 = json!({ "type": "note", "text": buf.trim().to_string() });
+                                let t = buf.trim().to_string();
+                                if !t.is_empty() && last_text.as_deref() != Some(t.as_str()) {
+                                    let ev2 = json!({ "type": "note", "text": t.clone() });
                                     let stamped = append_event(&app, &id, &ev2);
                                     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                                    last_text = Some(t);
                                 }
                                 buf.clear();
                             }
@@ -1068,10 +1071,12 @@ fn run_prime(
                                 for part in content {
                                     if part.get("type").and_then(|t| t.as_str()) == Some("text") {
                                         if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                            if !t.trim().is_empty() {
-                                                let ev2 = json!({ "type": "note", "text": t.trim().to_string() });
+                                            let t = t.trim().to_string();
+                                            if !t.is_empty() && last_text.as_deref() != Some(t.as_str()) {
+                                                let ev2 = json!({ "type": "note", "text": t.clone() });
                                                 let stamped = append_event(&app, &id, &ev2);
                                                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                                                last_text = Some(t);
                                             }
                                         }
                                     }
