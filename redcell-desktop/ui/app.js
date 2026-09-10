@@ -11,6 +11,7 @@ let activeId = null;
 let settings = { redcell_dir: "", auth_path: "", default_provider: "" };
 let selectedSeq = null;
 let diagFilter = null; // 진단 결과 루트 필터: null=전체, Set(치명|높음|중간|낮음)
+let resultsSegs = []; // 현재 렌더 중인 결과 카드별 원문 (개별 내보내기용)
 
 const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
@@ -1123,9 +1124,7 @@ body{margin:0;background:#0d1116;color:#dbe4ee;font:14px/1.7 system-ui,'Apple SD
 `;
 
 // ── 리포트 PDF/인쇄: 숨김 iframe에 리포트를 렌더링하고 인쇄 대화상자(⇒ PDF 저장) 호출 ──
-function printReport(s) {
-  const st = $("rsExportStatus");
-  const name = ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
+function printHtml(html, st) {
   let fr = document.getElementById("rsPrintFrame");
   if (!fr) {
     fr = document.createElement("iframe");
@@ -1137,31 +1136,72 @@ function printReport(s) {
   fr.onload = doPrint;
   const d = fr.contentDocument;
   d.open();
-  d.write(diagToExportHtml(s, name));
+  d.write(html);
   d.close();
   if (d.readyState !== "loading") setTimeout(doPrint, 80);
   if (st) { st.textContent = "인쇄 대화상자에서 'PDF로 저장'을 선택하세요"; st.className = "rs-export-status ok"; }
 }
+function printReport(s) {
+  const name = reportBaseName(s);
+  printHtml(diagToExportHtml(s, name), $("rsExportStatus"));
+}
 
-function diagToExportHtml(s, name) {
-  const body = mdToHtml(reportMarkdown(s));
+function exportHtmlShell(title, meta) {
   const date = new Date().toLocaleString("ko-KR");
-  const target = s && s.host ? escHtml(s.host + (s.port ? ":" + s.port : "")) : "(—)";
-  const title = escHtml((name || "RedCell 진단 리포트").trim() || "RedCell 진단 리포트");
   return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>${title}</title><style>${EXPORT_CSS}</style></head>
 <body><div class="wrap">
  <div class="cover">
-   <div class="brand">🛡 RedCell · 보안 진단 리포트</div>
+   <div class="brand">🛡 RedCell · 보안 리포트</div>
    <h1>${title}</h1>
-   <div class="meta">대상 ${target} · 생성 ${date}</div>
+   <div class="meta">${meta} · 생성 ${date}</div>
  </div>
- <div class="md-body">${body}</div>
+ <div class="md-body">__RC_BODY__</div>
 </div></body></html>`;
+}
+function diagToExportHtml(s, name) {
+  const body = mdToHtml(reportMarkdown(s));
+  const target = s && s.host ? escHtml(s.host + (s.port ? ":" + s.port : "")) : "(—)";
+  const title = escHtml((name || "RedCell 진단 리포트").trim() || "RedCell 진단 리포트");
+  return exportHtmlShell(title, `대상 ${target}`).replace("__RC_BODY__", body);
+}
+function segmentToExportHtml(name, target, text) {
+  const body = mdToHtml(text);
+  const title = escHtml((name || "RedCell 결과").trim() || "RedCell 결과");
+  return exportHtmlShell(title, `대상 ${target || "(—)"}`).replace("__RC_BODY__", body);
 }
 
 function reportMarkdown(s) {
   return resultDocs(s).map((d) => d.text).join("\n\n");
+}
+function reportBaseName(s) {
+  return ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
+}
+async function writeReport(name, content, format, st) {
+  try {
+    const path = await invoke("write_report", { name, content, format });
+    st.textContent = "💾 " + path;
+    st.className = "rs-export-status ok";
+  } catch (e) {
+    st.textContent = "저장 실패: " + e;
+    st.className = "rs-export-status err";
+  }
+}
+async function copyText(md, st) {
+  const done = () => { if (st) { st.textContent = "복사됨"; st.className = "rs-export-status ok"; } };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(md);
+      done();
+    } else {
+      const ta = document.createElement("textarea");
+      ta.value = md; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta);
+      done();
+    }
+  } catch (e) {
+    if (st) { st.textContent = "복사 실패"; st.className = "rs-export-status err"; }
+  }
 }
 
 async function exportReport(s, asHtml) {
@@ -1170,38 +1210,59 @@ async function exportReport(s, asHtml) {
   const st = $("rsExportStatus");
   const target = asHtml ? btnH : btn;
   if (!target || !st) return;
-  const name = ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
+  const name = reportBaseName(s);
   target.disabled = true; st.textContent = "저장 중…";
-  try {
-    const content = asHtml ? diagToExportHtml(s, name) : reportMarkdown(s);
-    const path = await invoke("write_report", { name, content, format: asHtml ? "html" : "md" });
-    st.textContent = "💾 " + path;
-    st.className = "rs-export-status ok";
-  } catch (e) {
-    st.textContent = "저장 실패: " + e;
-    st.className = "rs-export-status err";
-  } finally {
-    target.disabled = false;
-  }
+  const content = asHtml ? diagToExportHtml(s, name) : reportMarkdown(s);
+  await writeReport(name, content, asHtml ? "html" : "md", st);
+  target.disabled = false;
 }
 async function copyReport(s) {
-  const st = $("rsExportStatus");
-  const md = reportMarkdown(s);
-  const fallbackDone = () => { if (st) { st.textContent = "복사됨"; st.className = "rs-export-status ok"; } };
-  try {
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      await navigator.clipboard.writeText(md);
-      fallbackDone();
-    } else {
-      // WebView/구버전 폴백 — textarea 를 임시로 만들어 execCommand
-      const ta = document.createElement("textarea");
-      ta.value = md; document.body.appendChild(ta); ta.select();
-      document.execCommand("copy"); document.body.removeChild(ta);
-      fallbackDone();
-    }
-  } catch (e) {
-    if (st) { st.textContent = "복사 실패"; st.className = "rs-export-status err"; }
-  }
+  await copyText(reportMarkdown(s), $("rsExportStatus"));
+}
+
+// 결과 카드별 개별 내보내기 (여러 결과가 있을 때 각각 내보낼 수 있게 한다)
+function segmentExportBar(i) {
+  return `<footer class="md-export">
+    <span class="rd-exp-status"></span>
+    <div class="md-export-btns">
+      <button class="rd-exp" data-ix="${i}" data-act="copy" title="이 결과 원문을 클립보드에 복사">복사</button>
+      <button class="rd-exp" data-ix="${i}" data-act="pdf" title="이 결과를 인쇄 대화상자에서 PDF로 저장">PDF</button>
+      <button class="rd-exp" data-ix="${i}" data-act="md" title="이 결과를 .md 파일로 저장">MD</button>
+      <button class="rd-exp" data-ix="${i}" data-act="html" title="이 결과를 자체 완성형 HTML 파일로 저장">HTML</button>
+    </div>
+  </footer>`;
+}
+function segTarget() {
+  const s = cur();
+  return (s && (s.host || "") + (s.port ? ":" + s.port : "")) || "";
+}
+async function exportSegment(ix, asHtml, btn) {
+  const seg = resultsSegs[ix];
+  if (!seg) return;
+  const card = btn.closest(".md-card");
+  const st = card ? card.querySelector(".rd-exp-status") : null;
+  if (!st) return;
+  const s = cur();
+  const name = (reportBaseName(s) + "-" + (seg.title || (seg.kind || "result"))).replace(/[^\w가-힣-]/g, "-").trim() || "redcell-result";
+  btn.disabled = true; st.textContent = "저장 중…";
+  const content = asHtml ? segmentToExportHtml(name, segTarget(), seg.text) : seg.text;
+  await writeReport(name, content, asHtml ? "html" : "md", st);
+  btn.disabled = false;
+}
+async function copySegment(ix, btn) {
+  const seg = resultsSegs[ix];
+  if (!seg) return;
+  const card = btn.closest(".md-card");
+  await copyText(seg.text, card ? card.querySelector(".rd-exp-status") : null);
+}
+function printSegment(ix, btn) {
+  const seg = resultsSegs[ix];
+  if (!seg) return;
+  const card = btn.closest(".md-card");
+  const st = card ? card.querySelector(".rd-exp-status") : null;
+  const s = cur();
+  const name = (reportBaseName(s) + "-" + (seg.title || (seg.kind || "result"))).replace(/[^\w가-힣-]/g, "-").trim() || "redcell-result";
+  printHtml(segmentToExportHtml(name, segTarget(), seg.text), st);
 }
 
 // ── 진단 리포트를 루트 카드로 분할 (prelude/루트/권고·실측) ──────────────────
@@ -1268,7 +1329,8 @@ function renderResults() {
     const fset = diagFilter;
     segs = segs.map((it) => (it.kind === "root" && fset.has(it.sev) ? it : it.kind === "root" ? null : it)).filter(Boolean);
   }
-  el.innerHTML = segs.map((it) => {
+  resultsSegs = segs;
+  el.innerHTML = segs.map((it, i) => {
     const isRoot = it.kind === "root";
     const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
     const tag = isRoot ? `<span class="md-kind root">루트</span>`
@@ -1276,12 +1338,13 @@ function renderResults() {
       : it.kind === "tail" ? `<span class="md-kind tail">권고·실측</span>`
       : `<span class="md-kind doc">결과</span>`;
     const title = isRoot ? esc(it.title) : (it.seq != null ? `#${it.seq}` : (it.kind === "tail" ? "권고·실측 확인" : it.kind === "prelude" ? "요약·범위" : ""));
-    return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}">
+    return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}" data-ix="${i}">
        <header class="md-card-head">
          ${tag}<span class="md-card-title">${title}</span>
          <span class="md-card-ts">${hhmm(it.ts)}</span>
        </header>
        <div class="md-body">${mdToHtml(it.text)}</div>
+       ${segmentExportBar(i)}
      </article>`;
   }).join("");
   if (s && s.diag && s.status === "done") el.insertAdjacentHTML("beforeend", renderNextActions(s));
@@ -1960,6 +2023,18 @@ function wire() {
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
   const rb = $("resultsBody");
   if (rb) rb.addEventListener("click", (e) => {
+    // 개별 결과 내보내기 (카드마다 복사/PDF/MD/HTML)
+    const rdExp = e.target.closest(".rd-exp");
+    if (rdExp) {
+      e.preventDefault();
+      const ix = rdExp.dataset.ix;
+      const act = rdExp.dataset.act;
+      if (act === "copy") copySegment(ix, rdExp);
+      else if (act === "pdf") printSegment(ix, rdExp);
+      else if (act === "md") exportSegment(ix, false, rdExp);
+      else if (act === "html") exportSegment(ix, true, rdExp);
+      return;
+    }
     // '자동 보완' 조치 1클릭 지시 → 에이전트에 보완 목표 전달
     const ns = e.target.closest(".ns-run");
     if (ns) {
