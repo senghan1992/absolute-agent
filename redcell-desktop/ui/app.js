@@ -1698,7 +1698,33 @@ function renderDashboard() {
     body.innerHTML = `<div class="dash-empty">아직 세션이 없습니다 — [새 세션]으로 시작하세요.</div>`;
     return;
   }
-  body.innerHTML = ordered.map((s) => {
+  const agg = ordered.map(dashSessionStats).reduce((a, st) => {
+    a.total++;
+    if (st.status === "done") a.done++;
+    if (st.kind === "diag" && !st.pending) {
+      a.diag++;
+      a.roots += st.roots;
+      for (const k of ["치명", "높음", "중간", "낮음"]) a.sev[k] += st.sev[k];
+      for (const k of ["실증", "징후", "가정"]) a.ver[k] += st.ver[k];
+      const rk = { "A": 0, "B": 1, "C": 2, "D": 3, "F": 4 }[st.grade.letter];
+      if (rk > a.worstRank) { a.worstRank = rk; a.worst = st.grade; }
+    }
+    return a;
+  }, { total: 0, done: 0, diag: 0, roots: 0, sev: { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 }, ver: { "실증": 0, "징후": 0, "가정": 0 }, worstRank: -1, worst: null });
+  const worst = agg.worst || { letter: "·", label: "—", cls: "g-none" };
+  body.innerHTML = `
+    <div class="dash-summary">
+      <div class="ds-stat"><b>${agg.total}</b><span>세션</span></div>
+      <div class="ds-stat"><b>${agg.diag}</b><span>진단 완료</span></div>
+      <div class="ds-stat"><b>${agg.roots}</b><span>발굴 루트</span></div>
+      <div class="ds-grade ${worst.cls}"><b>${worst.letter}</b><span>최악 등급</span></div>
+      <div class="ds-crits">
+        <span class="dc crit">치명 ${agg.sev["치명"]}</span><span class="dc high">높음 ${agg.sev["높음"]}</span>
+        <span class="dc med">중간 ${agg.sev["중간"]}</span><span class="dc low">낮음 ${agg.sev["낮음"]}</span>
+        <span class="dc v">실증 ${agg.ver["실증"]} · 징후 ${agg.ver["징후"]} · 가정 ${agg.ver["가정"]}</span>
+      </div>
+    </div>
+    ` + ordered.map((s) => {
     const st = dashSessionStats(s);
     const statusCls = ["running", "done", "error", "stopped", "idle"].includes(st.status) ? st.status : "idle";
     let card;
