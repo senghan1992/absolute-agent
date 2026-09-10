@@ -299,7 +299,7 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 /* ── 결과 탭: 마크다운 렌더 카드 ── */
 .results-view { flex: 1 1 auto; min-height: 0; overflow-y: auto; }
 .results-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 16px 18px; display: flex; flex-direction: column; gap: 14px; }
-.md-card { background: var(--elev); border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
+.md-card { flex: 0 0 auto; background: var(--elev); border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
 .md-card-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line-2); color: var(--faint); font-size: 11px; }
 .md-card-seq { font-family: var(--mono); color: var(--muted); }
 .md-card-ts { margin-left: auto; }

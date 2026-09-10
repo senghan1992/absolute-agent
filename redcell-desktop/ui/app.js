@@ -91,11 +91,12 @@ function renderActive() {
   $("shGoal") && ($("shGoal").value = s.goal || "");
   const psel = $("shProvider");
   if (psel) {
-    const want = s.provider && s.provider !== "mock" ? s.provider : settings.default_provider || "";
-    if (want && ![...psel.options].some((o) => o.value === want)) {
-      psel.insertAdjacentHTML("beforeend", `<option value="${esc(want)}">${esc(want)} (저장됨)</option>`);
+    const want = s.provider || settings.default_provider || "";
+    const clean = want === "mock" ? "" : want; // 레거시 mock 값은 선택지로 삼지 않음
+    if (clean && ![...psel.options].some((o) => o.value === clean)) {
+      psel.insertAdjacentHTML("beforeend", `<option value="${esc(clean)}">${esc(clean)} (저장됨)</option>`);
     }
-    psel.value = want;
+    psel.value = clean;
   }
   const chatInput = $("chatInput");
   if (chatInput) {
@@ -507,7 +508,7 @@ async function persistHeader(overrides = {}) {
     host: norm.host || hostRaw,
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
-    provider: ($("shProvider") && $("shProvider").value) || (s.provider && s.provider !== "mock" ? s.provider : (settings.default_provider || "")),
+    provider: ($("shProvider") && $("shProvider").value && $("shProvider").value !== "mock" ? $("shProvider").value : "") || (s.provider !== "mock" ? s.provider : "") || (settings.default_provider !== "mock" ? settings.default_provider : "") || "",
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
   };
@@ -652,10 +653,10 @@ let expandedProvider = null;
 
 function activeProvider() {
   const sel = $("shProvider");
-  if (sel && sel.value) { const v = sel.value.trim(); return v && v !== "mock" ? v : ""; }
+  if (sel && sel.value) { const v = sel.value.trim(); return v === "mock" ? "" : v; }
   const s = cur();
   const v = (s && s.provider ? s.provider : settings.default_provider || "").trim();
-  return v && v !== "mock" ? v : "";
+  return v === "mock" ? "" : v;
 }
 function showProviderModal() {
   $("providerModal").classList.remove("hidden");
@@ -684,7 +685,10 @@ function providerConnState(p) {
 function renderProviderCards() {
   const el = $("providerCards");
   if (!el) return;
-  el.innerHTML = PROVIDER_CATALOG.map((p) => {
+  // custom/ollama(base URL 필요) 를 맨 위로 — 스크롤 없이 바로 보이게.
+  const rank = { custom: 0, ollama: 1 };
+  const catalog = [...PROVIDER_CATALOG].sort((a, b) => (rank[a.name] ?? 9) - (rank[b.name] ?? 9));
+  el.innerHTML = catalog.map((p) => {
     const st = providerConnState(p);
     const keyLabel = p.name === "custom" ? "API Key" : (p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "");
     const basePlaceholder = p.name === "ollama" ? "http://localhost:11434/v1" : "https://your-endpoint/v1";
@@ -743,9 +747,9 @@ async function saveSettingsNow(providers) {
 function renderProviderDefaultSelect() {
   const sel = $("setProviderDefault");
   if (!sel) return;
-  const connected = PROVIDER_CATALOG.filter(providerConnected);
+  // 연결 여부와 무관하게 전부 표시 — custom 은 아직 연결 전이라도 선택할 수 있다.
   sel.innerHTML = `<option value="">(선택 안 함)</option>`
-    + connected.map((p) => `<option value="${p.name}">${p.name} ✅</option>`).join("");
+    + PROVIDER_CATALOG.map((p) => `<option value="${p.name}">${p.name}${providerConnected(p) ? " ✅" : " (미연결)"}</option>`).join("");
   sel.value = settings.default_provider || "";
 }
 
@@ -805,7 +809,7 @@ function wireProviderCards() {
 
 async function refreshProviders() {
   let list;
-  try { list = await invoke("get_providers"); } catch { return; } // preview/mock 환경
+  try { list = await invoke("get_providers"); } catch { return; } // 브라우저 프리뷰 환경
   if (!Array.isArray(list)) return;
   envReadyMap = {};
   list.forEach((p) => { envReadyMap[p.name] = !!p.ready_env; });
@@ -856,7 +860,7 @@ function resultDocs(s) {
     const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    out.push({ seq: e._seq, ts: e.ts, text: t });
+    out.push({ seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t });
   }
   return out;
 }
@@ -994,6 +998,8 @@ function updateConnSummary() {
 function openSettings() {
   $("setRedcellDir").value = settings.redcell_dir || "";
   $("setAuthPath").value = settings.auth_path || "";
+  const c = (settings.providers || {}).custom || {};
+  if (!c.base_url && !c.api_key) expandedProvider = "custom"; // 미연결 custom 은 펼쳐서 보여줌
   renderProviderCards();
   renderProviderDefaultSelect();
   updateConnSummary();

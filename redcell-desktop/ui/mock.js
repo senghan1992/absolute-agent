@@ -76,7 +76,7 @@
     events: demoEvents(),
   };
 
-  const store = { sessions: [sampleSession], settings: { redcell_dir: "(preview mock)", auth_path: "", default_provider: "mock" } };
+  const store = { sessions: [sampleSession], settings: { redcell_dir: "(preview)", auth_path: "", default_provider: "" } };
   const findById = (id) => store.sessions.find((s) => s.id === id);
   const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -146,7 +146,7 @@
   const API_INTENT = /(\bapi\b|엔드포인트|endpoint|백엔드|backend|정보|목록|수집|제출|submission|평가|evaluation|채점|score|점수|랭킹|ranking)/i;
 
   const preamble = (session, target) => [
-    { type: "note", text: `[sys] [model] ${session.provider || "mock"}` },
+    { type: "note", text: `[sys] [model] ${session.provider || "미지정"}` },
     { type: "note", text: "[sys] [scope] config/authorization.yaml" },
     { type: "authorized", text: `[인가] 대상 ${session.host}:${session.port || ""} 인가 확인됨 (local-lab-training). — 목표: ${session.goal || "정찰"}`, target, goal: session.goal },
   ];
@@ -297,7 +297,7 @@
       case "get_session": { const s = findById(args.id); return s ? clone(s) : null; }
       case "create_session": {
         const s = { id: uid(), name: args.name && args.name.trim() ? args.name : "session-" + Math.random().toString(36).slice(2, 6),
-          host: args.host || "127.0.0.1", port: args.port ?? null, goal: args.goal || "", provider: args.provider || "mock", mode: "prime",
+          host: args.host || "127.0.0.1", port: args.port ?? null, goal: args.goal || "", provider: args.provider || "", mode: "prime",
           status: "idle", created_at: nowIso(), updated_at: nowIso(), chat: [], events: [] };
         store.sessions.unshift(s); return clone(s);
       }
