@@ -999,3 +999,21 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .au-row.au-info { border-color: var(--line-2); }
 .au-info .au-ic { color: var(--muted); }
 .au-info .au-badge { color: var(--muted); background: var(--surface-3); }
+
+/* ── 자동 보완: 다음 조치 1클릭 지시 ───────────────────────────────────── */
+.next-actions { margin-top: 4px; }
+.ns-title { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--ok) 34%, var(--line-2)); background: linear-gradient(135deg, color-mix(in srgb, var(--ok) 11%, transparent), color-mix(in srgb, var(--accent-2) 7%, transparent)), var(--elev); border-radius: 12px 12px 0 0; }
+.ns-ico { flex: none; width: 26px; height: 26px; border-radius: 8px; display: grid; place-items: center; color: var(--ok-fg); background: color-mix(in srgb, var(--ok) 15%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 36%, transparent); }
+.ns-ico .ic { width: 14px; height: 14px; }
+.ns-title div { display: flex; flex-direction: column; }
+.ns-title b { font-size: 13.5px; color: var(--text); }
+.ns-title span { font-size: 11px; color: var(--muted); margin-top: 1px; }
+.ns-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; padding: 12px 14px; border: 1px solid color-mix(in srgb, var(--ok) 22%, var(--line-2)); border-top: none; border-radius: 0 0 12px 12px; background: color-mix(in srgb, var(--ok) 3%, var(--surface)); }
+.ns-card { display: flex; flex-direction: column; gap: 8px; padding: 13px 14px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line-2); transition: border-color 0.15s, transform 0.15s; }
+.ns-card:hover { border-color: color-mix(in srgb, var(--ok) 42%, var(--line-2)); transform: translateY(-1px); }
+.ns-num { flex: none; width: 22px; height: 22px; border-radius: 50%; display: inline-flex; align-items: center; justify-content: center; font-family: var(--mono); font-size: 11px; font-weight: 800; color: var(--ok-fg); background: color-mix(in srgb, var(--ok) 14%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 30%, transparent); }
+.ns-body b { font-size: 12.5px; color: var(--text); display: block; }
+.ns-body p { margin: 4px 0 0; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.ns-run { align-self: flex-end; display: inline-flex; align-items: center; gap: 5px; border: 1px solid color-mix(in srgb, var(--ok) 42%, transparent); background: color-mix(in srgb, var(--ok) 12%, transparent); color: var(--ok-fg); font-size: 11.5px; font-weight: 700; padding: 5px 11px; border-radius: 8px; cursor: pointer; transition: all 0.13s; }
+.ns-run:hover { background: color-mix(in srgb, var(--ok) 20%, transparent); }
+.ns-run .ic { width: 12px; height: 12px; stroke: currentColor; }

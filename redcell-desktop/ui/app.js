@@ -336,6 +336,25 @@ function renderNext(s) {
     `<div class="next-item"><div class="num">${i + 1}</div><div class="body"><b>${esc(t)}</b><br/><span>${esc(d)}</span></div></div>`).join("");
 }
 
+// ── 진단 후 '자동 보완': 다음 조치를 1클릭으로 에이전트에 지시 (LLM 재진단) ──────
+function renderNextActions(s) {
+  const steps = nextSteps(s);
+  if (!steps.length) return "";
+  const items = steps.map(([t, d], i) => `
+    <div class="ns-card">
+      <span class="ns-num">${i + 1}</span>
+      <div class="ns-body"><b>${esc(t)}</b><p>${esc(d)}</p></div>
+      <button class="ns-run" data-goal="${esc(t)} · ${esc(d)}" title="이 조치를 에이전트에 지시해 실행/검증">지시<svg class="ic"><use href="#i-send"/></svg></button>
+    </div>`).join("");
+  return `<section class="next-actions">
+    <header class="ns-title">
+      <span class="ns-ico"><svg class="ic"><use href="#i-check"/></svg></span>
+      <div><b>자동 보완</b><span>정리된 다음 조치를 1클릭으로 에이전트에 지시해 실행·검증합니다</span></div>
+    </header>
+    <div class="ns-grid">${items}</div>
+  </section>`;
+}
+
 // ── 대화 ─────────────────────────────────────────────────────────────────────
 function renderChat() {
   const s = cur();
@@ -1247,6 +1266,7 @@ function renderResults() {
        <div class="md-body">${mdToHtml(it.text)}</div>
      </article>`;
   }).join("");
+  if (s && s.diag && s.status === "done") el.insertAdjacentHTML("beforeend", renderNextActions(s));
   wireSimPlayers(el);
 }
 
@@ -1906,6 +1926,19 @@ function wire() {
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
   const rb = $("resultsBody");
   if (rb) rb.addEventListener("click", (e) => {
+    // '자동 보완' 조치 1클릭 지시 → 에이전트에 보완 목표 전달
+    const ns = e.target.closest(".ns-run");
+    if (ns) {
+      e.preventDefault();
+      const goal = ns.dataset.goal || "";
+      const s = cur();
+      if (s && !s.host) { alert("먼저 위에 대상 host/URL 을 입력하세요."); return; }
+      if (!activeProvider()) { showProviderModal(); return; }
+      const ci = $("chatInput");
+      if (ci) ci.value = goal ? `이 보완 조치를 진행해줘: ${goal}` : goal;
+      sendChat();
+      return;
+    }
     const btn = e.target.closest("[data-sim-act]");
     if (!btn) return;
     const sim = btn.closest("[data-sim]");
