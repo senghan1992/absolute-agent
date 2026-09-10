@@ -55,6 +55,8 @@ struct Session {
     #[serde(default)]
     max: bool, // 공격 최대 모드(tools) — 전수 커버리지 + opt-in 전체 + python_exec
     #[serde(default)]
+    diag: bool, // 서비스 진단 모드 — 설명 기반 공격 포인트/개선 권고 리포트
+    #[serde(default)]
     piq: String, // prime 모드: pi 세션 id(연속 대화 유지)
     #[serde(default = "status_idle")]
     status: String, // idle | running | done | error
@@ -67,7 +69,7 @@ struct Session {
 }
 
 fn default_provider() -> String {
-    "mock".into()
+    String::new() // mock 프로바이더는 존재하지 않는다 — 미지정 = 선택 안 함
 }
 fn default_mode() -> String {
     // 기본은 prime-agent(pi) 직접 실행 — 위에 대상 URL/호스트를 넣고 지시하면 CLI 처럼 쓴다.
@@ -276,6 +278,7 @@ fn create_session(
     provider: String,
     mode: Option<String>,
     max: Option<bool>,
+    diag: Option<bool>,
 ) -> Session {
     let id = Uuid::new_v4().to_string();
     let s = Session {
@@ -288,7 +291,7 @@ fn create_session(
         port,
         goal,
         provider: if provider.trim().is_empty() {
-            "mock".into()
+            String::new() // mock 제거 — 미지정이면 UI가 프로바이더 선택 모달로 안내
         } else {
             provider
         },
@@ -297,6 +300,7 @@ fn create_session(
             _ => default_mode(),
         },
         max: max.unwrap_or(false),
+        diag: diag.unwrap_or(false),
         piq: String::new(),
         status: "idle".into(),
         created_at: now(),
@@ -320,6 +324,7 @@ fn update_session(
     provider: String,
     mode: Option<String>,
     max: Option<bool>,
+    diag: Option<bool>,
 ) -> Option<Session> {
     let mut s = read_session(&app, &id)?;
     s.name = name;
@@ -334,6 +339,9 @@ fn update_session(
     }
     if let Some(mx) = max {
         s.max = mx;
+    }
+    if let Some(d) = diag {
+        s.diag = d;
     }
     s.updated_at = now();
     write_session_locked(&app, &s);
@@ -390,6 +398,40 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: &[], base_url: "http://localhost:11434/v1", needs_base: true },
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
+
+/// 서비스 진단 모드에서 pi 에 주입하는 방법론 — 공격 포인트 + 개선 권고 중심.
+const DIAG_METHOD: &str = r#"# RedCell 서비스 진단 방법론
+
+당신은 서비스 보안 진단 전문가다. 아래 '서비스 설명'을 바탕으로 **공격 포인트와
+개선(보완) 필요 사항**을 창의적으로 발굴해 진단 리포트를 작성한다.
+
+## 리포트 형식 (Markdown, 아래 구조를 지킨다)
+# 서비스 진단 리포트 — <서비스명>
+## 1. 진단 범위 및 가정
+  - 기술 스택·아키텍처 추정 (설명에 없는 부분은 [가정] 으로 표시)
+  - 진단 경계: 설명 기반 판단 vs 실측 확인
+## 2. 공격 표면 (Attack Surface)
+  인증·세션·권한 / 입력 처리 / 데이터 흐름 / 외부 연동 / 배포·설정 / 비즈니스 로직
+  각 표면의 노출 경로와 진입점(예상 엔드포인트·함수·플로우)
+## 3. 창의적 공격 루트 (위험도 순)
+  각 항목: **위험도(치명/높음/중간/낮음) · 공격 시나리오 · 영향 · 발생 가능성**
+  주입류(SQLi·NoSQLi·명령·SSRF·SSTI), 인증·세션(JWT·OAuth·쿠키·토큰), 권한(IDOR·
+  수평/수직 상승), 파일 업로드·경로, XXE·역직렬화, 레이스 컨디션, 캐시 오염, 요청
+  스머글링, 비즈니스 로직 남용(할인·쿼터·순서·상태), 개인정보 노출, 유니코드·인코딩
+  우회, 체인 공격(XSS→CSRF→관리자 권한 등)
+## 4. 개선·보완 권고 (우선순위)
+  각 항목: **우선순위(P0~P3) · 문제 · 구체적 보완 방법(코드·설정·프로세스 수준) ·
+  검증 방법**
+## 5. 실측 확인 (URL 이 주어진 경우)
+  web_fetch/recon_http 로 확인한 사실과 '가정' 의 차이, 추가 확인 필요 항목
+
+## 원칙
+- **창의성**: 잘 알려진 취약점뿐 아니라 조합·비즈니스 로직·운영 방식에서 나오는
+  공격 루트를 발굴한다. 공격자 관점에서 "실제로 어떻게 성공하는가"를 구체적으로.
+- **보완 중심**: 모든 공격 루트마다 반드시 "미리 막는 방법"(방어 기재·설정·검증 방법)
+  을 제시한다 — 진단기가 곧 개선 지침이 되도록.
+- 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만.
+"#;
 
 /// 프로바이더 목록 + 자격증명 감지 상태(프론트 연동용).
 #[tauri::command]
@@ -912,9 +954,29 @@ fn run_prime(
     };
     let mut goal = s2.goal.trim().to_string();
     if goal.is_empty() {
-        goal = "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string();
+        goal = if s2.diag {
+            "이 서비스의 보안 진단 리포트를 작성해줘.".to_string()
+        } else {
+            "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string()
+        };
     }
-    let instruction = if s2.host.trim().is_empty() {
+    let instruction = if s2.diag {
+        // 서비스 진단 모드: 설명 기반 공격 포인트 발굴 + 개선 권고 리포트.
+        let scope = if s2.host.trim().is_empty() {
+            "실측 없이 설명 기반 진단 — 추정은 [가정] 으로 표시".to_string()
+        } else {
+            let https_hint = match port {
+                Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s2.host, p),
+                _ => String::new(),
+            };
+            format!(
+                "대상 사이트(인가됨): {target}\n{https_hint}\n가능하면 web_fetch 로 실제 페이지·헤더·엔드포인트를 열어 가정을 검증해줘(실측 확인은 필수가 아니다)."
+            )
+        };
+        format!(
+            "{DIAG_METHOD}\n\n## 서비스 설명\n\n{goal}\n\n## 진단 경계\n{scope}\n\n로컬 컴퓨터 파일 시스템(bash/read/edit/write)은 절대 조사하지 말 것 — 결과물 저장 외에 이 머신을 뒤지지 마라."
+        )
+    } else if s2.host.trim().is_empty() {
         // 대상 미지정: 순수 pi CLI 대화(인가 게이트는 대상 없는 로컬 작업만 통과).
         goal
     } else {

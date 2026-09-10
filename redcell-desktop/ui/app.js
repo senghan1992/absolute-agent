@@ -100,9 +100,12 @@ function renderActive() {
   }
   const chatInput = $("chatInput");
   if (chatInput) {
-    chatInput.placeholder =
-      "prime-agent 에 지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈) — URL 은 위에 입력";
+    chatInput.placeholder = (s && s.diag)
+      ? "서비스 설명 입력 — 목적·기술 스택·인증 방식·주요 기능·데이터 흐름·외부 연동 (진단 모드)"
+      : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
   }
+  const dc = $("diagChk");
+  if (dc) dc.checked = !!(s && s.diag);
   setBadge(s.status);
 
   renderCapture(s);
@@ -478,7 +481,7 @@ async function selectSession(id) {
 }
 
 async function newSession() {
-  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools", max: false });
+  const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools", max: false, diag: false });
   sessions.unshift(s);
   activeId = s.id;
   renderTabs();
@@ -512,6 +515,7 @@ async function persistHeader(overrides = {}) {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: ($("shProvider") && $("shProvider").value && $("shProvider").value !== "mock" ? $("shProvider").value : "") || (s.provider !== "mock" ? s.provider : "") || (settings.default_provider !== "mock" ? settings.default_provider : "") || "",
+    diag: !!($("diagChk") && $("diagChk").checked) || !!s.diag,
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
   };
@@ -1211,6 +1215,16 @@ function wire() {
     sendChat();
   });
   ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
+  const diagChk = $("diagChk");
+  if (diagChk) diagChk.addEventListener("change", () => {
+    const s = cur();
+    if (s) s.diag = diagChk.checked;
+    persistHeader();
+    const ci = $("chatInput");
+    if (ci) ci.placeholder = diagChk.checked
+      ? "서비스 설명 입력 — 목적·기술 스택·인증 방식·주요 기능·데이터 흐름·외부 연동 (진단 모드)"
+      : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+  });
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
 }
 

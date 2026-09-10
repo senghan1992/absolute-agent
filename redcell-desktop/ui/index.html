@@ -76,6 +76,10 @@
           <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더 (custom 등 — ⚙ 설정에서 키/모델 관리)" aria-label="LLM 프로바이더">
             <option value="">— provider 선택 —</option>
           </select>
+          <label class="diag-toggle" title="서비스 설명을 넣고 공격 포인트·개선 권고를 받는 진단 모드">
+            <input type="checkbox" id="diagChk" />
+            <span class="diag-sw"></span>서비스 진단
+          </label>
           <span id="statusBadge" class="badge badge-idle">idle</span>
           <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
         </div>
