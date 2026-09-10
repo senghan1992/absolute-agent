@@ -1678,11 +1678,75 @@ function openAuth() {
   loadAuth();
 }
 
+// ── 진단 이력 대시보드 ───────────────────────────────────────────────────────
+function dashSessionStats(s) {
+  const base = { status: s.status, target: s.host + (s.port ? ":" + s.port : ""), updated: hhmm((s.updated_at) || Date.now()) };
+  if (!s.diag) {
+    const goal = (s.goal && s.goal.trim()) || "대화 · 일반 작업";
+    return { ...base, kind: "work", goal: goal.length > 60 ? goal.slice(0, 60) + "…" : goal };
+  }
+  const docs = resultDocs(s);
+  if (!docs.length) return { ...base, kind: "diag", pending: true };
+  const st = reportStats(docs);
+  return { ...base, kind: "diag", pending: false, roots: st.roots, sev: st.sev, ver: st.ver, grade: st.grade };
+}
+function renderDashboard() {
+  const body = $("dashBody");
+  if (!body) return;
+  const ordered = [...sessions].sort((a, b) => (String(b.updated_at || "").localeCompare(String(a.updated_at || ""))));
+  if (!ordered.length) {
+    body.innerHTML = `<div class="dash-empty">아직 세션이 없습니다 — [새 세션]으로 시작하세요.</div>`;
+    return;
+  }
+  body.innerHTML = ordered.map((s) => {
+    const st = dashSessionStats(s);
+    const statusCls = ["running", "done", "error", "stopped", "idle"].includes(st.status) ? st.status : "idle";
+    let card;
+    if (st.kind === "diag" && !st.pending) {
+      card = `
+        <div class="dash-grade ${st.grade.cls}"><b>${st.grade.letter}</b><span>${st.grade.label}</span></div>
+        <div class="dash-main">
+          <div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
+          <div class="dash-meta">루트 ${st.roots}개 · ${esc((s.name || "").trim() || "진단 세션")}</div>
+          <div class="dash-chips">
+            <span class="dc crit">치명 ${st.sev["치명"]}</span><span class="dc high">높음 ${st.sev["높음"]}</span>
+            <span class="dc med">중간 ${st.sev["중간"]}</span><span class="dc low">낮음 ${st.sev["낮음"]}</span>
+            <span class="dc v">실증 ${st.ver["실증"]} · 징후 ${st.ver["징후"]} · 가정 ${st.ver["가정"]}</span>
+          </div>
+        </div>`;
+    } else if (st.kind === "diag") {
+      card = `
+        <div class="dash-grade g-none"><b>·</b><span>진단 중</span></div>
+        <div class="dash-main"><div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
+        <div class="dash-meta">진단 리포트 미완성 · ${esc((s.goal && s.goal.slice(0,60)) || "대기")}</div></div>`;
+    } else {
+      card = `
+        <div class="dash-grade g-none"><b>◇</b><span>작업</span></div>
+        <div class="dash-main"><div class="dash-title"><b>${esc(st.target || "(대상 미지정)")}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
+        <div class="dash-meta">${esc(st.goal)}</div></div>`;
+    }
+    return `<article class="dash-card" data-session="${s.id}">${card}
+        <div class="dash-foot"><span class="dash-upd">${esc(st.updated)}</span>
+          <button class="btn btn-ghost btn-xs dash-open">열기</button></div>
+      </article>`;
+  }).join("");
+  // 카드 클릭 → 해당 세션 열기
+  body.querySelectorAll("[data-session]").forEach((card) => {
+    const sid = card.dataset.session;
+    const open = () => { $("dashboardModal").classList.add("hidden"); selectSession(sid); };
+    card.querySelector(".dash-open").onclick = open;
+    card.onclick = (e) => { if (!e.target.closest(".dash-open")) open(); };
+  });
+}
+function openDashboard() { renderDashboard(); $("dashboardModal").classList.remove("hidden"); }
+
 // ── 배선 ─────────────────────────────────────────────────────────────────────
 function wire() {
   $("newSessionBtn").onclick = newSession;
   $("emptyNewBtn").onclick = newSession;
   $("settingsBtn").onclick = openSettings;
+  $("dashboardBtn").onclick = openDashboard;
+  $("dashboardClose").onclick = () => $("dashboardModal").classList.add("hidden");
   $("settingsCancel").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsClose").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsSave").onclick = saveSettings;
@@ -1690,14 +1754,14 @@ function wire() {
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   wireProviderCards();
   // 모달 공통: 바깥 클릭 / Esc 로 닫기
-  ["settingsModal", "authModal", "providerModal"].forEach((id) => {
+  ["settingsModal", "authModal", "providerModal", "dashboardModal"].forEach((id) => {
     const m = $(id);
     if (!m) return;
     m.addEventListener("pointerdown", (e) => { if (e.target === m) m.classList.add("hidden"); });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    ["settingsModal", "authModal", "providerModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
+    ["settingsModal", "authModal", "providerModal", "dashboardModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
   });
   $("runBtn").onclick = onRunButton;
   $("diagBtn").onclick = runDiagnose;

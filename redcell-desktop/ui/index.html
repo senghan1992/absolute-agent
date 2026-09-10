@@ -41,6 +41,8 @@
         <symbol id="i-chev" viewBox="0 0 24 24"><path d="M9 5l7 7-7 7"/></symbol>
         <symbol id="i-eye" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/></symbol>
         <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></symbol>
+        <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></symbol>
+        <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></symbol>
       </defs>
     </svg>
 
@@ -56,6 +58,7 @@
           <svg class="ic" id="themeIcon"><use href="#i-moon"/></svg>
         </button>
         <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>세션</button>
+        <button id="dashboardBtn" class="btn btn-icon" title="진단 이력 대시보드" aria-label="진단 이력 대시보드"><svg class="ic"><use href="#i-grid"/></svg></button>
         <button id="scopeBtn" class="btn btn-icon" title="인가 대상 관리" aria-label="인가 대상 관리"><svg class="ic"><use href="#i-shield"/></svg></button>
         <button id="settingsBtn" class="btn btn-icon" title="설정" aria-label="설정"><svg class="ic"><use href="#i-gear"/></svg></button>
       </div>
@@ -150,6 +153,20 @@
         <h2>세션을 시작하세요</h2>
         <p>인가된 대상 하나로 오퍼레이션을 엽니다.<br />모든 액션은 <code>authorization.yaml</code> scope 안에서만 실행됩니다.</p>
         <button id="emptyNewBtn" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-plus"/></svg>새 세션 만들기</button>
+      </div>
+    </div>
+
+    <!-- 진단 이력 대시보드 -->
+    <div id="dashboardModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="진단 이력 대시보드">
+      <div class="modal-card dash-card">
+        <header class="s-head">
+          <div>
+            <h3>진단 이력</h3>
+            <div class="s-sub">세션·대상별 보안 진단 결과 요약</div>
+          </div>
+          <button id="dashboardClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
+        </header>
+        <div id="dashBody" class="dash-body"></div>
       </div>
     </div>
 
