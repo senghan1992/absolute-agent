@@ -909,33 +909,41 @@ function resultsTabActive() {
 function reportStats(docs) {
   const sev = { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 };
   const ver = { "실증": 0, "징후": 0, "가정": 0 };
-  let roots = 0;
-  let remarks = 0;
+  const roots = []; // { sev, ver } — 루트별 증거 기반 위험도 산정용
+  let cur = null;
   for (const d of docs) {
-    const text = (d.text || "");
-    for (const raw of text.split(/\r?\n/)) {
+    for (const raw of (d.text || "").split(/\r?\n/)) {
       const line = raw.trim();
       if (/^#{1,4}\s*루트\s*\d+/.test(line)) {
-        roots++;
         const m = line.match(/\[(치명|높음|중간|낮음)\]/);
-        const key = m ? m[1] : line.match(/(치명|높음|중간|낮음)/)?.[1];
-        if (key && sev[key] != null) sev[key]++;
+        const key = m ? m[1] : (line.match(/(치명|높음|중간|낮음)/) || [])[1];
+        const sk = sev[key] != null ? key : "낮음";
+        sev[sk]++;
+        cur = { sev: sk, ver: "가정" };
+        roots.push(cur);
         continue;
       }
+      // 검증(실측/확인/재현) 라인의 [실증]/[징후]/[가정] 을 해당 루트의 증거 상태로 반영.
       const vm = line.match(/\[(실증|징후|가정)\]/);
-      if (vm && ver[vm[1]] != null) ver[vm[1]]++;
-      if (/^#{1,4}\s*(개선|보완|권고|P[0-3])/.test(line)) remarks++;
+      if (vm) {
+        if (/검증|실측|확인|재현/.test(line) && cur) cur.ver = vm[1];
+        ver[vm[1]]++;
+      }
     }
   }
-  const score = sev["치명"] * 4 + sev["높음"] * 3 + sev["중간"] * 2 + sev["낮음"] * 1;
+  // 등급 = 루트별 (위험도 가중치 × 증거 가중치) 평균. 증거가 강할수록 가까이 인정된다.
+  const vw = { "실증": 1.0, "징후": 0.6, "가정": 0.35 };
+  const sw = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
+  const m = roots.length;
+  const score = m ? roots.reduce((a, r) => a + sw[r.sev] * (vw[r.ver] || 0.35), 0) / m : 0;
   const grade =
-    roots === 0 ? { letter: "·", label: "분석 전", cls: "g-none" }
-      : score >= 10 ? { letter: "F", label: "심각", cls: "g-f" }
-      : score >= 7 ? { letter: "D", label: "위험", cls: "g-d" }
-      : score >= 4 ? { letter: "C", label: "보통", cls: "g-c" }
-      : score >= 2 ? { letter: "B", label: "양호", cls: "g-b" }
+    m === 0 ? { letter: "·", label: "분석 전", cls: "g-none" }
+      : score >= 3.3 ? { letter: "F", label: "심각", cls: "g-f" }
+      : score >= 2.7 ? { letter: "D", label: "위험", cls: "g-d" }
+      : score >= 2.0 ? { letter: "C", label: "보통", cls: "g-c" }
+      : score >= 1.3 ? { letter: "B", label: "양호", cls: "g-b" }
       : { letter: "A", label: "안전", cls: "g-a" };
-  return { roots, sev, ver, score, grade, remarks };
+  return { roots: m, sev, ver, score, grade };
 }
 function renderReportSummary(s, docs) {
   const top = $("reportSummary");
@@ -949,7 +957,7 @@ function renderReportSummary(s, docs) {
     <div class="rs-card">
       <div class="rs-grade ${st.grade.cls}"><span class="rs-letter">${st.grade.letter}</span><div class="rs-grade-txt"><b>${st.grade.label}</b><span>위험도 등급</span></div></div>
       <div class="rs-mid">
-        <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴</div>
+        <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴${isDiag ? " · 실측 증거 반영 등급" : ""}</div>
         <div class="rs-chips">
           ${sevChip("치명", st.sev["치명"], "c-crit")}
           ${sevChip("높음", st.sev["높음"], "c-high")}
@@ -963,8 +971,57 @@ function renderReportSummary(s, docs) {
         <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 징후</span>
         <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 가정</span>
       </div>
+      <div class="rs-actions">
+        <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
+        <button id="rsExport" class="rs-btn primary" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
+        <span id="rsExportStatus" class="rs-export-status"></span>
+      </div>
     </div>`;
   top.classList.remove("hidden");
+  const exp = $("rsExport");
+  const cpy = $("rsCopy");
+  if (exp) exp.onclick = async () => await exportReport(s);
+  if (cpy) cpy.onclick = async () => await copyReport(s);
+}
+
+// ── 보고서 내보내기/복사 ─────────────────────────────────────────────────────
+function reportMarkdown(s) {
+  return resultDocs(s).map((d) => d.text).join("\n\n");
+}
+async function exportReport(s) {
+  const btn = $("rsExport"), st = $("rsExportStatus");
+  if (!btn || !st) return;
+  const name = ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
+  btn.disabled = true; st.textContent = "저장 중…";
+  try {
+    const path = await invoke("write_report", { name, content: reportMarkdown(s) });
+    st.textContent = "💾 " + path;
+    st.className = "rs-export-status ok";
+  } catch (e) {
+    st.textContent = "저장 실패: " + e;
+    st.className = "rs-export-status err";
+  } finally {
+    btn.disabled = false;
+  }
+}
+async function copyReport(s) {
+  const st = $("rsExportStatus");
+  const md = reportMarkdown(s);
+  const fallbackDone = () => { if (st) { st.textContent = "복사됨"; st.className = "rs-export-status ok"; } };
+  try {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      await navigator.clipboard.writeText(md);
+      fallbackDone();
+    } else {
+      // WebView/구버전 폴백 — textarea 를 임시로 만들어 execCommand
+      const ta = document.createElement("textarea");
+      ta.value = md; document.body.appendChild(ta); ta.select();
+      document.execCommand("copy"); document.body.removeChild(ta);
+      fallbackDone();
+    }
+  } catch (e) {
+    if (st) { st.textContent = "복사 실패"; st.className = "rs-export-status err"; }
+  }
 }
 
 function renderResults() {

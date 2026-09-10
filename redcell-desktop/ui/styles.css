@@ -363,6 +363,23 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .rs-vchip.v-proof b { color: #7fe0a9; }
 .rs-vchip.v-sig b { color: #ffd073; }
 .rs-vchip.v-assume b { color: var(--muted); }
+.rs-actions { flex: none; display: flex; flex-direction: column; gap: 6px; justify-content: center; align-items: flex-end; }
+.rs-btn {
+  font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 999px; padding: 5px 13px;
+  background: var(--surface-3); color: var(--muted); transition: all 0.13s; white-space: nowrap;
+}
+.rs-btn:hover { color: var(--text); border-color: var(--faint); background: var(--elev); }
+.rs-btn.primary {
+  background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 80%, #fff 20%), var(--accent));
+  border-color: transparent; color: var(--on-accent);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.22), 0 3px 12px color-mix(in srgb, var(--accent) 30%, transparent);
+}
+.rs-btn.primary:hover { filter: brightness(1.07); }
+.rs-btn:disabled { opacity: 0.55; cursor: wait; }
+.rs-export-status { font-size: 10.5px; color: var(--faint); max-width: 220px; line-height: 1.3; word-break: break-all; text-align: right; }
+.rs-export-status.ok { color: #7fe0a9; }
+.rs-export-status.err { color: var(--brand-fg); }
 .md-card { flex: 0 0 auto; background: var(--elev); border: 1px solid var(--line-2); border-radius: 12px; overflow: hidden; }
 .md-card-head { display: flex; align-items: center; gap: 8px; padding: 8px 14px; border-bottom: 1px solid var(--line-2); color: var(--faint); font-size: 11px; }
 .md-card-seq { font-family: var(--mono); color: var(--muted); }

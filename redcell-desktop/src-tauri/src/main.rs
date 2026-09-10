@@ -1396,6 +1396,53 @@ fn auth_ensure(app: AppHandle, host: String) -> Result<AuthEnsureResult, String>
     })
 }
 
+/// 진단/정리 리포트(MD)를 앱 데이터 폴더의 reports/ 에 저장하고 절대 경로를 돌려준다.
+/// 파일명은 사용자 제공 이름을 위생 처리해 경로 주입·잘못된 문자를 막는다.
+#[tauri::command]
+fn write_report(app: AppHandle, name: String, content: String) -> Result<String, String> {
+    let dir = root(&app).join("reports");
+    fs::create_dir_all(&dir).map_err(|e| format!("보고서 폴더 생성 실패: {e}"))?;
+    let base = name.trim();
+    let base = if base.is_empty() {
+        "report".to_string()
+    } else {
+        sanitize_filename(base)
+    };
+    let file = dir.join(format!(
+        "{}-{}.md",
+        Utc::now().format("%Y%m%d-%H%M%S"),
+        base
+    ));
+    fs::write(&file, content).map_err(|e| format!("보고서 저장 실패: {e}"))?;
+    Ok(file.to_string_lossy().into_owned())
+}
+
+/// 파일명 위생 처리: 경로 구분자와 이상한 문자가 섞이지 않게 알파벳·숫자·한글·공백만 남긴다.
+fn sanitize_filename(raw: &str) -> String {
+    let mut out = String::new();
+    let mut prev_space = false;
+    for c in raw.trim().chars() {
+        let ok = c.is_alphanumeric() || c.is_whitespace() || matches!(c, '-' | '_');
+        if ok && c.is_whitespace() {
+            if !prev_space {
+                out.push(' ');
+                prev_space = true;
+            }
+            continue;
+        }
+        if ok {
+            out.push(c);
+            prev_space = false;
+        }
+    }
+    let v: String = out.chars().take(80).collect();
+    if v.trim().is_empty() {
+        "report".into()
+    } else {
+        v.trim().to_string()
+    }
+}
+
 /// host 를 DNS 해석해 나온 IP 를 인가 목록에 추가한다. 반환: (새로 추가한 IP, 이미 있던 IP).
 fn main() {
     tauri::Builder::default()
@@ -1417,7 +1464,8 @@ fn main() {
             remove_auth,
             auth_ensure,
             get_providers,
-            test_provider
+            test_provider,
+            write_report
         ])
         .run(tauri::generate_context!())
         .expect("RedCell Desktop 실행 중 오류");
