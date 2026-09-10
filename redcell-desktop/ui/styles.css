@@ -250,30 +250,33 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 #mainPanel { border-right: 1px solid var(--line); background: var(--surface); }
 #agentPanel { background: linear-gradient(180deg, var(--surface-2), var(--surface)); }
 
-/* ── 세션 헤더 ── */
-.session-header { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 12px; padding: 12px 16px; border-bottom: 1px solid var(--line); }
-.sh-name { background: transparent; border: none; color: var(--text); font-size: 15.5px; font-weight: 650; padding: 3px 0; outline: none; width: clamp(120px, 14vw, 190px); min-width: 120px; letter-spacing: -0.2px; }
+/* ── 세션 헤더: 2행 명령바 (1행 대상 지정 · 2행 작업 선택) ── */
+.session-header {
+  display: flex; flex-direction: column; gap: 10px; padding: 12px 16px 13px;
+  border-bottom: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--sheen), transparent), var(--surface);
+}
+.sh-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.sh-target-row { row-gap: 8px; }
+.sh-action-row {
+  gap: 12px; padding: 9px 12px; border-radius: 12px;
+  background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
+  border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line-2));
+}
+.sh-name { background: transparent; border: none; color: var(--text); font-size: 15.5px; font-weight: 650; padding: 3px 0; outline: none; width: clamp(120px, 14vw, 200px); min-width: 120px; letter-spacing: -0.2px; }
 .sh-name::placeholder { color: var(--faint); }
-.sh-target { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 10px; padding: 4px 10px; flex: 1 1 340px; min-width: 240px; max-width: 640px; }
+.sh-target { display: flex; align-items: center; gap: 7px; background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 11px; padding: 5px 11px; flex: 1 1 340px; min-width: 260px; max-width: 680px; transition: border-color 0.15s, box-shadow 0.15s; }
+.sh-target:focus-within { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-2)); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 14%, transparent); }
+.tgt-label { font-size: 10.5px; font-weight: 800; color: var(--accent-2-fg); letter-spacing: 0.5px; background: color-mix(in srgb, var(--accent-2) 13%, transparent); border: 1px solid color-mix(in srgb, var(--accent-2) 30%, transparent); padding: 2px 7px; border-radius: 6px; flex: none; }
 .tgt-ico { color: var(--accent-2-fg); display: grid; place-items: center; }
 .tgt-ico .ic { width: 14px; height: 14px; }
 .tgt-sep { color: var(--faint); }
 .sh-input { background: transparent; border: none; color: var(--text); padding: 4px; font-size: 12.5px; outline: none; font-family: var(--mono); min-width: 0; flex: 0 1 auto; }
 .sh-input::placeholder { color: var(--faint); }
-.sh-host { width: 118px; }
+.sh-host { flex: 1 1 auto; width: auto; }
 .sh-port { width: 50px; }
-.sh-provider { font-family: var(--sans); color: var(--muted); background: transparent; border-left: 1px solid var(--line-2); border: 1px solid var(--line-2); border-radius: 8px; margin-left: 4px; padding: 4px 6px; cursor: pointer; font-size: 12px; max-width: 150px; }
+.sh-provider { font-family: var(--sans); color: var(--muted); background: transparent; border: 1px solid var(--line-2); border-radius: 9px; padding: 5px 7px; cursor: pointer; font-size: 12px; max-width: 150px; }
 .sh-provider option { background: var(--elev); color: var(--text); }
-
-/* 서비스 진단 모드 토글 */
-.diag-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; padding: 4px 10px; border: 1px solid var(--line-2); border-radius: 999px; background: var(--surface-2); transition: all 0.15s; white-space: nowrap; }
-.diag-toggle input { position: absolute; opacity: 0; pointer-events: none; } /* label 클릭이 토글 — 스위치/텍스트 아무 곳이나 */
-.diag-toggle:active .diag-sw::after { width: 13px; }
-.diag-sw { width: 26px; height: 15px; border-radius: 999px; background: var(--line-2); position: relative; flex: none; transition: background 0.15s; }
-.diag-sw::after { content: ""; position: absolute; top: 2px; left: 2px; width: 11px; height: 11px; border-radius: 50%; background: #fff; transition: transform 0.15s; }
-.diag-toggle input:checked + .diag-sw { background: var(--accent-2); }
-.diag-toggle input:checked + .diag-sw::after { transform: translateX(11px); }
-.diag-toggle:has(input:checked) { color: var(--text); border-color: color-mix(in srgb, var(--accent-2) 55%, var(--line-2)); }
 .session-header .badge { margin-left: auto; }
 .badge { padding: 4px 11px; border-radius: 20px; font-size: 10.5px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.6px; border: 1px solid transparent; }
 .badge-idle { background: var(--surface-3); color: var(--muted); border-color: var(--line-2); }
@@ -281,6 +284,24 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .badge-done { background: color-mix(in srgb, var(--ok) 13%, transparent); color: var(--ok-fg); border-color: color-mix(in srgb, var(--ok) 32%, transparent); }
 .badge-error { background: color-mix(in srgb, var(--brand) 13%, transparent); color: var(--brand-fg); border-color: color-mix(in srgb, var(--brand) 32%, transparent); }
 .badge-stopped { background: var(--surface-3); color: var(--warn-fg); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+
+/* 작업 선택: 진단 시작(기본) · 목표 실행(보조) */
+.sh-action-hint { font-size: 11px; color: var(--faint); font-weight: 700; letter-spacing: 0.3px; }
+.btn-cmd { flex: none; flex-direction: column; gap: 1px; padding: 8px 20px; border-radius: 11px; min-width: 138px; }
+.btn-cmd .cmd-txt { font-size: 13.5px; font-weight: 800; letter-spacing: -0.2px; line-height: 1; }
+.btn-cmd .ic { width: 17px; height: 17px; }
+.btn-cmd-ghost { background: transparent; box-shadow: none; border: 1px solid var(--line-2); color: var(--text); }
+.btn-cmd-ghost:hover { background: var(--surface-3); border-color: var(--faint); }
+.btn-cmd-ghost .ic { stroke: var(--accent-2-fg); }
+.btn-cmd-ghost .cmd-txt { color: var(--text); }
+/* 실행 중/중지 상태에서는 고스트 숨김 표시를 선명한 상태 색으로 교체 */
+.btn-cmd-ghost.btn-run { background: linear-gradient(180deg, color-mix(in srgb, var(--ok) 80%, #fff 20%), var(--ok)); border-color: transparent; color: var(--on-run); box-shadow: inset 0 1px 0 rgba(255,255,255,.28), 0 4px 14px color-mix(in srgb, var(--ok) 28%, transparent); }
+.btn-cmd-ghost.btn-stop { background: color-mix(in srgb, var(--brand) 12%, var(--surface-2)); border-color: color-mix(in srgb, var(--brand) 42%, transparent); color: var(--brand-fg); box-shadow: none; }
+.btn-cmd-ghost.btn-run .cmd-txt, .btn-cmd-ghost.btn-run .ic { color: var(--on-run); stroke: var(--on-run); fill: var(--on-run); }
+.btn-cmd-ghost.btn-stop .cmd-txt, .btn-cmd-ghost.btn-stop .ic { color: var(--brand-fg); stroke: var(--brand-fg); fill: var(--brand-fg); }
+.cmd-div { color: var(--faint); font-size: 11.5px; font-weight: 700; }
+.cmd-note { font-size: 11px; color: var(--muted); margin-left: auto; line-height: 1.45; max-width: 360px; }
+.cmd-note b { color: var(--text); font-weight: 700; }
 
 /* ── 진행 리본 ── */
 .ribbon { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--sheen), transparent); }

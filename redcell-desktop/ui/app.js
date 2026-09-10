@@ -105,8 +105,6 @@ function renderActive() {
       ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
       : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
   }
-  const dc = $("diagChk");
-  if (dc) dc.checked = !!(s && s.diag);
   setBadge(s.status);
 
   renderCapture(s);
@@ -127,11 +125,11 @@ function setBadge(status) {
   const btn = $("runBtn");
   btn.disabled = false;
   btn.dataset.mode = running ? "stop" : "run";
-  btn.classList.toggle("btn-run", !running);
   btn.classList.toggle("btn-stop", running);
-  btn.title = running ? "실행 중지" : "prime-agent 실행 — URL 을 위에, 지시는 오른쪽 패널에서";
+  btn.classList.toggle("btn-run", running);
+  btn.title = running ? "실행 중지" : "목표 실행 — 오른쪽 패널에 지시한 작업 수행";
   $("runIcon").innerHTML = '<use href="#' + (running ? "i-stop" : "i-play") + '"/>';
-  $("runLabel").textContent = running ? "중지" : status === "idle" ? "실행" : "재실행";
+  $("runLabel").textContent = running ? "중지" : status === "idle" ? "목표 실행" : "재실행";
   const state = $("agentState");
   state.textContent = running ? "작동 중" : (status === "done" ? "완료" : status === "error" ? "오류" : status === "stopped" ? "중지됨" : "대기");
   state.className = "agent-state" + (running ? " busy" : "");
@@ -518,7 +516,7 @@ async function persistHeader(overrides = {}) {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: ($("shProvider") && $("shProvider").value && $("shProvider").value !== "mock" ? $("shProvider").value : "") || (s.provider !== "mock" ? s.provider : "") || (settings.default_provider !== "mock" ? settings.default_provider : "") || "",
-    diag: !!($("diagChk") && $("diagChk").checked) || !!s.diag,
+    diag: !!s.diag,
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
   };
@@ -645,17 +643,16 @@ async function sendChat() {
 function setDiagPlaceholder() {
   const ci = $("chatInput");
   if (!ci) return;
-  ci.placeholder = ($("diagChk") && $("diagChk").checked)
+  const s = cur();
+  ci.placeholder = (s && s.diag)
     ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
     : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
 }
 
-// ── [진단] 원클릭: URL 만으로 자동 보안 진단 (취약점 + 대비 시나리오) ──────────
+// ── [진단 시작] 원클릭: URL 만으로 자동 보안 진단 (취약점 + 대비 시나리오) ──────
 async function runDiagnose() {
   const s = cur(); if (!s) return;
   if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 host/URL 을 입력하세요."); return; }
-  const dc = $("diagChk");
-  if (dc) dc.checked = true;
   s.diag = true;
   setDiagPlaceholder();
   if (!activeProvider()) { showProviderModal(); return; }
@@ -1814,13 +1811,6 @@ function wire() {
     sendChat();
   });
   ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
-  const diagChk = $("diagChk");
-  if (diagChk) diagChk.addEventListener("change", () => {
-    const s = cur();
-    if (s) s.diag = diagChk.checked;
-    persistHeader();
-    setDiagPlaceholder();
-  });
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
   const rb = $("resultsBody");

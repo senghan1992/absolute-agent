@@ -67,25 +67,37 @@
     <main id="workspace">
       <!-- 왼쪽: 메인 캡처 패널 -->
       <section id="mainPanel" class="panel">
-        <!-- 세션 헤더 -->
+        <!-- 세션 헤더: 1행 대상 지정 · 2행 작업 선택 (진단이 기본 액션) -->
         <div class="session-header">
-          <input id="shName" class="sh-name" placeholder="세션 이름" spellcheck="false" />
-          <div class="sh-target">
-            <span class="tgt-ico"><svg class="ic"><use href="#i-crosshair"/></svg></span>
-            <input id="shHost" class="sh-input" placeholder="host / URL — 실행 시 자동 인가" spellcheck="false" />
-            <span class="tgt-sep">:</span>
-            <input id="shPort" class="sh-input sh-port" placeholder="port" spellcheck="false" />
+          <div class="sh-row sh-target-row">
+            <input id="shName" class="sh-name" placeholder="세션 이름" spellcheck="false" />
+            <div class="sh-target">
+              <span class="tgt-ico"><svg class="ic"><use href="#i-crosshair"/></svg></span>
+              <span class="tgt-label">대상</span>
+              <input id="shHost" class="sh-input sh-host" placeholder="host / URL — 실행 시 인가 자동 추가" spellcheck="false" />
+              <span class="tgt-sep">:</span>
+              <input id="shPort" class="sh-input sh-port" placeholder="port" spellcheck="false" />
+            </div>
+            <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더 (custom 등 — ⚙ 설정에서 키/모델 관리)" aria-label="LLM 프로바이더">
+              <option value="">— provider 선택 —</option>
+            </select>
+            <span id="statusBadge" class="badge badge-idle">대기</span>
           </div>
-          <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더 (custom 등 — ⚙ 설정에서 키/모델 관리)" aria-label="LLM 프로바이더">
-            <option value="">— provider 선택 —</option>
-          </select>
-          <label class="diag-toggle" title="서비스 설명을 넣고 공격 포인트·개선 권고를 받는 진단 모드">
-            <input type="checkbox" id="diagChk" />
-            <span class="diag-sw"></span>서비스 진단
-          </label>
-          <span id="statusBadge" class="badge badge-idle">idle</span>
-          <button id="diagBtn" class="btn btn-diag" title="URL 만으로 자동 보안 진단 — 취약점 + 대비 시나리오 리포트 (실측 정찰 포함)"><svg class="ic"><use href="#i-crosshair"/></svg>진단</button>
-          <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
+          <div class="sh-row sh-action-row">
+            <span class="sh-action-hint">원하는 작업을 하나 선택하세요</span>
+            <button id="diagBtn" class="btn btn-diag btn-cmd">
+              <svg class="ic"><use href="#i-crosshair"/></svg>
+              <span class="cmd-txt">진단 시작</span>
+            </button>
+            <span class="cmd-div">또는</span>
+            <button id="runBtn" class="btn btn-cmd btn-cmd-ghost" data-mode="run" title="현재 목표로 에이전트 엔진 실행·중지">
+              <svg class="ic" id="runIcon"><use href="#i-play"/></svg>
+              <span class="cmd-txt" id="runLabel">목표 실행</span>
+            </button>
+            <span class="cmd-note">
+              <b>진단 시작</b> = 대상 주소만 넣으면 보안 진단 리포트 자동 생성 · <b>목표 실행</b> = 오른쪽 에이전트에 지시한 작업 수행
+            </span>
+          </div>
         </div>
 
         <!-- 진행 리본은 pi 셸에 맞게 제거(해킹 단계 스테퍼/취약점 메트릭은 prime 모드에서 무의미) -->
