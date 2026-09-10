@@ -43,6 +43,11 @@
         <symbol id="i-eye-off" viewBox="0 0 24 24"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"/><circle cx="12" cy="12" r="3"/><path d="M4 4l16 16"/></symbol>
         <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.6"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.6"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.6"/></symbol>
         <symbol id="i-file" viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6z"/><path d="M14 3v4h4"/></symbol>
+        <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></symbol>
+        <symbol id="i-key" viewBox="0 0 24 24"><circle cx="8" cy="14" r="3.5"/><path d="M10.5 11.5 20 2M17 5l3 3M14 8l2 2"/></symbol>
+        <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M5.5 5.5l13 13"/></symbol>
+        <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
+        <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.01"/></symbol>
       </defs>
     </svg>
 
@@ -59,6 +64,7 @@
         </button>
         <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>세션</button>
         <button id="dashboardBtn" class="btn btn-icon" title="진단 이력 대시보드" aria-label="진단 이력 대시보드"><svg class="ic"><use href="#i-grid"/></svg></button>
+        <button id="auditBtn" class="btn btn-icon" title="감사 로그" aria-label="감사 로그 — 전체 보안 활동 이력"><svg class="ic"><use href="#i-clock"/></svg></button>
         <button id="scopeBtn" class="btn btn-icon" title="인가 대상 관리" aria-label="인가 대상 관리"><svg class="ic"><use href="#i-shield"/></svg></button>
         <button id="settingsBtn" class="btn btn-icon" title="설정" aria-label="설정"><svg class="ic"><use href="#i-gear"/></svg></button>
       </div>
@@ -179,6 +185,34 @@
           <button id="dashboardClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
         </header>
         <div id="dashBody" class="dash-body"></div>
+      </div>
+    </div>
+
+    <!-- 감사 로그: 포트폴리오 전체 보안 활동 이력 -->
+    <div id="auditModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="감사 로그">
+      <div class="modal-card audit-card">
+        <header class="s-head">
+          <div>
+            <h3>감사 로그</h3>
+            <div class="s-sub">포트폴리오 전체 보안 활동 이력 — 인가 · 차단 · 발견 · 진단</div>
+          </div>
+          <button id="auditClose" class="btn btn-icon" title="닫기" aria-label="감사 로그 닫기"><svg class="ic"><use href="#i-x"/></svg></button>
+        </header>
+        <div class="audit-summary" id="auditSummary">
+          <div class="as-tile"><b id="auAll">0</b><span>전체 이벤트</span></div>
+          <div class="as-tile ok"><b id="auAuth">0</b><span>인가</span></div>
+          <div class="as-tile block"><b id="auBlock">0</b><span>차단</span></div>
+          <div class="as-tile find"><b id="auFind">0</b><span>발견</span></div>
+          <div class="as-tile diag"><b id="auDiag">0</b><span>진단 완료</span></div>
+        </div>
+        <div class="audit-filters" id="auditFilters" role="tablist" aria-label="감사 로그 필터">
+          <button class="af-chip active" data-f="all">전체</button>
+          <button class="af-chip" data-f="auth">인가</button>
+          <button class="af-chip" data-f="block">차단</button>
+          <button class="af-chip" data-f="finding">발견</button>
+          <button class="af-chip" data-f="diag">진단</button>
+        </div>
+        <div id="auditList" class="audit-list"></div>
       </div>
     </div>
 

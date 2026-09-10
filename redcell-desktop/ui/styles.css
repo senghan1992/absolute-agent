@@ -946,3 +946,56 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .pi-find { color: #d29922; margin: 4px 0; }
 .pi-caret { display: inline-block; width: 7px; height: 14px; background: #58a6ff; vertical-align: -2px; animation: pi-blink 1s steps(1) infinite; border-radius: 1px; }
 @keyframes pi-blink { 50% { opacity: 0; } }
+
+/* ── 감사 로그: 포트폴리오 보안 활동 이력 ──────────────────────────────── */
+.audit-card { width: min(760px, 94vw); max-height: 84vh; display: flex; flex-direction: column; }
+.audit-summary { display: flex; gap: 10px; flex-wrap: wrap; padding: 4px 4px 12px; }
+.as-tile { flex: 1 1 0; min-width: 96px; display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 10px 6px; border-radius: 12px; background: var(--surface-3); border: 1px solid var(--line-2); }
+.as-tile b { font-family: var(--mono); font-size: 22px; line-height: 1; }
+.as-tile span { font-size: 10.5px; font-weight: 700; color: var(--faint); letter-spacing: 0.4px; }
+.as-tile.ok b { color: var(--ok-fg); } .as-tile.block b { color: var(--brand-fg); }
+.as-tile.find b { color: var(--sev-high-fg); } .as-tile.diag b { color: var(--accent-2-fg); }
+.as-tile.ok { border-color: color-mix(in srgb, var(--ok) 35%, var(--line-2)); background: color-mix(in srgb, var(--ok) 9%, var(--surface-3)); }
+.as-tile.block { border-color: color-mix(in srgb, var(--brand) 35%, var(--line-2)); background: color-mix(in srgb, var(--brand) 9%, var(--surface-3)); }
+.as-tile.find { border-color: color-mix(in srgb, var(--sev-high) 35%, var(--line-2)); background: color-mix(in srgb, var(--sev-high) 9%, var(--surface-3)); }
+.as-tile.diag { border-color: color-mix(in srgb, var(--accent-2) 35%, var(--line-2)); background: color-mix(in srgb, var(--accent-2) 9%, var(--surface-3)); }
+.audit-filters { display: flex; gap: 6px; flex-wrap: wrap; padding: 2px 0 12px; }
+.af-chip { border: 1px solid var(--line-2); background: var(--surface-3); color: var(--muted); padding: 6px 14px; border-radius: 999px; font-size: 12px; font-weight: 600; cursor: pointer; transition: all 0.13s; }
+.af-chip:hover { color: var(--text); border-color: var(--faint); }
+.af-chip.active { background: linear-gradient(180deg, color-mix(in srgb, var(--accent) 82%, #fff 18%), var(--accent)); color: var(--on-accent); border-color: transparent; box-shadow: 0 3px 10px color-mix(in srgb, var(--accent) 28%, transparent); }
+.audit-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; padding: 2px; }
+.au-row { display: flex; align-items: flex-start; gap: 11px; padding: 10px 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line-2); }
+.au-ic { flex: none; width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--surface-3); border: 1px solid var(--line-2); }
+.au-ic .ic { width: 15px; height: 15px; }
+.au-main { flex: 1 1 auto; min-width: 0; }
+.au-title { font-size: 12.5px; color: var(--text); line-height: 1.45; word-break: break-word; }
+.au-badge { display: inline-block; font-size: 10px; font-weight: 800; letter-spacing: 0.3px; padding: 2px 7px; border-radius: 6px; margin-right: 6px; vertical-align: 1px; }
+.au-meta { font-size: 11px; color: var(--faint); margin-top: 4px; font-family: var(--mono); }
+.au-tgt { color: var(--accent-2-fg); }
+.au-time { flex: none; font-family: var(--mono); font-size: 10.5px; color: var(--faint); margin-top: 3px; }
+.au-empty { padding: 34px 16px; text-align: center; color: var(--muted); font-size: 12.5px; border: 1px dashed var(--line-2); border-radius: 12px; }
+/* 감사 유형별 착색 */
+.au-row.au-ok { border-color: color-mix(in srgb, var(--ok) 32%, var(--line-2)); }
+.au-ok .au-ic { color: var(--ok-fg); background: color-mix(in srgb, var(--ok) 12%, var(--surface-3)); }
+.au-ok .au-badge { color: var(--ok-fg); background: color-mix(in srgb, var(--ok) 14%, transparent); }
+.au-row.au-block { border-color: color-mix(in srgb, var(--brand) 36%, var(--line-2)); background: color-mix(in srgb, var(--brand) 5%, var(--surface-2)); }
+.au-block .au-ic { color: var(--brand-fg); background: color-mix(in srgb, var(--brand) 13%, var(--surface-3)); }
+.au-block .au-badge { color: var(--brand-fg); background: color-mix(in srgb, var(--brand) 15%, transparent); }
+.au-row.au-diag { border-color: color-mix(in srgb, var(--accent-2) 34%, var(--line-2)); }
+.au-diag .au-ic { color: var(--accent-2-fg); background: color-mix(in srgb, var(--accent-2) 13%, var(--surface-3)); }
+.au-diag .au-badge { color: var(--accent-2-fg); background: color-mix(in srgb, var(--accent-2) 15%, transparent); }
+.au-row.au-critical { border-color: color-mix(in srgb, var(--sev-critical) 40%, var(--line-2)); background: color-mix(in srgb, var(--sev-critical) 6%, var(--surface-2)); }
+.au-critical .au-ic { color: var(--sev-critical-fg); background: color-mix(in srgb, var(--sev-critical) 14%, var(--surface-3)); }
+.au-critical .au-badge { color: var(--sev-critical-fg); background: color-mix(in srgb, var(--sev-critical) 16%, transparent); }
+.au-row.au-high { border-color: color-mix(in srgb, var(--sev-high) 38%, var(--line-2)); }
+.au-high .au-ic { color: var(--sev-high-fg); background: color-mix(in srgb, var(--sev-high) 13%, var(--surface-3)); }
+.au-high .au-badge { color: var(--sev-high-fg); background: color-mix(in srgb, var(--sev-high) 15%, transparent); }
+.au-row.au-medium { border-color: color-mix(in srgb, var(--sev-medium) 36%, var(--line-2)); }
+.au-medium .au-ic { color: var(--sev-medium-fg); background: color-mix(in srgb, var(--sev-medium) 13%, var(--surface-3)); }
+.au-medium .au-badge { color: var(--sev-medium-fg); background: color-mix(in srgb, var(--sev-medium) 15%, transparent); }
+.au-row.au-low { border-color: color-mix(in srgb, var(--sev-low) 34%, var(--line-2)); }
+.au-low .au-ic { color: var(--sev-low-fg); background: color-mix(in srgb, var(--sev-low) 13%, var(--surface-3)); }
+.au-low .au-badge { color: var(--sev-low-fg); background: color-mix(in srgb, var(--sev-low) 15%, transparent); }
+.au-row.au-info { border-color: var(--line-2); }
+.au-info .au-ic { color: var(--muted); }
+.au-info .au-badge { color: var(--muted); background: var(--surface-3); }

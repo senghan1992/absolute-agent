@@ -1763,6 +1763,66 @@ function renderDashboard() {
 }
 function openDashboard() { renderDashboard(); $("dashboardModal").classList.remove("hidden"); }
 
+// ── 감사 로그: 포트폴리오 전체 보안 활동 이력 ────────────────────────────────
+let auditFilter = "all";
+function fmtAuditTs(ts) {
+  if (ts == null) return "—";
+  try {
+    const d = new Date(ts);
+    const p = (n) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  } catch { return "—"; }
+}
+// 세션 이벤트에서 보안 감사 대상(인가·차단·발견) + 진단 완료 기록을 뽑는다.
+function auditEntries() {
+  const out = [];
+  for (const s of sessions) {
+    const target = `${s.host || ""}${s.port ? ":" + s.port : ""}` || "—";
+    const evs = eventsOf(s);
+    for (const e of evs) {
+      if (e.type === "authorized") {
+        out.push({ kind: "auth", sev: "ok", desc: e.text || `대상 ${target} 인가 확인`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
+      } else if (e.type === "blocked") {
+        out.push({ kind: "block", sev: "block", desc: e.text || `${e.tool || "액션"} — 인가 범위 밖 액션 차단`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
+      } else if (e.type === "finding" && e.finding) {
+        out.push({ kind: "finding", sev: e.finding.severity || "info", desc: e.finding.title, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
+      }
+    }
+    const doneEv = evs.find((x) => x.type === "done");
+    if (s.diag && (s.status === "done" || doneEv)) {
+      out.push({ kind: "diag", sev: "diag", desc: `보안 진단 완료 — ${target}`, target, session: s.name || "(무제)", ts: (doneEv && doneEv._ts != null ? doneEv._ts : s.updated_at) || s.created_at, id: s.id });
+    }
+  }
+  return out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
+}
+const AUDIT_ICON = { auth: "i-key", block: "i-ban", finding: "i-alert", diag: "i-check" };
+function renderAudit() {
+  const entries = auditEntries();
+  const cnt = { all: entries.length, auth: 0, block: 0, finding: 0, diag: 0 };
+  for (const e of entries) cnt[e.kind]++;
+  $("auAll").textContent = cnt.all; $("auAuth").textContent = cnt.auth;
+  $("auBlock").textContent = cnt.block; $("auFind").textContent = cnt.finding; $("auDiag").textContent = cnt.diag;
+  document.querySelectorAll("#auditFilters .af-chip").forEach((c) => c.classList.toggle("active", c.dataset.f === auditFilter));
+  const list = entries.filter((e) => auditFilter === "all" || e.kind === auditFilter);
+  const body = $("auditList");
+  if (!list.length) {
+    body.innerHTML = `<div class="audit-empty">아직 감사 기록이 없습니다 — 진단을 실행하면 인가·발견·차단 이력이 쌓입니다.</div>`;
+    return;
+  }
+  body.innerHTML = list.map((e) => {
+    const icon = AUDIT_ICON[e.kind] || "i-file";
+    return `<div class="au-row au-${e.sev}">
+      <span class="au-ic"><svg class="ic"><use href="#${icon}"/></svg></span>
+      <div class="au-main">
+        <div class="au-title"><span class="au-badge">${e.label}</span> ${esc(e.desc)}</div>
+        <div class="au-meta"><span class="au-tgt">${esc(e.target)}</span> · ${esc(e.session)}</div>
+      </div>
+      <span class="au-time">${fmtAuditTs(e.ts)}</span>
+    </div>`;
+  }).join("");
+}
+function openAudit() { renderAudit(); $("auditModal").classList.remove("hidden"); }
+
 // ── 배선 ─────────────────────────────────────────────────────────────────────
 function wire() {
   $("newSessionBtn").onclick = newSession;
@@ -1770,6 +1830,14 @@ function wire() {
   $("settingsBtn").onclick = openSettings;
   $("dashboardBtn").onclick = openDashboard;
   $("dashboardClose").onclick = () => $("dashboardModal").classList.add("hidden");
+  $("auditBtn").onclick = openAudit;
+  $("auditClose").onclick = () => $("auditModal").classList.add("hidden");
+  $("auditFilters").addEventListener("click", (e) => {
+    const chip = e.target.closest(".af-chip");
+    if (!chip) return;
+    auditFilter = chip.dataset.f;
+    renderAudit();
+  });
   $("settingsCancel").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsClose").onclick = () => $("settingsModal").classList.add("hidden");
   $("settingsSave").onclick = saveSettings;
@@ -1777,14 +1845,14 @@ function wire() {
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   wireProviderCards();
   // 모달 공통: 바깥 클릭 / Esc 로 닫기
-  ["settingsModal", "authModal", "providerModal", "dashboardModal"].forEach((id) => {
+  ["settingsModal", "authModal", "providerModal", "dashboardModal", "auditModal"].forEach((id) => {
     const m = $(id);
     if (!m) return;
     m.addEventListener("pointerdown", (e) => { if (e.target === m) m.classList.add("hidden"); });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    ["settingsModal", "authModal", "providerModal", "dashboardModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
+    ["settingsModal", "authModal", "providerModal", "dashboardModal", "auditModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
   });
   $("runBtn").onclick = onRunButton;
   $("diagBtn").onclick = runDiagnose;
