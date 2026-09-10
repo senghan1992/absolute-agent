@@ -76,7 +76,107 @@
     events: demoEvents(),
   };
 
-  const store = { sessions: [sampleSession], settings: { redcell_dir: "(preview)", auth_path: "", default_provider: "" } };
+  // ── 서비스 진단 모드 샘플: 검증 배지 + 시뮬레이션 플레이어까지 모두 넣은 리포트 ──
+  const DIAG_DEMO_REPORT = `# 서비스 진단 리포트 — 데모몰 쇼핑몰
+
+## 0. 한눈에 보기
+
+| 루트 | 위험도 | 공격 방법 | 탈취 정보 | 보완 요약 |
+|---|---|---|---|---|
+| 1. 로그인 SQL 주입 → 관리자 탈취 | [치명] | \`' OR '1'='1\` 로 인증 우회 | 관리자 세션 · 회원 개인정보 | 파라미터라이즈 쿼리 + WAF |
+| 2. 주문 조회 IDOR | [높음] | 인접 주문 id 순회 | 타인 주문·결제 정보 | 리소스 소유권 검사 |
+| 3. 세션 쿠키 보안 플래그 누락 | [낮음] | XSS 연계 시 세션 탈취 | 세션 토큰 | HttpOnly·Secure·SameSite |
+
+## 1. 진단 범위 및 가정
+
+- 기술 스택: PHP/8.1 + MySQL, nginx (설명 기반 — [가정])
+- 진단 경계: 설명 기반 판단 + 진입점 일부 실측 ([실증]), 파괴적 동작은 미수행
+
+## 2. 공격 표면 (Attack Surface)
+
+- 인증·세션: /login 폼, SESSION 쿠키
+- 입력 처리: /search?q, /api/orders/<id>
+- 데이터 흐름: 주문·회원·결제 API (/api/orders, /api/me)
+
+## 3. 창의적 공격 루트 (위험도 순)
+
+### 루트 1. 로그인 SQL 주입으로 관리자 권한 탈취 [치명]
+ 위험도: 치명
+ 진입점: /login POST 폼 (user, pass 파라미터)
+ 공격 흐름: 공격자 → /login 로그인 폼 → (SQL 주입 = 입력값으로 DB 질의를 조작) → 인증 우회 → (관리자 세션 탈취) → 전체 회원 개인정보 열람
+ 탈취 정보: 관리자 세션 토큰, 회원 이메일 주소, 비밀번호 해시, 배송지 주소
+ 공격 방법: user 값에 \`' OR '1'='1' -- \` 주입 → WHERE 절을 항상 참으로 만들어 관리자 계정으로 로그인
+ 영향: 관리자 계정 전체 장악 — 회원 개인정보·주문·결제 내역 전수 유출
+ 시뮬레이션:
+ 1. /login 의 id 입력창에 \`admin' OR '1'='1' -- \` 입력 후 로그인 클릭 → 302 리다이렉트 + Set-Cookie: SESSION=adm_9f2c… 발급
+ 2. SESSION 쿠키로 GET /admin/orders 호출 → 200 · 회원 주문 1,248건이 담긴 JSON 응답
+ 3. 응답 본문에서 이메일·배송지·카드 뒤 4자리 확인 → 전체 회원 데이터 유출 확정
+ 검증: [실증] web_fetch 로 /login 실측 — 악성 입력에 DB 오류 메시지 노출 확인, 관리자 쿠키 발급 응답 원문 확보
+ 보완: Prepared statement(PDO bindValue)로 전환하고 아이디/비번 분리 검증. 오류 메시지는 로그로만. WAF 차단 규칙 추가.
+
+### 루트 2. 주문 조회 IDOR — 인증 없는 타인 주문 열람 [높음]
+ 위험도: 높음
+ 진입점: GET /api/orders/<id> (쿠키 없이 접근 가능)
+ 공격 흐름: 공격자 → GET /api/orders/1000
+ → (IDOR = 인접 번호 조회로 접근통제 우회) → 타인 주문 응답 수신
+ → (결제 정보 노출) → 카드 정보·배송지 열람
+ 탈취 정보: 타인 주문 내역, 결제 카드 정보, 배송지 주소
+ 공격 방법: 쿠키 없이 /api/orders/1000~1003 을 순회 — 인접 id 가 서로 다른 응답을 반환하는지 확인
+ 영향: 고객 주문·개인정보 대량 노출 — 신뢰도 및 민감정보 유출
+ 시뮬레이션:
+ 1. 브라우저에서 세션 쿠키 삭제 후 GET /api/orders/1000 → 200 · 다른 고객의 주문 JSON 반환
+ 2. id 를 1001, 1002, 1003 … 으로 순회 → 매번 서로 다른 고객의 주문·카드 정보 응답
+ 3. 마지막 주문에 은행 계좌번호 포함 확인 → 결제 정보 노출 범위 확정
+ 검증: [징후] 무인증 200 이 확인되고 응답에 주문번호·주소 필드가 관찰되나, 완전한 개인정보 원문은 부분 마스킹 상태
+ 보완: 소유권 검사(현재 세션의 사용자 id 와 리소스 소유자 id 비교) 후 응답. 인증 게이트를 API 라우트에 공통 적용.
+
+### 루트 3. 세션 쿠키 보안 플래그 누락 [낮음]
+ 위험도: 낮음
+ 진입점: 로그인 응답의 Set-Cookie: SESSION=…
+ 공격 흐름: 공격자 → (XSS 또는 네트워크 도청) → 쿠키 원문 획득 → 세션 하이재킹
+ 탈취 정보: 세션 토큰
+ 공격 방법: 응답 헤더에서 Set-Cookie 검사 — HttpOnly/Secure/SameSite 플래그 유무 확인
+ 영향: XSS 나 도청과 조합될 때 세션 탈취 — 단독 위험은 낮음
+ 검증: [가정] 실측 불가 — 로그인 응답이 내부 네트워크에 있어 헤더 원문을 확보하지 못함 (다음 진단에서 확인 필요)
+ 보완: Set-Cookie 에 HttpOnly·Secure·SameSite=Lax 추가. 세션 토큰은 로테이션 정책 적용.
+
+## 4. 개선·보완 권고 (우선순위)
+
+- [P0] SQL 주입 — 위험도 [치명] · 파라미터라이즈 쿼리 전면 적용 · 검증: 루트 1 재현 요청으로 확인
+- [P1] IDOR — 위험도 [높음] · 소유권 검사 공통 미들웨어 · 검증: 순회 스크립트 재실행
+- [P2] 쿠키 플래그 — 위험도 [낮음] · 헤더 설정 · 검증: 응답 헤더 점검
+
+## 5. 실측 확인
+
+- /login 폼 존재·악성 입력 오류 노출 → [실증] (루트 1)
+- /api/orders/<id> 무인증 응답 → [징후] (루트 2) — 전체 원문은 redaction
+- 미확인: HTTPS 강제 여부, 비밀번호 정책
+`.trim();
+
+  const sampleDiagSession = {
+    id: uid(),
+    name: "데모몰-진단",
+    host: "demo.vulnlab.local",
+    port: 8080,
+    goal: "쇼핑몰 서비스 보안 진단해줘",
+    provider: "anthropic",
+    mode: "prime",
+    diag: true,
+    status: "done",
+    created_at: nowIso(),
+    updated_at: nowIso(),
+    chat: [
+      { role: "user", content: "쇼핑몰 서비스 보안 진단해줘", ts: nowIso() },
+      { role: "assistant", content: "진단 완료 — 공격 루트 3건(치명 1 · 높음 1 · 낮음 1)을 찾았습니다. 결과 탭에서 흐름·시뮬레이션·검증 상태를 확인하세요.", ts: nowIso() },
+    ],
+    events: [
+      { type: "note", text: "[sys] [model] anthropic:claude-opus-5" },
+      { type: "note", text: "[sys] 진단 모드 시작 — DIAG_METHOD 주입" },
+      { type: "text_end", text: DIAG_DEMO_REPORT },
+    ].map((e, i) => Object.assign({ _seq: i, _ts: Date.now() - 60000 + i * 2000 }, e)),
+  };
+
+  const store = { sessions: [sampleSession, sampleDiagSession], settings: { redcell_dir: "(preview)", auth_path: "", default_provider: "" } };
   const findById = (id) => store.sessions.find((s) => s.id === id);
   const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -252,7 +352,8 @@
   //   · 그 외(취약점 정찰)                     → 웹 취약점 흐름
   function simulate(session) {
     const target = { host: session.host, port: session.port };
-    const seq = API_INTENT.test(session.goal || "") ? apiSeq(session, target) : vulnSeq(session, target);
+    const isDiag = session.diag || /진단|점검해줘|개선점|보안 검토/.test(session.goal || "");
+    const seq = isDiag ? [] : (API_INTENT.test(session.goal || "") ? apiSeq(session, target) : vulnSeq(session, target));
 
     session.events = [];
     session.status = "running";
@@ -266,8 +367,14 @@
       session.updated_at = nowIso();
       emit("engagement-event", { sessionId: session.id, event: ev });
       if (ev.type === "done") {
-        session.status = "done";
         clearInterval(timer); delete timers[session.id];
+        // 진단 모드: 흐름 시뮬레이션 후 최종 리포트를 결과 탭으로 방출
+        if (isDiag) {
+          const rep = Object.assign({ _seq: session.events.length, _ts: Date.now() }, { type: "text_end", text: DIAG_DEMO_REPORT });
+          session.events.push(rep);
+          emit("engagement-event", { sessionId: session.id, event: rep });
+        }
+        session.status = "done";
         emit("engagement-status", { sessionId: session.id, status: "done" });
       }
       i++;

@@ -59,12 +59,24 @@ const METHODOLOGY = `
   결과물 파일 저장 외에 이 머신의 파일/폴더를 뒤지지 말 것. bash 로 웹 요청을 대신하지
   말 것(리다이렉트·범위 검사가 빠져 위험하다).
 - **서비스 진단 지시** ("~진단해줘", "~점검해줘", "개선점 찾아줘" 등): 서비스 보안 진단
-  리포트로 응답한다 — ① 진단 범위·가정(기술 스택 추정, [가정] 표시) ② 공격 표면
-  (인증/입력/데이터/외부 연동/배포/비즈니스 로직) ③ 창의적 공격 루트(위험도·시나리오·
-  영향·발생 가능성 — 주입류·인증/세션·IDOR·파일·레이스·캐시·스머글링·비즈니스 로직·
-  체인 공격 등) ④ 개선·보완 권고(우선순위 P0~P3 · 구체적 보완 방법 · 검증 방법)
-  ⑤ URL 이 주어지면 실측 결과. 잘 알려진 것뿐 아니라 **조합·비즈니스 로직·운영 방식의
-  루트를 창의적으로** 발굴하고, 모든 루트에 "미리 막는 방법"을 제시한다.
+  리포트로 응답한다 — ① 한눈에 보기 요약 표(루트|위험도|공격 방법|탈취 정보|보완)
+  ② 진단 범위·가정 ③ 공격 표면 ④ 창의적 공격 루트 ⑤ 보완 권고(P0~P3) ⑥ URL 있으면 실측.
+  **URL 이 주어졌으면 보고서를 쓰기 전에 반드시 passive recon 을 먼저 수행**하고 실제
+  응답·헤더·상태로 서비스 모델을 세운다(web_fetch, 비파괴 GET/HEAD 만):
+  홈페이지 헤더(보안 헤더·기술스택) · 쿠키 플래그 · 링크/폼/엔드포인트 수집(공격 표면) ·
+  흔한 민감 경로 프로브(/robots.txt, /.well-known/security.txt, /sitemap.xml,
+  /openapi.json, /swagger, /admin, /login, /api, /health, /.env, /favicon.ico) ·
+  리다이렉트/HTTPS 강제/응답 코드로 배포·접근통제 정황 파악. 못 본 것은 [가정] 으로 표기한다.
+  각 공격 루트는 **고정 형식**으로 작성한다(UI 가 시각화하므로 라벨을 지킬 것):
+  헤딩: ### 루트 N. <이름> [위험도] / 위험도: 치명|높음|중간|낮음 / 진입점: <지점> /
+  공격 흐름: 공격자 → <진입점> → (<취약점>) → <중간 결과> → (<탈취>) → <최종 피해> /
+  탈취 정보: 무엇이 새는지 쉼표 구분 / 공격 방법: 구체적 기법 / 영향: 한 줄 /
+  시뮬레이션: (번호 N. <행동> → <시스템 결과> 한 쌍, 2~4단계 — UI 가 단계 재생 플레이어로
+  시각화) / 검증: [실증]|[징후]|[가정] — 실측 근거·부분 확인·추론 중 택일하고 근거를
+  기재한다. URL 이 주어지면 높은 위험도의 루트는 web_fetch 로 비파괴 재현을 시도해
+  [실증]으로 올리고, 재현 못 하면 [가정]으로 정직하게 둔다. / 보완: 미리 막는 방법.
+  잘 알려진 것뿐 아니라 **조합·비즈니스 로직·운영 방식의 루트를 창의적으로** 발굴하고,
+  모든 루트에 "미리 막는 방법"을 제시한다. 전문 용어는 괄호로 풀어 쓴다.
 - 파일로 만들어 달라는 요청은 실제 파일로 저장해 저장 경로를 알려준다.
 `.trim();
 
@@ -323,6 +335,93 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
           content: [{ type: "text", text: `${summary}\n\n${text}` }],
           details: { url: cur.toString(), status: res.status, contentType: ct, bytes, truncated, links, forms, hops },
           isError: res.status >= 400,
+        } as any;
+      },
+    }),
+  );
+
+  // 4b) 인가 대상의 여러 경로를 한 번에 프로브하는 정찰 툴 — URL 전용 진단의 공격 표면 확보용.
+  //     전부 비파괴 GET/HEAD 이고, 호스트·리다이렉트 홉마다 scope 를 재검사한다.
+  pi.registerTool?.(
+    defineTool({
+      name: "recon_list",
+      label: "경로 정찰(인가 대상 전용)",
+      description:
+        "인가된 웹 대상(호스트)의 여러 경로를 각각 GET/HEAD 로 프로브해 응답 코드·보안 헤더·콘텐츠 타입을 한 번에 조사한다(비파괴, scope 강제). 공격 표면/민감 경로 점검에 사용한다.",
+      parameters: Type.Object({
+        host: Type.String({ description: "대상 호스트/IP (scope 안이어야 함)" }),
+        port: Type.Optional(Type.Number()),
+        paths: Type.Array(Type.String(), {
+          description: "프로브할 경로 목록 (예: [\"/\", \"/robots.txt\", \"/admin\"]) — 최대 40개",
+          maxItems: 40,
+        }),
+        method: Type.Optional(Type.Union([Type.Literal("GET"), Type.Literal("HEAD")], { default: "GET" })),
+      }),
+      async execute(_id, params: { host: string; port?: number; paths: string[]; method?: "GET" | "HEAD" }) {
+        await ensureGuard();
+        if (!guard) {
+          return webFetchErr(authError ?? "인가 게이트 준비 안 됨");
+        }
+        const method = params.method ?? "GET";
+        if (method !== "GET" && method !== "HEAD") {
+          return webFetchErr(`허용 메서드는 GET/HEAD 뿐입니다: ${method}`);
+        }
+        const scheme = params.port == null || params.port === 443 || params.port === 8443 ? "https" : "http";
+        const portPart = params.port != null && ![80, 443].includes(params.port) ? `:${params.port}` : "";
+        const base = `${scheme}://${params.host}${portPart}`;
+        const host = params.host.replace(/^\[|\]$/g, "");
+        const head = guard.check({ host, intent: "recon" });
+        if (!head.allowed) {
+          return webFetchErr(`인가되지 않은 대상입니다: ${head.reason}`);
+        }
+        const paths = [...new Set((params.paths || []).map((p) => (p.startsWith("/") ? p : "/" + p)))].slice(0, 40);
+        const rows: string[] = [];
+        const findings: any[] = [];
+        for (const p of paths) {
+          const url = base + p;
+          const d = guard.check({ host, intent: "recon" });
+          if (!d.allowed) {
+            rows.push(`${p} → 차단: ${d.reason}`);
+            continue;
+          }
+          let res: Response;
+          try {
+            res = await fetch(url, {
+              method,
+              redirect: "manual",
+              signal: AbortSignal.timeout(15_000),
+              headers: { "user-agent": "Mozilla/5.0 (RedCell authorized-agent)" },
+            });
+          } catch (e) {
+            rows.push(`${p} → 오류: ${e instanceof Error ? e.message : String(e)}`);
+            continue;
+          }
+          const h = res.headers;
+          const types = [
+            "content-security-policy",
+            "strict-transport-security",
+            "x-frame-options",
+            "x-content-type-options",
+            "referrer-policy",
+          ];
+          const present = types.filter((t) => h.has(t));
+          const server = h.get("server") ?? "";
+          const ctype = (h.get("content-type") ?? "").split(";")[0];
+          const noSec = present.length ? present.join(",") : "[보안 헤더 없음]";
+          const line = `${res.status} ${p}${ctype ? " · " + ctype : ""}${server ? " · " + server : ""} · ${noSec}`;
+          rows.push(line);
+          // 후속 분석용 구조화 결과도 남긴다.
+          findings.push({ path: p, status: res.status, content_type: ctype, security_headers: present, server });
+          if (present.length === 0 && res.status < 400) {
+            findings.push({ path: p, note: "보안 헤더 누락(진단 시그널)" });
+          }
+          // 안전한 폭주 방지
+          await new Promise((r) => setTimeout(r, 80));
+        }
+        return {
+          content: [{ type: "text", text: `경로 정찰 결과 (${paths.length}개, ${method}):\n` + rows.join("\n") }],
+          details: { host, base, findings },
+          isError: false,
         } as any;
       },
     }),

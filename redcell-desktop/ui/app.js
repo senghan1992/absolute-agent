@@ -101,7 +101,7 @@ function renderActive() {
   const chatInput = $("chatInput");
   if (chatInput) {
     chatInput.placeholder = (s && s.diag)
-      ? "서비스 설명 입력 — 목적·기술 스택·인증 방식·주요 기능·데이터 흐름·외부 연동 (진단 모드)"
+      ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
       : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
   }
   const dc = $("diagChk");
@@ -374,6 +374,8 @@ const TOOL_LABEL = {
   ssti_probe: "서버측 템플릿 인젝션 탐지",
   cmdi_probe: "OS 커맨드 인젝션 탐지",
   xxe_probe: "XXE(내부 엔티티) 탐지",
+  web_fetch: "웹 페이지 조회(실측 확인)",
+  recon_list: "경로 정찰(공격 표면 점검)",
 };
 function toolLabel(name) { return TOOL_LABEL[name] || name; }
 
@@ -638,6 +640,29 @@ async function sendChat() {
   if (s.status !== "running") await runEngagement();
 }
 
+// ── 진단 모드 헬퍼: 입력창 플레이스홀더 + 진단 목표 반영 ──────────────────────
+function setDiagPlaceholder() {
+  const ci = $("chatInput");
+  if (!ci) return;
+  ci.placeholder = ($("diagChk") && $("diagChk").checked)
+    ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
+    : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+}
+
+// ── [진단] 원클릭: URL 만으로 자동 보안 진단 (취약점 + 대비 시나리오) ──────────
+async function runDiagnose() {
+  const s = cur(); if (!s) return;
+  if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 host/URL 을 입력하세요."); return; }
+  const dc = $("diagChk");
+  if (dc) dc.checked = true;
+  s.diag = true;
+  setDiagPlaceholder();
+  if (!activeProvider()) { showProviderModal(); return; }
+  // 단순 URL 만 있어도 에이전트가 실측 정찰로 서비스를 파악해 리포트를 낸다 (P0).
+  $("chatInput").value = "이 서비스의 보안 진단을 해줘 — 취약점, 실행 가능한 공격 시나리오, 대비해야 할 위협, 그리고 미리 막는 방법까지 리포트로 정리해줘.";
+  await sendChat();
+}
+
 // ── 프로바이더: 연결된 것만 리스트에 노출, 미설정 시 모달 유도 ────────────────
 // 엔진 레지스트리(redcell/src/providers/registry.ts)와 동일하게 유지한다.
 const PROVIDER_CATALOG = [
@@ -880,25 +905,95 @@ function resultsTabActive() {
   return !!(rv && rv.classList.contains("active"));
 }
 
+// ── 진단 리포트 요약: 루트별 위험도·검증 상태를 한눈에 (왼쪽 상단 등급 헤더) ──
+function reportStats(docs) {
+  const sev = { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 };
+  const ver = { "실증": 0, "징후": 0, "가정": 0 };
+  let roots = 0;
+  let remarks = 0;
+  for (const d of docs) {
+    const text = (d.text || "");
+    for (const raw of text.split(/\r?\n/)) {
+      const line = raw.trim();
+      if (/^#{1,4}\s*루트\s*\d+/.test(line)) {
+        roots++;
+        const m = line.match(/\[(치명|높음|중간|낮음)\]/);
+        const key = m ? m[1] : line.match(/(치명|높음|중간|낮음)/)?.[1];
+        if (key && sev[key] != null) sev[key]++;
+        continue;
+      }
+      const vm = line.match(/\[(실증|징후|가정)\]/);
+      if (vm && ver[vm[1]] != null) ver[vm[1]]++;
+      if (/^#{1,4}\s*(개선|보완|권고|P[0-3])/.test(line)) remarks++;
+    }
+  }
+  const score = sev["치명"] * 4 + sev["높음"] * 3 + sev["중간"] * 2 + sev["낮음"] * 1;
+  const grade =
+    roots === 0 ? { letter: "·", label: "분석 전", cls: "g-none" }
+      : score >= 10 ? { letter: "F", label: "심각", cls: "g-f" }
+      : score >= 7 ? { letter: "D", label: "위험", cls: "g-d" }
+      : score >= 4 ? { letter: "C", label: "보통", cls: "g-c" }
+      : score >= 2 ? { letter: "B", label: "양호", cls: "g-b" }
+      : { letter: "A", label: "안전", cls: "g-a" };
+  return { roots, sev, ver, score, grade, remarks };
+}
+function renderReportSummary(s, docs) {
+  const top = $("reportSummary");
+  if (!top) return;
+  const isDiag = s && s.diag;
+  if (!isDiag || !docs.length) { top.classList.add("hidden"); top.innerHTML = ""; return; }
+  const st = reportStats(docs);
+  const sevChip = (label, n, cls) =>
+    `<span class="rs-chip ${cls}"><b>${n}</b> ${label}</span>`;
+  top.innerHTML = `
+    <div class="rs-card">
+      <div class="rs-grade ${st.grade.cls}"><span class="rs-letter">${st.grade.letter}</span><div class="rs-grade-txt"><b>${st.grade.label}</b><span>위험도 등급</span></div></div>
+      <div class="rs-mid">
+        <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴</div>
+        <div class="rs-chips">
+          ${sevChip("치명", st.sev["치명"], "c-crit")}
+          ${sevChip("높음", st.sev["높음"], "c-high")}
+          ${sevChip("중간", st.sev["중간"], "c-med")}
+          ${sevChip("낮음", st.sev["낮음"], "c-low")}
+        </div>
+      </div>
+      <div class="rs-verify">
+        <span class="rs-vtitle">검증 상태</span>
+        <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 실증</span>
+        <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 징후</span>
+        <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 가정</span>
+      </div>
+    </div>`;
+  top.classList.remove("hidden");
+}
+
 function renderResults() {
   const s = cur();
   const el = $("resultsBody");
   const cnt = $("resultsCount");
   const docs = s ? resultDocs(s) : [];
+  renderReportSummary(s, docs);
   if (cnt) { cnt.textContent = String(docs.length); cnt.style.display = docs.length ? "inline-flex" : "none"; }
   if (!el) return;
+  // 재렌더 전 이전 플레이어의 재생 타이머 정리
+  el.querySelectorAll("[data-sim]").forEach(simStop);
   if (!docs.length) {
     el.innerHTML = `<div class="placeholder">아직 표시할 결과가 없습니다.<br/>에이전트가 정리한 마크다운 결과가 여기에 렌더링되어 표시됩니다.</div>`;
     return;
   }
-  el.innerHTML = docs.map((d) =>
-    `<article class="md-card">
+  el.innerHTML = docs.map((d) => {
+    // 문서의 대표 위험도를 왼쪽 액센트로 표시
+    const rm = d.text.match(/\[(치명|높음|중간|낮음)\]/);
+    const rk = rm ? { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med", "낮음": "rk-low" }[rm[1]] || "" : "";
+    return `<article class="md-card ${rk}">
        <header class="md-card-head">
          <span class="md-card-seq">#${d.seq != null ? d.seq : "·"}</span>
          <span class="md-card-ts">${hhmm(d.ts)}</span>
        </header>
        <div class="md-body">${mdToHtml(d.text)}</div>
-     </article>`).join("");
+     </article>`;
+  }).join("");
+  wireSimPlayers(el);
 }
 
 function escHtml(s) {
@@ -906,8 +1001,10 @@ function escHtml(s) {
 }
 
 /* 미니 마크다운 → HTML (의존성 없음). 입력은 먼저 이스케이프한 뒤 변환하므로 안전. */
+const DIAG_BADGES = { "치명": "bx-crit", "높음": "bx-high", "중간": "bx-med", "낮음": "bx-low", "정보": "bx-info", "가정": "bx-assume", "실증": "bx-proof", "징후": "bx-sig", "P0": "bx-p", "P1": "bx-p", "P2": "bx-p", "P3": "bx-p" };
 function inlineMd(s) {
   s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
+  s = s.replace(/\[\s*(치명|높음|중간|낮음|정보|가정|실증|징후|P[0-3])\s*\]/g, (_, b) => `<span class="badge ${DIAG_BADGES[b]}">${b}</span>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   s = s.replace(/\*([^*\s][^*]*)\*/g, "<em>$1</em>");
   s = s.replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, (m, label, url) => {
@@ -915,6 +1012,142 @@ function inlineMd(s) {
     return `<a href="${url}" target="_blank" rel="noreferrer">${label}</a>`;
   });
   return s;
+}
+
+/* 공격 흐름: "공격자 → 로그인 폼 → (SQL 주입) → 인증 우회 → (관리자 세션 탈취) → …" 을
+   화살표 다이어그램(스텝 칩)으로 렌더. ( ) 안의 취약점 단계와 탈취 단계에 색을 입힌다. */
+function diagFlowHtml(content) {
+  const steps = content.split(/→|->|➜/g).map((s) => s.trim()).filter(Boolean);
+  if (!steps.length) return "";
+  const cls = (seg) => {
+    const s = seg.toLowerCase();
+    if (/탈취|유출|노출|열람|획득|도난|유실|탈취/.test(s)) return "loss";
+    if (/주입|취약|우회|남용|위조|스머글|레이스|포이즈닝|삽입|오염|스캔|exploit|바이패스|탈취/.test(s)) return "vuln";
+    return "step";
+  };
+  const html = steps.map((seg, i) => {
+    const lbl = seg.replace(/^[(\[]|[)\]]$/g, "").trim();
+    const arrow = i > 0 ? '<span class="diag-arrow">➜</span>' : "";
+    return `${arrow}<span class="diag-step ${cls(seg)}">${escHtml(lbl)}</span>`;
+  }).join("");
+  return `<div class="diag-flow">${html}</div>`;
+}
+
+/* 진단 필드 라인: 위험도/진입점/탈취 정보/공격 방법/영향/보완/검증 → 라벨+값 행 */
+const VERIFY_ST = [
+  ["실증", "bx-proof", "✅ 실증 — 실제 확인"],
+  ["징후", "bx-sig", "⚠️ 징후 — 부분 확인"],
+  ["가정", "bx-assume", "❓ 가정 — 설명 기반 추론"],
+];
+function diagFieldHtml(label, content) {
+  const l = label.trim();
+  const cls = l.includes("탈취") ? "field-loss" : l === "위험도" ? "field-risk" : l.includes("보완") ? "field-fix" : l === "검증" ? "field-verify" : "";
+  let body;
+  if (l.includes("탈취")) {
+    body = content.split(/[,，·、\/]/).map((s) => s.trim()).filter(Boolean)
+      .map((s) => `<span class="dchip">${escHtml(s)}</span>`).join("");
+  } else if (l === "검증") {
+    // 검증 상태 마커: [실증]/[징후]/[가정] 또는 '실증 :'/'실증 —' 등 접두 — 없으면 일반 표기
+    const mk = /^\s*[\[(]?(실증|징후|가정)[\])]?\s*[:：]?\s*/.exec(content);
+    let chip = "";
+    let rest = content;
+    if (mk) {
+      const m = VERIFY_ST.find((x) => x[0] === mk[1]);
+      if (m) {
+        chip = `<span class="badge ${m[1]} verify-chip">${m[2]}</span>`;
+        rest = content.slice(mk[0].length);
+      }
+    }
+    body = `${chip}<span>${inlineMd(escHtml(rest))}</span>`;
+  } else {
+    body = inlineMd(escHtml(content));
+  }
+  return `<div class="diag-field ${cls}"><span class="df-label">${l}</span><span class="df-body">${body}</span></div>`;
+}
+
+/* 시뮬레이션 파싱: "N. <행동> → <결과>" 줄들을 [행동, 결과] 쌍으로 */
+function parseSimSteps(text) {
+  const steps = [];
+  for (const raw of text.split(/\n+/).map((s) => s.trim()).filter(Boolean)) {
+    const line = raw.replace(/^\d+[.)]\s*/, "");
+    const parts = line.split(/→|->|➜/g).map((s) => s.trim()).filter(Boolean);
+    if (parts.length < 2) continue; // '→' 한 쌍(행동→결과)만 재생 단계로 삼는다
+    steps.push({ do: parts[0], res: parts.slice(1).join(" → ") });
+  }
+  return steps;
+}
+
+/* 시뮬레이션 플레이어: "이렇게 하면 → 이렇게 된다" 를 단계별로 재생해 보여준다 */
+function diagSimHtml(steps) {
+  if (!steps.length) return "";
+  const rows = steps.map((st, i) => `
+    <li class="sim-step${i === 0 ? " on" : ""}" data-i="${i}">
+      <span class="sim-n">${i + 1}</span>
+      <div class="sim-row">
+        <div class="sim-bubble do"><span class="sim-tag">공격자 행동</span><div class="sim-txt">${escHtml(st.do)}</div><span class="sim-cap">이렇게 하면</span></div>
+        <span class="sim-conn">➜</span>
+        <div class="sim-bubble res${st.res ? "" : " none"}"><span class="sim-tag">시스템 결과</span><div class="sim-txt">${st.res ? escHtml(st.res) : "(결과 미기재)"}</div><span class="sim-cap">이렇게 된다</span></div>
+      </div>
+    </li>`).join("");
+  return `<div class="sim" data-sim data-cur="1" data-total="${steps.length}">
+    <div class="sim-head">
+      <span class="sim-title">🎬 단계 시뮬레이션 — <b>이렇게 하면 → 이렇게 된다</b></span>
+      <span class="sim-ctl">
+        <button class="sim-btn play" data-sim-act="play" title="전체 재생">▶ 재생</button>
+        <button class="sim-btn" data-sim-act="step" title="다음 단계">+1 단계</button>
+        <button class="sim-btn" data-sim-act="reset" title="처음부터">↺</button>
+      </span>
+      <span class="sim-prog">1/${steps.length}</span>
+    </div>
+    <div class="sim-track"><div class="sim-fill" style="width:${Math.round(100 / steps.length)}%"></div></div>
+    <ol class="sim-steps">${rows}</ol>
+    <div class="sim-note">이것은 실제 공격이 아닌 <b>예측 시나리오 시뮬레이션</b>입니다 — 아래 <b>검증 상태</b>([실증]/[징후]/[가정])로 실측 여부를 함께 확인하세요.</div>
+  </div>`;
+}
+
+// ── 시뮬레이션 플레이어 상태/재생 ────────────────────────────────────────────
+function simState(sim) {
+  const total = Number(sim.dataset.total || 0);
+  let cur = Number(sim.dataset.cur || 0);
+  if (cur > total) cur = total;
+  return { total, cur };
+}
+function renderSimState(sim) {
+  const { total, cur } = simState(sim);
+  sim.querySelectorAll(".sim-step").forEach((li) => {
+    const i = Number(li.dataset.i);
+    li.classList.toggle("on", i < cur);
+    li.classList.toggle("now", i === cur - 1);
+  });
+  const fill = sim.querySelector(".sim-fill");
+  if (fill) fill.style.width = `${Math.round((cur / total) * 100)}%`;
+  const play = sim.querySelector('[data-sim-act="play"]');
+  if (play) play.textContent = cur >= total ? "▶ 다시" : "▶ 재생";
+  const prog = sim.querySelector(".sim-prog");
+  if (prog) prog.textContent = `${cur}/${total}`;
+}
+function simStop(sim) { if (sim._timer) { clearInterval(sim._timer); sim._timer = null; } }
+function simPlay(sim) {
+  simStop(sim);
+  const { total, cur } = simState(sim);
+  if (cur >= total) sim.dataset.cur = "1";
+  renderSimState(sim);
+  sim._timer = setInterval(() => {
+    const st = simState(sim);
+    if (st.cur >= st.total) { simStop(sim); return; }
+    sim.dataset.cur = String(st.cur + 1);
+    renderSimState(sim);
+  }, 950);
+}
+function simStepOnce(sim) {
+  simStop(sim);
+  const { total, cur } = simState(sim);
+  sim.dataset.cur = String(cur >= total ? 1 : cur + 1);
+  renderSimState(sim);
+}
+function simReset(sim) { simStop(sim); sim.dataset.cur = "1"; renderSimState(sim); }
+function wireSimPlayers(root) {
+  root.querySelectorAll("[data-sim]").forEach((sim) => renderSimState(sim));
 }
 
 function mdToHtml(src) {
@@ -956,7 +1189,48 @@ function mdToHtml(src) {
       out.push(html);
       continue;
     }
-    const h = /^(#{1,6})\s+(.*)$/.exec(raw);
+    // 진단 필드 라인 (위험도:/진입점:/탈취 정보:/공격 방법:/영향:/보완:/검증:) — 들여쓰기 허용
+    const fld = /^\s*(위험도|진입점|탈취\s*정보|공격\s*방법|영향|보완|검증|우선순위|문제)[:：]\s*(.*)$/.exec(raw);
+    if (fld) {
+      flushPara();
+      const lines2 = [fld[2]];
+      i++;
+      while (i < lines.length && /^\s*(→|->|➜)/.test(lines[i])) { lines2.push(lines[i].trim()); i++; }
+      if (fld[1].includes("흐름")) {
+        out.push(diagFlowHtml(lines2.join(" ")));
+      } else {
+        out.push(diagFieldHtml(fld[1], lines2.join(" ")));
+      }
+      continue;
+    }
+    // 시뮬레이션 블록: '시뮬레이션:' 라벨 + 'N. 행동 → 결과' 번호 줄들 → 단계 재생 플레이어
+    const simLbl = /^\s*시뮬레이션[:：]\s*(.*)$/.exec(raw);
+    if (simLbl) {
+      flushPara();
+      const buf = [simLbl[1]];
+      i++;
+      while (i < lines.length) {
+        const t = lines[i].trim();
+        const hasArrow = /→|->|➜/.test(t);
+        if (/^\d+[.)]\s+/.test(t) && hasArrow) { buf.push(t); i++; continue; }
+        if (!buf[0] && hasArrow) { buf[0] = t; i++; continue; } // 라벨 뒤 첫 내용이 다음 줄이라면 흡수(화살표 있는 줄만)
+        break;
+      }
+      const steps = parseSimSteps(buf.join("\n"));
+      if (steps.length) out.push(diagSimHtml(steps));
+      continue;
+    }
+    // 공격 흐름 라인 (연결 줄 포함)
+    const flow = /^\s*공격\s*흐름[:：]\s*(.+)$/.exec(raw);
+    if (flow) {
+      flushPara();
+      const lines2 = [flow[1]];
+      i++;
+      while (i < lines.length && /^\s*(→|->|➜)/.test(lines[i])) { lines2.push(lines[i].trim()); i++; }
+      out.push(diagFlowHtml(lines2.join(" ")));
+      continue;
+    }
+    const h = /^\s{0,3}(#{1,6})\s+(.*)$/.exec(raw);
     if (h) { flushPara(); const lv = h[1].length; out.push(`<h${lv}>${inlineMd(escHtml(h[2]))}</h${lv}>`); i++; continue; }
     if (/^\s*(-{3,}|\*{3,})\s*$/.test(raw)) { flushPara(); out.push("<hr/>"); i++; continue; }
     if (/^>\s?/.test(raw)) {
@@ -1192,6 +1466,7 @@ function wire() {
     ["settingsModal", "authModal", "providerModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
   });
   $("runBtn").onclick = onRunButton;
+  $("diagBtn").onclick = runDiagnose;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   $("scopeBtn").onclick = openAuth;
@@ -1220,12 +1495,21 @@ function wire() {
     const s = cur();
     if (s) s.diag = diagChk.checked;
     persistHeader();
-    const ci = $("chatInput");
-    if (ci) ci.placeholder = diagChk.checked
-      ? "서비스 설명 입력 — 목적·기술 스택·인증 방식·주요 기능·데이터 흐름·외부 연동 (진단 모드)"
-      : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+    setDiagPlaceholder();
   });
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
+  // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
+  const rb = $("resultsBody");
+  if (rb) rb.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-sim-act]");
+    if (!btn) return;
+    const sim = btn.closest("[data-sim]");
+    if (!sim) return;
+    const act = btn.dataset.simAct;
+    if (act === "play") simPlay(sim);
+    else if (act === "step") simStepOnce(sim);
+    else if (act === "reset") simReset(sim);
+  });
 }
 
 async function listenEngagement() {

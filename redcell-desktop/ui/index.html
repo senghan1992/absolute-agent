@@ -81,6 +81,7 @@
             <span class="diag-sw"></span>서비스 진단
           </label>
           <span id="statusBadge" class="badge badge-idle">idle</span>
+          <button id="diagBtn" class="btn btn-diag" title="URL 만으로 자동 보안 진단 — 취약점 + 대비 시나리오 리포트 (실측 정찰 포함)"><svg class="ic"><use href="#i-crosshair"/></svg>진단</button>
           <button id="runBtn" class="btn btn-run" data-mode="run" title="현재 목표로 엔진 실행"><svg class="ic" id="runIcon"><use href="#i-play"/></svg><span id="runLabel">실행</span></button>
         </div>
 
@@ -119,6 +120,7 @@
 
         <!-- 결과: 에이전트가 만든 마크다운을 렌더링 -->
         <section id="view-results" class="view results-view">
+          <div id="reportSummary" class="report-summary hidden"></div>
           <div id="resultsBody" class="results-body"></div>
         </section>
       </section>
