@@ -973,6 +973,7 @@ function renderReportSummary(s, docs) {
         <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
         <button id="rsExport" class="rs-btn primary" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
         <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML 저장</button>
+        <button id="rsPdf" class="rs-btn" title="인쇄 대화상자(→ PDF 저장)로 리포트 출력">PDF</button>
         <span id="rsExportStatus" class="rs-export-status"></span>
       </div>
       ${isDiag ? renderDiagNav(st) : ""}
@@ -981,9 +982,11 @@ function renderReportSummary(s, docs) {
   const exp = $("rsExport");
   const cpy = $("rsCopy");
   const expH = $("rsExportHtml");
+  const pdf = $("rsPdf");
   if (exp) exp.onclick = async () => await exportReport(s);
   if (expH) expH.onclick = async () => await exportReport(s, true);
   if (cpy) cpy.onclick = async () => await copyReport(s);
+  if (pdf) pdf.onclick = () => printReport(s);
   // 진단 루트 위험도 필터 내비
   document.querySelectorAll("#reportSummary [data-f]").forEach((chip) => {
     chip.onclick = () => {
@@ -1081,7 +1084,27 @@ body{margin:0;background:#0d1116;color:#dbe4ee;font:14px/1.7 system-ui,'Apple SD
 .sim-cap{display:block;margin-top:5px;font-size:10px;color:#8a94a3}
 .sim-conn{flex:none;display:inline-flex;align-items:center;color:#8a94a3;font-size:15px;padding:0 1px}
 @media (max-width:640px){.sim-row{display:grid}.sim-conn{display:none}}
+@media print{:root{color-scheme:light}body{background:#fff!important;color:#111!important}.wrap{max-width:100%!important;padding:0!important}.cover{background:#fff!important;border-color:#ddd!important;border-radius:0!important;padding:14px 0!important;border-bottom:1px solid #e2e5ea}.cover h1{color:#111!important}.brand{color:#4a4886!important}.meta{color:#555!important}.md-body h1,.md-body h2,.md-body h3,.md-body h4,.md-body h5,.md-body h6{color:#111!important}.md-body h1,.md-body h2{border-bottom-color:#e2e5ea!important}.md-body pre{background:#f7f8fa!important;border-color:#e2e5ea!important;white-space:pre-wrap}.md-body pre code{color:#222!important}.md-body table{font-size:12px}.md-body th,.md-body td{border-color:#e2e5ea!important}.md-body th{background:#f2f3f6!important}.md-body blockquote{border-left-color:#cfd4db!important;color:#444!important;background:transparent!important}.md-body code{background:rgba(200,60,70,.08)!important;color:#a62!important}.badge,.dchip{border:1px solid #ccc!important;background:#f5f6f8!important;color:#333!important}.diag-flow,.diag-field,.sim{background:#fff!important;border-color:#e2e5ea!important}.sim-head{background:#f7f8fa!important;border-bottom-color:#e2e5ea!important}.diag-step{background:#f7f8fa!important;border-color:#dbe0e6!important;color:#222!important}.diag-step.vuln{border-color:#d96!important;color:#a62!important;background:#fdf3ee!important}.diag-step.loss{border-color:#d9b84c!important;color:#8a6d00!important;background:#fdf9ec!important}.diag-field.field-risk .df-label{color:#a62!important}.diag-field.field-fix{background:#f2faf5!important;border-color:#b6dcc4!important}.diag-field.field-loss{background:#fdf9ec!important;border-color:#e2cf8a!important}.diag-field.field-fix .df-label{color:#1d7a45!important}.diag-field.field-loss .df-label{color:#8a6d00!important}.diag-arrow{color:#666!important}.sim-bubble{page-break-inside:avoid}.sim-n{background:#eef0f3!important;border-color:#d5dae0!important;color:#555!important}.sim-ctr,.sim-ctl,.sim-track,.sim-prog,.sim-note,.sim-play{display:none!important}.sim-steps{display:block!important}.sim-step{page-break-inside:avoid;margin-bottom:8px}.sim-tag{color:#333!important}.verify-chip,.badge,.dchip{print-color-adjust:exact;-webkit-print-color-adjust:exact}}.md-body h1,.md-body h2,.md-body h3,.md-body h4{page-break-after:avoid}
 `;
+
+// ── 리포트 PDF/인쇄: 숨김 iframe에 리포트를 렌더링하고 인쇄 대화상자(⇒ PDF 저장) 호출 ──
+function printReport(s) {
+  const st = $("rsExportStatus");
+  const name = ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
+  let fr = document.getElementById("rsPrintFrame");
+  if (!fr) {
+    fr = document.createElement("iframe");
+    fr.id = "rsPrintFrame";
+    fr.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
+    document.body.appendChild(fr);
+  }
+  const d = fr.contentDocument;
+  d.open();
+  d.write(diagToExportHtml(s, name));
+  d.close();
+  fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch (e) { /* 인쇄 불가 시 조용히 무시 */ } };
+  if (st) { st.textContent = "인쇄 대화상자에서 'PDF로 저장'을 선택하세요"; st.className = "rs-export-status ok"; }
+}
 
 function diagToExportHtml(s, name) {
   const body = mdToHtml(reportMarkdown(s));
