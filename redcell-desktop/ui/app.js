@@ -10,6 +10,7 @@ let sessions = [];
 let activeId = null;
 let settings = { redcell_dir: "", auth_path: "", default_provider: "" };
 let selectedSeq = null;
+let diagFilter = null; // 진단 결과 루트 필터: null=전체, Set(치명|높음|중간|낮음)
 
 const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
@@ -976,12 +977,36 @@ function renderReportSummary(s, docs) {
         <button id="rsExport" class="rs-btn primary" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
         <span id="rsExportStatus" class="rs-export-status"></span>
       </div>
+      ${isDiag ? renderDiagNav(st) : ""}
     </div>`;
   top.classList.remove("hidden");
   const exp = $("rsExport");
   const cpy = $("rsCopy");
   if (exp) exp.onclick = async () => await exportReport(s);
   if (cpy) cpy.onclick = async () => await copyReport(s);
+  // 진단 루트 위험도 필터 내비
+  document.querySelectorAll("#reportSummary [data-f]").forEach((chip) => {
+    chip.onclick = () => {
+      const v = chip.dataset.f;
+      diagFilter = v === "ALL" ? null : (diagFilter && diagFilter.has(v) && diagFilter.size === 1 ? null : new Set(v === "ALL" ? [] : [v]));
+      renderResults();
+    };
+  });
+}
+
+// 진단 결과 위험도 필터 내비(루트 카드처럼 카드 렌더/숨김)
+function renderDiagNav(st) {
+  const sevs = ["치명", "높음", "중간", "낮음"];
+  const clsFor = { "치명": "crit", "높음": "high", "중간": "med", "낮음": "low" };
+  const active = diagFilter;
+  const chip = (lbl, v, cls) => {
+    const on = v === "ALL" ? !active || !active.size : !!(active && active.has(v));
+    return `<button class="rs-nav-chip ${cls}${on ? " on" : ""}" data-f="${v}">${lbl}</button>`;
+  };
+  return `<div class="rs-nav"><span class="rs-nav-label">루트 보기</span>
+     ${chip("전체", "ALL", "n-all")}
+     ${sevs.map((sv) => chip(sv, sv, "n-" + clsFor[sv])).join("")}
+     <span class="rs-nav-count">${st.roots}개 루트</span></div>`;
 }
 
 // ── 보고서 내보내기/복사 ─────────────────────────────────────────────────────
@@ -1024,6 +1049,47 @@ async function copyReport(s) {
   }
 }
 
+// ── 진단 리포트를 루트 카드로 분할 (prelude/루트/권고·실측) ──────────────────
+const RISK_CLS = { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med", "낮음": "rk-low" };
+function segmentDiag(docs) {
+  const out = [];
+  let pre = [];      // 첫 루트 앞(요약·범위·공격 표면)
+  let tail = [];     // 마지막 루트 뒤(권고·실측 확인)
+  let cur = null;    // 현재 루트 누적
+  let seenRoot = false;
+  const flushRoot = () => {
+    if (cur) { out.push({ kind: "root", title: cur.title, sev: cur.sev, text: cur.buf.join("\n") }); cur = null; }
+  };
+  for (const d of docs) {
+    for (const raw of (d.text || "").split(/\r?\n/)) {
+      const isRoot = /^#{1,4}\s*루트\s*\d*\.?\s*/.test(raw.trim());
+      // 루트 헤딩 → 새 루트 카드 시작
+      if (isRoot) {
+        if (pre.length && !seenRoot) { out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") }); pre = []; }
+        flushRoot();
+        seenRoot = true;
+        const txt = raw.replace(/^#{1,4}\s*루트\s*\d*\.?\s*/, "").trim();
+        const sevM = txt.match(/\[(치명|높음|중간|낮음)\]/);
+        cur = { title: txt.replace(/\s*\[(치명|높음|중간|낮음)\]\s*/, "").trim(), sev: sevM ? sevM[1] : null, buf: [raw] };
+        continue;
+      }
+      // 루트 중간에 '## 섹션' 시작 → 루트 마감, 이후는 tail(권고~)
+      if (cur && /^##\s+/.test(raw.trim())) {
+        flushRoot();
+        tail.push(raw);
+        continue;
+      }
+      if (cur) cur.buf.push(raw);
+      else if (seenRoot) tail.push(raw);
+      else pre.push(raw);
+    }
+  }
+  flushRoot();
+  if (tail.length) out.push({ kind: "tail", title: "권고·실측 확인", sev: null, text: tail.join("\n") });
+  if (pre.length && !out.some((o) => o.kind === "prelude")) out.unshift({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") });
+  return out.filter((it) => it.text.trim());
+}
+
 function renderResults() {
   const s = cur();
   const el = $("resultsBody");
@@ -1038,16 +1104,29 @@ function renderResults() {
     el.innerHTML = `<div class="placeholder">아직 표시할 결과가 없습니다.<br/>에이전트가 정리한 마크다운 결과가 여기에 렌더링되어 표시됩니다.</div>`;
     return;
   }
-  el.innerHTML = docs.map((d) => {
-    // 문서의 대표 위험도를 왼쪽 액센트로 표시
-    const rm = d.text.match(/\[(치명|높음|중간|낮음)\]/);
-    const rk = rm ? { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med", "낮음": "rk-low" }[rm[1]] || "" : "";
-    return `<article class="md-card ${rk}">
+
+  // 진단 리포트: 루트별 카드로 분할 + 위험도 필터 (지정된 심각도만 루트 표시).
+  let segs = (s && s.diag)
+    ? segmentDiag(docs)
+    : docs.map((d) => ({ kind: "doc", title: "", sev: null, text: d.text, seq: d.seq, ts: d.ts }));
+  if (s && s.diag && diagFilter && diagFilter.size) {
+    const fset = diagFilter;
+    segs = segs.map((it) => (it.kind === "root" && fset.has(it.sev) ? it : it.kind === "root" ? null : it)).filter(Boolean);
+  }
+  el.innerHTML = segs.map((it) => {
+    const isRoot = it.kind === "root";
+    const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
+    const tag = isRoot ? `<span class="md-kind root">루트</span>`
+      : it.kind === "prelude" ? `<span class="md-kind pre">요약·범위</span>`
+      : it.kind === "tail" ? `<span class="md-kind tail">권고·실측</span>`
+      : `<span class="md-kind doc">결과</span>`;
+    const title = isRoot ? esc(it.title) : (it.seq != null ? `#${it.seq}` : (it.kind === "tail" ? "권고·실측 확인" : it.kind === "prelude" ? "요약·범위" : ""));
+    return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}">
        <header class="md-card-head">
-         <span class="md-card-seq">#${d.seq != null ? d.seq : "·"}</span>
-         <span class="md-card-ts">${hhmm(d.ts)}</span>
+         ${tag}<span class="md-card-title">${title}</span>
+         <span class="md-card-ts">${hhmm(it.ts)}</span>
        </header>
-       <div class="md-body">${mdToHtml(d.text)}</div>
+       <div class="md-body">${mdToHtml(it.text)}</div>
      </article>`;
   }).join("");
   wireSimPlayers(el);
