@@ -1399,7 +1399,7 @@ fn auth_ensure(app: AppHandle, host: String) -> Result<AuthEnsureResult, String>
 /// 진단/정리 리포트(MD)를 앱 데이터 폴더의 reports/ 에 저장하고 절대 경로를 돌려준다.
 /// 파일명은 사용자 제공 이름을 위생 처리해 경로 주입·잘못된 문자를 막는다.
 #[tauri::command]
-fn write_report(app: AppHandle, name: String, content: String) -> Result<String, String> {
+fn write_report(app: AppHandle, name: String, content: String, format: Option<String>) -> Result<String, String> {
     let dir = root(&app).join("reports");
     fs::create_dir_all(&dir).map_err(|e| format!("보고서 폴더 생성 실패: {e}"))?;
     let base = name.trim();
@@ -1408,10 +1408,15 @@ fn write_report(app: AppHandle, name: String, content: String) -> Result<String,
     } else {
         sanitize_filename(base)
     };
+    let ext = match format.as_deref() {
+        Some("html") => "html",
+        _ => "md",
+    };
     let file = dir.join(format!(
-        "{}-{}.md",
+        "{}-{}.{}",
         Utc::now().format("%Y%m%d-%H%M%S"),
-        base
+        base,
+        ext
     ));
     fs::write(&file, content).map_err(|e| format!("보고서 저장 실패: {e}"))?;
     Ok(file.to_string_lossy().into_owned())

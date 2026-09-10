@@ -975,6 +975,7 @@ function renderReportSummary(s, docs) {
       <div class="rs-actions">
         <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
         <button id="rsExport" class="rs-btn primary" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
+        <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML 저장</button>
         <span id="rsExportStatus" class="rs-export-status"></span>
       </div>
       ${isDiag ? renderDiagNav(st) : ""}
@@ -982,7 +983,9 @@ function renderReportSummary(s, docs) {
   top.classList.remove("hidden");
   const exp = $("rsExport");
   const cpy = $("rsCopy");
+  const expH = $("rsExportHtml");
   if (exp) exp.onclick = async () => await exportReport(s);
+  if (expH) expH.onclick = async () => await exportReport(s, true);
   if (cpy) cpy.onclick = async () => await copyReport(s);
   // 진단 루트 위험도 필터 내비
   document.querySelectorAll("#reportSummary [data-f]").forEach((chip) => {
@@ -1010,23 +1013,118 @@ function renderDiagNav(st) {
 }
 
 // ── 보고서 내보내기/복사 ─────────────────────────────────────────────────────
+// 자체 완성형 HTML 내보내기용 최소 스타일 — 검증 배지·공격 흐름·시뮬레이션(정적)까지 포함.
+const EXPORT_CSS = `
+:root{color-scheme:dark}
+*{box-sizing:border-box}
+body{margin:0;background:#0d1116;color:#dbe4ee;font:14px/1.7 system-ui,'Apple SD Gothic Neo','Malgun Gothic',sans-serif}
+.wrap{max-width:920px;margin:0 auto;padding:42px 30px 70px}
+.cover{border:1px solid #20272f;background:linear-gradient(135deg,#171c24,#10141a);border-radius:16px;padding:22px 24px;margin-bottom:26px}
+.brand{font-size:12px;letter-spacing:.6px;color:#8f8dff;font-weight:700;margin-bottom:10px}
+.cover h1{margin:0;font-size:23px;color:#fff}
+.meta{color:#8a94a3;font-size:12.5px;margin-top:8px}
+.md-body h1,.md-body h2,.md-body h3,.md-body h4,.md-body h5,.md-body h6{color:#eaf1f8;line-height:1.35}
+.md-body h1,.md-body h2{border-bottom:1px solid #232a34;padding-bottom:7px;margin:26px 0 12px}
+.md-body h3{margin:20px 0 8px}
+.md-body h3{font-size:16px}
+.md-body p{margin:9px 0}
+.md-body ul,.md-body ol{margin:9px 0;padding-left:24px}
+.md-body li{margin:4px 0}
+.md-body code{font-family:'JetBrains Mono',Consolas,monospace;font-size:12.5px;background:rgba(255,70,85,.12);color:#ff9aa4;border-radius:5px;padding:1.5px 6px}
+.md-body pre{background:#0b0f14;border:1px solid #232a34;border-radius:10px;padding:13px 15px;overflow-x:auto;margin:12px 0}
+.md-body pre code{background:none;color:#c9d1d9;padding:0}
+.md-body table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+.md-body th,.md-body td{border:1px solid #232a34;padding:7px 11px;text-align:left;vertical-align:top}
+.md-body th{background:rgba(255,70,85,.07);font-weight:600}
+.md-body tr:nth-child(even) td{background:rgba(255,255,255,.02)}
+.md-body blockquote{border-left:3px solid #2b3240;margin:10px 0;padding:4px 14px;color:#9aa5b3;background:rgba(255,255,255,.02);border-radius:0 8px 8px 0}
+.md-body hr{border:none;border-top:1px dashed #232a34;margin:16px 0}
+.md-body a{color:#8f8dff}
+.badge{display:inline-block;font-size:10.5px;font-weight:700;padding:1.5px 8px;border-radius:999px;margin:0 2px}
+.bx-crit{background:rgba(255,93,93,.18);color:#ff8f8f}
+.bx-high{background:rgba(255,142,77,.18);color:#ffb777}
+.bx-med{background:rgba(242,177,52,.18);color:#ffd073}
+.bx-low{background:rgba(93,212,142,.18);color:#7fe0a9}
+.bx-info{background:rgba(142,168,255,.18);color:#8ab8ff}
+.bx-assume{background:rgba(160,168,182,.18);color:#aab4c2}
+.bx-proof{background:rgba(93,212,142,.2);color:#7fe0a9;border:1px solid rgba(93,212,142,.4)}
+.bx-sig{background:rgba(242,177,52,.2);color:#ffd073;border:1px solid rgba(242,177,52,.4)}
+.bx-p{background:rgba(255,93,122,.16);color:#ff8da1}
+.diag-flow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:12px 0;padding:13px 15px;background:#131920;border:1px solid #232a34;border-radius:12px}
+.diag-step{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;font-size:12.5px;font-weight:600;background:rgba(255,255,255,.04);border:1px solid #2b3240;color:#dbe4ee}
+.diag-step.vuln{background:rgba(255,93,93,.15);border-color:rgba(255,93,93,.45);color:#ff9aa4}
+.diag-step.loss{background:rgba(242,177,52,.14);border-color:rgba(242,177,52,.45);color:#ffd073}
+.diag-arrow{color:#8a94a3;font-size:12px;margin:0 3px}
+.diag-field{display:flex;gap:10px;margin:8px 0;padding:8px 12px;border-radius:10px;background:rgba(255,255,255,.02)}
+.diag-field .df-label{flex:none;font-size:11.5px;font-weight:700;color:#8a94a3;min-width:66px}
+.diag-field.field-risk .df-label{color:#ff8f8f}
+.diag-field.field-loss{background:rgba(242,177,52,.06);border:1px dashed rgba(242,177,52,.4)}
+.diag-field.field-loss .df-label{color:#ffd073}
+.diag-field.field-fix{background:rgba(93,212,142,.06);border:1px dashed rgba(93,212,142,.35)}
+.diag-field.field-fix .df-label{color:#7fe0a9}
+.diag-field.field-verify .df-label{color:#8f8dff}
+.diag-field .df-body{display:inline-flex;flex-wrap:wrap;gap:5px;align-items:center;font-size:13px}
+.dchip{display:inline-block;font-size:11.5px;padding:2px 10px;border-radius:999px;background:rgba(242,177,52,.14);border:1px solid rgba(242,177,52,.4);color:#ffd073;font-weight:600}
+.verify-chip{margin-right:4px}
+.sim{background:#131920;border:1px solid #232a34;border-radius:12px;margin:12px 0;overflow:hidden}
+.sim-head{display:flex;align-items:center;gap:8px;padding:9px 13px;border-bottom:1px solid #232a34;background:#171c24;font-size:12.5px}
+.sim-title b{color:#8f8dff}
+.sim-ctl,.sim-track,.sim-prog,.sim-note{display:none}
+.sim-steps{list-style:none;margin:0;padding:12px;display:grid;gap:10px}
+.sim-step{display:flex;gap:9px;align-items:stretch;opacity:1!important;filter:none!important}
+.sim-n{flex:none;width:20px;height:20px;margin-top:3px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;background:#222a34;border:1px solid #2b3240;color:#8a94a3}
+.sim-row{display:flex;align-items:stretch;gap:8px;flex:1;min-width:0;flex-wrap:wrap}
+.sim-bubble{flex:1 1 200px;min-width:170px;padding:9px 12px;border-radius:10px}
+.sim-bubble.do{background:rgba(255,93,93,.09);border:1px solid rgba(255,93,93,.32)}
+.sim-bubble.res{background:rgba(93,212,142,.08);border:1px solid rgba(93,212,142,.3)}
+.sim-tag{display:block;font-size:10px;font-weight:700;letter-spacing:.4px;margin-bottom:5px}
+.sim-bubble.do .sim-tag{color:#ff9aa4}
+.sim-bubble.res .sim-tag{color:#7fe0a9}
+.sim-txt{font-size:12.5px;line-height:1.55}
+.sim-cap{display:block;margin-top:5px;font-size:10px;color:#8a94a3}
+.sim-conn{flex:none;display:inline-flex;align-items:center;color:#8a94a3;font-size:15px;padding:0 1px}
+@media (max-width:640px){.sim-row{display:grid}.sim-conn{display:none}}
+`;
+
+function diagToExportHtml(s, name) {
+  const body = mdToHtml(reportMarkdown(s));
+  const date = new Date().toLocaleString("ko-KR");
+  const target = s && s.host ? escHtml(s.host + (s.port ? ":" + s.port : "")) : "(—)";
+  const title = escHtml((name || "RedCell 진단 리포트").trim() || "RedCell 진단 리포트");
+  return `<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>${title}</title><style>${EXPORT_CSS}</style></head>
+<body><div class="wrap">
+ <div class="cover">
+   <div class="brand">🛡 RedCell · 보안 진단 리포트</div>
+   <h1>${title}</h1>
+   <div class="meta">대상 ${target} · 생성 ${date}</div>
+ </div>
+ <div class="md-body">${body}</div>
+</div></body></html>`;
+}
+
 function reportMarkdown(s) {
   return resultDocs(s).map((d) => d.text).join("\n\n");
 }
-async function exportReport(s) {
-  const btn = $("rsExport"), st = $("rsExportStatus");
-  if (!btn || !st) return;
+
+async function exportReport(s, asHtml) {
+  const btn = $("rsExport");
+  const btnH = $("rsExportHtml");
+  const st = $("rsExportStatus");
+  const target = asHtml ? btnH : btn;
+  if (!target || !st) return;
   const name = ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
-  btn.disabled = true; st.textContent = "저장 중…";
+  target.disabled = true; st.textContent = "저장 중…";
   try {
-    const path = await invoke("write_report", { name, content: reportMarkdown(s) });
+    const content = asHtml ? diagToExportHtml(s, name) : reportMarkdown(s);
+    const path = await invoke("write_report", { name, content, format: asHtml ? "html" : "md" });
     st.textContent = "💾 " + path;
     st.className = "rs-export-status ok";
   } catch (e) {
     st.textContent = "저장 실패: " + e;
     st.className = "rs-export-status err";
   } finally {
-    btn.disabled = false;
+    target.disabled = false;
   }
 }
 async function copyReport(s) {
