@@ -122,14 +122,19 @@ function setBadge(status) {
   b.textContent = status;
   b.className = "badge badge-" + status;
   const running = status === "running";
-  const btn = $("runBtn");
-  btn.disabled = false;
-  btn.dataset.mode = running ? "stop" : "run";
-  btn.classList.toggle("btn-stop", running);
-  btn.classList.toggle("btn-run", running);
-  btn.title = running ? "실행 중지" : "목표 실행 — 오른쪽 패널에 지시한 작업 수행";
-  $("runIcon").innerHTML = '<use href="#' + (running ? "i-stop" : "i-play") + '"/>';
-  $("runLabel").textContent = running ? "중지" : status === "idle" ? "목표 실행" : "재실행";
+  // 단일 액션 버튼(진단 시작)이 실행 중이면 '중지'로 뒤집힌다. 실행/중지 직관만 노출한다.
+  const dbtn = $("diagBtn");
+  if (dbtn) {
+    dbtn.disabled = false;
+    dbtn.dataset.mode = running ? "stop" : "diag";
+    dbtn.classList.toggle("btn-stop", running);
+    dbtn.classList.toggle("btn-diag", !running);
+    dbtn.title = running ? "실행 중지 — 진행 중인 진단/작업을 멈춥니다" : "진단 시작 — 대상 주소만 넣으면 보안 진단 리포트를 자동 생성합니다";
+    const dlabel = $("diagLabel");
+    if (dlabel) dlabel.textContent = running ? "중지" : "진단 시작";
+    const dic = $("diagIcon");
+    if (dic) dic.innerHTML = '<use href="#' + (running ? "i-stop" : "i-crosshair") + '"/>';
+  }
   const state = $("agentState");
   state.textContent = running ? "작동 중" : (status === "done" ? "완료" : status === "error" ? "오류" : status === "stopped" ? "중지됨" : "대기");
   state.className = "agent-state" + (running ? " busy" : "");
@@ -624,11 +629,11 @@ async function stopEngagement() {
   }
 }
 
-// 실행 버튼: 실행 중이면 중지, 아니면 실행(재실행)
-function onRunButton() {
-  const btn = $("runBtn");
-  if (btn.dataset.mode === "stop") return stopEngagement();
-  return runEngagement();
+// 단일 액션(진단 시작) 버튼: 실행 중이면 '중지'로 동작, 아니면 진단 시작.
+function onDiagButton() {
+  const s = cur();
+  if ($("diagBtn").dataset.mode === "stop" || (s && s.status === "running")) return stopEngagement();
+  return runDiagnose();
 }
 
 async function sendChat() {
@@ -948,13 +953,24 @@ function reportStats(docs) {
       }
     }
   }
+  // 분석은 끝났는데 '루트 N' 헤딩이 없다면(리포트 포맷 편차) 본문의 [위험도] 배지만으로
+  // 등급을 대체 산정한다. → 완료된 진단을 '분석 전'으로 보이지 않게 한다.
+  if (!roots.length) {
+    for (const d of docs) {
+      for (const raw of (d.text || "").split(/\r?\n/)) {
+        const re = /\[(치명|높음|중간|낮음)\]/g;
+        let mm;
+        while ((mm = re.exec(raw)) !== null) { sev[mm[1]]++; roots.push({ sev: mm[1], ver: "가정" }); }
+      }
+    }
+  }
   // 등급 = 루트별 (위험도 가중치 × 증거 가중치) 평균. 증거가 강할수록 가까이 인정된다.
   const vw = { "실증": 1.0, "징후": 0.6, "가정": 0.35 };
   const sw = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
   const m = roots.length;
   const score = m ? roots.reduce((a, r) => a + sw[r.sev] * (vw[r.ver] || 0.35), 0) / m : 0;
   const grade =
-    m === 0 ? { letter: "·", label: "분석 전", cls: "g-none" }
+    m === 0 ? { letter: "·", label: "분석 완료", cls: "g-ok" }
       : score >= 3.3 ? { letter: "F", label: "심각", cls: "g-f" }
       : score >= 2.7 ? { letter: "D", label: "위험", cls: "g-d" }
       : score >= 2.0 ? { letter: "C", label: "보통", cls: "g-c" }
@@ -990,9 +1006,9 @@ function renderReportSummary(s, docs) {
       </div>
       <div class="rs-actions">
         <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
-        <button id="rsExport" class="rs-btn primary" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
+        <button id="rsPdf" class="rs-btn primary" title="리포트를 인쇄 대화상자에서 PDF로 저장">PDF 저장</button>
+        <button id="rsExport" class="rs-btn" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
         <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML 저장</button>
-        <button id="rsPdf" class="rs-btn" title="인쇄 대화상자(→ PDF 저장)로 리포트 출력">PDF</button>
         <span id="rsExportStatus" class="rs-export-status"></span>
       </div>
       ${isDiag ? renderDiagNav(st) : ""}
@@ -1117,11 +1133,13 @@ function printReport(s) {
     fr.style.cssText = "position:fixed;right:0;bottom:0;width:0;height:0;border:0;visibility:hidden";
     document.body.appendChild(fr);
   }
+  const doPrint = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch (e) { /* 인쇄 불가 시 조용히 무시 */ } };
+  fr.onload = doPrint;
   const d = fr.contentDocument;
   d.open();
   d.write(diagToExportHtml(s, name));
   d.close();
-  fr.onload = () => { try { fr.contentWindow.focus(); fr.contentWindow.print(); } catch (e) { /* 인쇄 불가 시 조용히 무시 */ } };
+  if (d.readyState !== "loading") setTimeout(doPrint, 80);
   if (st) { st.textContent = "인쇄 대화상자에서 'PDF로 저장'을 선택하세요"; st.className = "rs-export-status ok"; }
 }
 
@@ -1799,12 +1817,29 @@ function renderDashboard() {
   // 카드 클릭 → 해당 세션 열기
   body.querySelectorAll("[data-session]").forEach((card) => {
     const sid = card.dataset.session;
-    const open = () => { $("dashboardModal").classList.add("hidden"); selectSession(sid); };
+    const open = () => { $("historyModal").classList.add("hidden"); selectSession(sid); };
     card.querySelector(".dash-open").onclick = open;
     card.onclick = (e) => { if (!e.target.closest(".dash-open")) open(); };
   });
 }
-function openDashboard() { renderDashboard(); $("dashboardModal").classList.remove("hidden"); }
+// 전체 이력 모달: 진단 요약(모아보기)과 감사 로그를 한 곳에서 탭으로 전환.
+function openHistory(tab) {
+  renderDashboard();            // 요약은 항상 최신으로 갱신
+  document.getElementById("historyModal").classList.remove("hidden");
+  setHistoryTab(tab || "summary");
+}
+function setHistoryTab(tab) {
+  const isAudit = tab === "audit";
+  document.querySelectorAll("#historyModal .htab").forEach((t) => {
+    const on = t.dataset.tab === tab;
+    t.classList.toggle("active", on);
+    t.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  const sum = $("histPaneSummary"), aud = $("histPaneAudit");
+  if (sum) sum.classList.toggle("hidden", isAudit);
+  if (aud) aud.classList.toggle("hidden", !isAudit);
+  if (isAudit) renderAudit();
+}
 
 // ── 감사 로그: 포트폴리오 전체 보안 활동 이력 ────────────────────────────────
 let auditFilter = "all";
@@ -1864,17 +1899,17 @@ function renderAudit() {
     </div>`;
   }).join("");
 }
-function openAudit() { renderAudit(); $("auditModal").classList.remove("hidden"); }
 
 // ── 배선 ─────────────────────────────────────────────────────────────────────
 function wire() {
   $("newSessionBtn").onclick = newSession;
   $("emptyNewBtn").onclick = newSession;
   $("settingsBtn").onclick = openSettings;
-  $("dashboardBtn").onclick = openDashboard;
-  $("dashboardClose").onclick = () => $("dashboardModal").classList.add("hidden");
-  $("auditBtn").onclick = openAudit;
-  $("auditClose").onclick = () => $("auditModal").classList.add("hidden");
+  $("historyBtn").onclick = () => openHistory("summary");
+  $("histClose").onclick = () => $("historyModal").classList.add("hidden");
+  document.querySelectorAll("#historyModal .htab").forEach((t) => {
+    t.onclick = () => setHistoryTab(t.dataset.tab);
+  });
   $("auditFilters").addEventListener("click", (e) => {
     const chip = e.target.closest(".af-chip");
     if (!chip) return;
@@ -1888,17 +1923,16 @@ function wire() {
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   wireProviderCards();
   // 모달 공통: 바깥 클릭 / Esc 로 닫기
-  ["settingsModal", "authModal", "providerModal", "dashboardModal", "auditModal"].forEach((id) => {
+  ["settingsModal", "authModal", "providerModal", "historyModal"].forEach((id) => {
     const m = $(id);
     if (!m) return;
     m.addEventListener("pointerdown", (e) => { if (e.target === m) m.classList.add("hidden"); });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    ["settingsModal", "authModal", "providerModal", "dashboardModal", "auditModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
+    ["settingsModal", "authModal", "providerModal", "historyModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
   });
-  $("runBtn").onclick = onRunButton;
-  $("diagBtn").onclick = runDiagnose;
+  $("diagBtn").onclick = onDiagButton;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   $("scopeBtn").onclick = openAuth;

@@ -63,8 +63,7 @@
           <svg class="ic" id="themeIcon"><use href="#i-moon"/></svg>
         </button>
         <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>세션</button>
-        <button id="dashboardBtn" class="btn btn-icon" title="진단 이력 대시보드" aria-label="진단 이력 대시보드"><svg class="ic"><use href="#i-grid"/></svg></button>
-        <button id="auditBtn" class="btn btn-icon" title="감사 로그" aria-label="감사 로그 — 전체 보안 활동 이력"><svg class="ic"><use href="#i-clock"/></svg></button>
+        <button id="historyBtn" class="btn btn-icon" title="전체 이력 — 진단 요약 · 감사 로그" aria-label="전체 이력 — 진단 요약 · 감사 로그"><svg class="ic"><use href="#i-grid"/></svg></button>
         <button id="scopeBtn" class="btn btn-icon" title="인가 대상 관리" aria-label="인가 대상 관리"><svg class="ic"><use href="#i-shield"/></svg></button>
         <button id="settingsBtn" class="btn btn-icon" title="설정" aria-label="설정"><svg class="ic"><use href="#i-gear"/></svg></button>
       </div>
@@ -90,18 +89,13 @@
             <span id="statusBadge" class="badge badge-idle">대기</span>
           </div>
           <div class="sh-row sh-action-row">
-            <span class="sh-action-hint">원하는 작업을 하나 선택하세요</span>
-            <button id="diagBtn" class="btn btn-diag btn-cmd">
-              <svg class="ic"><use href="#i-crosshair"/></svg>
-              <span class="cmd-txt">진단 시작</span>
-            </button>
-            <span class="cmd-div">또는</span>
-            <button id="runBtn" class="btn btn-cmd btn-cmd-ghost" data-mode="run" title="현재 목표로 에이전트 엔진 실행·중지">
-              <svg class="ic" id="runIcon"><use href="#i-play"/></svg>
-              <span class="cmd-txt" id="runLabel">목표 실행</span>
+            <span class="sh-action-hint">진단은 원클릭 · 그 외 작업은 오른쪽 <b>Agent</b>에 지시</span>
+            <button id="diagBtn" class="btn btn-diag btn-cmd" title="진단 시작 — 대상 주소만 넣으면 보안 진단 리포트 자동 생성">
+              <svg class="ic" id="diagIcon"><use href="#i-crosshair"/></svg>
+              <span class="cmd-txt" id="diagLabel">진단 시작</span>
             </button>
             <span class="cmd-note">
-              <b>진단 시작</b> = 대상 주소만 넣으면 보안 진단 리포트 자동 생성 · <b>목표 실행</b> = 오른쪽 에이전트에 지시한 작업 수행
+              <b>진단 시작</b> = 대상 주소만 넣으면 보안 진단 리포트 자동 생성 · 그 외엔 오른쪽 <b>Agent</b> 패널에 하고 싶은 작업을 지시해 보세요
             </span>
           </div>
         </div>
@@ -174,45 +168,40 @@
       </div>
     </div>
 
-    <!-- 진단 이력 대시보드 -->
-    <div id="dashboardModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="진단 이력 대시보드">
-      <div class="modal-card dash-card">
+    <!-- 전체 이력: 진단 요약(모아보기) + 감사 로그 탭 -->
+    <div id="historyModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="전체 이력">
+      <div class="modal-card hist-card">
         <header class="s-head">
           <div>
-            <h3>진단 이력</h3>
-            <div class="s-sub">세션·대상별 보안 진단 결과 요약</div>
+            <h3>전체 이력</h3>
+            <div class="s-sub">세션·대상별 진단 요약과 보안 활동 이력을 한눈에</div>
           </div>
-          <button id="dashboardClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
-        </header>
-        <div id="dashBody" class="dash-body"></div>
-      </div>
-    </div>
-
-    <!-- 감사 로그: 포트폴리오 전체 보안 활동 이력 -->
-    <div id="auditModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="감사 로그">
-      <div class="modal-card audit-card">
-        <header class="s-head">
-          <div>
-            <h3>감사 로그</h3>
-            <div class="s-sub">포트폴리오 전체 보안 활동 이력 — 인가 · 차단 · 발견 · 진단</div>
+          <div class="hist-tabs" role="tablist" aria-label="이력 보기">
+            <button class="htab active" data-tab="summary" role="tab" aria-selected="true">진단 요약</button>
+            <button class="htab" data-tab="audit" role="tab" aria-selected="false">감사 로그</button>
           </div>
-          <button id="auditClose" class="btn btn-icon" title="닫기" aria-label="감사 로그 닫기"><svg class="ic"><use href="#i-x"/></svg></button>
+          <button id="histClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
         </header>
-        <div class="audit-summary" id="auditSummary">
-          <div class="as-tile"><b id="auAll">0</b><span>전체 이벤트</span></div>
-          <div class="as-tile ok"><b id="auAuth">0</b><span>인가</span></div>
-          <div class="as-tile block"><b id="auBlock">0</b><span>차단</span></div>
-          <div class="as-tile find"><b id="auFind">0</b><span>발견</span></div>
-          <div class="as-tile diag"><b id="auDiag">0</b><span>진단 완료</span></div>
+        <div id="histPaneSummary" class="hist-pane">
+          <div id="dashBody" class="dash-body"></div>
         </div>
-        <div class="audit-filters" id="auditFilters" role="tablist" aria-label="감사 로그 필터">
-          <button class="af-chip active" data-f="all">전체</button>
-          <button class="af-chip" data-f="auth">인가</button>
-          <button class="af-chip" data-f="block">차단</button>
-          <button class="af-chip" data-f="finding">발견</button>
-          <button class="af-chip" data-f="diag">진단</button>
+        <div id="histPaneAudit" class="hist-pane hidden">
+          <div class="audit-summary" id="auditSummary">
+            <div class="as-tile"><b id="auAll">0</b><span>전체 이벤트</span></div>
+            <div class="as-tile ok"><b id="auAuth">0</b><span>인가</span></div>
+            <div class="as-tile block"><b id="auBlock">0</b><span>차단</span></div>
+            <div class="as-tile find"><b id="auFind">0</b><span>발견</span></div>
+            <div class="as-tile diag"><b id="auDiag">0</b><span>진단 완료</span></div>
+          </div>
+          <div class="audit-filters" id="auditFilters" role="tablist" aria-label="감사 로그 필터">
+            <button class="af-chip active" data-f="all">전체</button>
+            <button class="af-chip" data-f="auth">인가</button>
+            <button class="af-chip" data-f="block">차단</button>
+            <button class="af-chip" data-f="finding">발견</button>
+            <button class="af-chip" data-f="diag">진단</button>
+          </div>
+          <div id="auditList" class="audit-list"></div>
         </div>
-        <div id="auditList" class="audit-list"></div>
       </div>
     </div>
 
