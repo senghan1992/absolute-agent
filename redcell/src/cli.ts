@@ -38,6 +38,7 @@ import type { Fingerprint } from "./memory/skill-memory.js";
 import { forge, type VulnClass } from "./core/payload-forge.js";
 import { autoArgsFor } from "./assault/args.js";
 import { runAssault } from "./assault/pipeline.js";
+import { runHarden } from "./harden/pipeline.js";
 import { httpRequest } from "./net/http-client.js";
 import type { CookieJar } from "./net/http-client.js";
 import { toMarkdown, type ReportOptions } from "./report/report.js";
@@ -793,6 +794,72 @@ async function cmdRun(args: Args): Promise<void> {
   auditFinishRun(audit, activeFindings, { command: "run", mode: "orchestrator" });
 }
 
+/**
+ * harden — 시스템 오픈(출시) 전 사전 진단 + 강화(재보안) 게이트.
+ *
+ *   redcell harden --description "nginx + postgres, 데모 사이트, 관리자 로그인 없음" [--name demo]
+ *   redcell harden file://profile.json                       (구조화/텍스트 프로필 파일)
+ *   redcell harden --url http://host:8080                    (설명 없이 live cross-check 만 — 인가 필수)
+ *
+ * 인가: --url 을 주면 읽기 전용 cross-check 가 ScopeGuard 를 지난다(fail-closed).
+ *       설명/파일만으로는 오프라인(네트워크 없음) — 결정적 규칙 평가만.
+ * 종료코드: 0=PASS/PASS_WITH_RISKS · 1=FAIL · 3=미인가 차단 · 4=대상 미도달.
+ * 보고서: ~/.redcell/harden/<ts>/harden-<시스템명>.{md,html,json}
+ */
+async function cmdHarden(args: Args): Promise<void> {
+  if (args.flags.help || args.flags.h) {
+    console.log(`redcell harden — 출시 전 사전 진단(강화 게이트)
+
+사용법: redcell harden [<설명 텍스트> | --description <텍스트|경로>] [--url <url>] [옵션]
+
+입력(택1):
+  <텍스트> | --description <텍스트>   시스템 설명 문장(결정적 파싱 → 구성요소/포트/플래그)
+  file://<경로> 또는 .json/.txt/.md 파일 경로  구조화 프로필(JSON) 또는 설명 텍스트 파일
+  --url <http(s)://host[:port]>       (설명과 함께) 읽기 전용 live cross-check — ScopeGuard 인가 필수
+
+옵션:
+  --name <이름>          시스템 이름(리포트 제목·파일명, 기본 "system")
+  --auth <path>          인가 목록 파일(--url 사용 시 판정 기반, 기본 ~/.redcell/authorization.list)
+  --proxy <url>          프록시 경유(env REDCELL_PROXY 도 가능)
+  --cookie <k=v[,k=v]>   인가된 테스트 세션 쿠키(로그인 뒤 표면 점검)
+  --out-dir <경로>        출력 디렉터리(기본 ~/.redcell/harden/<타임스탬프>)
+  --report-name <이름>    리포트 기본 이름(확장자 제외, 기본 harden-<시스템명>)
+
+종료코드: 0 통과(리스크 있음 포함) · 1 FAIL(critical/high) · 3 미인가 차단 · 4 대상 미도달`);
+    return;
+  }
+
+  const description = str(args.flags.description) ?? args._[0];
+  if (!description && !str(args.flags.url)) {
+    throw new Error(
+      "redcell harden 에는 설명 텍스트(또는 --description / file:// 경로) 또는 --url 이 필요합니다.\n" +
+        "예: redcell harden --description \"nginx + postgres 데모 사이트, 관리자 로그인 없음\" --name demo",
+    );
+  }
+
+  const transcript: string[] = [];
+  const res = await runHarden({
+    description,
+    name: str(args.flags.name),
+    url: str(args.flags.url),
+    authFile: str(args.flags.auth),
+    proxy: str(args.flags.proxy) ?? process.env.REDCELL_PROXY,
+    cookie: str(args.flags.cookie),
+    outDir: str(args.flags["out-dir"]),
+    reportName: str(args.flags["report-name"]),
+    transcript,
+  });
+
+  const r = res.report;
+  const liveLabel = r.live ? `live cross-check \`${r.live.url}\`` : "오프라인(설명/파일 기준)";
+  console.error(`✅ harden 완료 — 판정 ${r.gate.verdict}: ${r.gate.reason}`);
+  console.error(`   발견 ${r.findings.length}건 · 공격 루트 ${r.routes.length}개 · ${liveLabel}`);
+  console.log(`📄 보고서 : ${res.files[0]}`);
+  console.log(`🖥️  HTML  : ${res.files[1]}`);
+  console.log(`🧾  JSON  : ${res.files[2]}`);
+  process.exitCode = res.exitCode;
+}
+
 /** scope 차단 시 사람이 놓칠 수 없는 배너(빈 리포트를 "정상 통과"로 오인하는 것을 막는다). */
 function scopeBlockedBanner(host: string, port: number | undefined, reason: string): string {
   const t = `${host}${port != null ? ":" + port : ""}`;
@@ -1383,6 +1450,14 @@ Commands:
                  [--auth <path>] [--provider <name>] [--model <id>] [--no-ai]
                  [--proxy <url>] [--enable <t[,t]>] [--target-map <file.json>]
                  [--full-exposure] [--evidence-cap <n>] [--evidence-max <n>] [--ndjson]
+  harden       출시 전 사전 진단 + 강화 게이트 (취약점 발견 → 공격경로 → 수정 권고 → PASS/FAIL)
+                 <설명 텍스트> | --description <텍스트|경로>  시스템 설명(구성요소/포트/플래그 결정적 파싱)
+                    또는 file://<경로> / .json/.txt/.md 파일
+                 [--url <http(s)://host[:port]>]  읽기 전용 live cross-check(ScopeGuard 인가 필수)
+                 [--name <이름>] [--auth <path>] [--proxy <url>] [--cookie <k=v[,k=v]>]
+                 [--out-dir <경로>] [--report-name <이름>]
+                 종료코드: 0 통과 · 1 FAIL(critical/high) · 3 미인가 · 4 미도달
+                 (오프라인 결정적 — 모델 불필요, --url 없이 네트워크 없이 동작)
   run          인가된 대상에 engagement 실행
                  --host <h> [--port <p>] [--goal <g>]
                  [--provider <name>] [--model <id>] [--auth <path>]
@@ -1473,6 +1548,7 @@ async function main(): Promise<void> {
   switch (cmd) {
     case "run": return void (await cmdRun(args));
     case "assault": return void (await cmdAssault(args));
+    case "harden": return void (await cmdHarden(args));
     case "pyrun": return void (await cmdPyRun(args));
     case "osint": return void (await cmdOsint(args));
     case "rlm": return void (await cmdRlm(args));

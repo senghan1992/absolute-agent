@@ -19,6 +19,7 @@
     "typecheck": "tsc --noEmit",
     "bench:rl": "tsx bench/rlbench.ts",
     "assault": "tsx src/cli.ts assault",
+    "harden": "tsx src/cli.ts harden",
     "lab-bench": "tsx bench/lab-bench.ts"
   },
   "dependencies": {
