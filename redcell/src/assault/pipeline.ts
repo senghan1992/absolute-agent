@@ -19,7 +19,7 @@ import path from "node:path";
 import { classifyTarget, DEFAULT_LIST_FILE } from "../scope/ip-list.js";
 import { loadAuthorization } from "../scope/load-auth.js";
 import { performLogin } from "../net/login.js";
-import { newJar, setHttpObserver } from "../net/http-client.js";
+import { newJar, withHttpObserver } from "../net/http-client.js";
 import { DefaultToolBox, OPT_IN_TOOLS } from "../tools/toolbox.js";
 import { decideVerdict } from "../core/autopilot.js";
 import type { Coverage, EngagementFinding, ModelAdapter, ToolContext } from "../core/types.js";
@@ -141,18 +141,13 @@ function findingFrom(outcome: ToolOutcome): EngagementFinding | undefined {
 // ── 파이프라인 ───────────────────────────────────────────────────────────────
 
 /**
- * 방어자 시점 기록기 — 실행 동안만 켠다(끝나면 finally 로 해제). 목적은 은폐가 아니라
+ * 방어자 시점 기록기 — 실행 범위로만 건다(끝나면 자동 해제). 목적은 은폐가 아니라
  * "이 실행이 대상 로그에 어떻게 보였는가"를 보고서에 남겨 블루팀에 인계하는 것이다.
- * CLI 는 한 번에 하나만 돌리므로 전역 훅 하나로 충분하다(중첩 실행은 가정하지 않는다).
+ * 실행별 격리(AsyncLocalStorage)라 동시에 여러 실행이 돌아도 서로의 요청을 세지 않는다.
  */
 export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
   const noiseSamples: NoiseSample[] = [];
-  setHttpObserver((o) => { noiseSamples.push(toNoiseSample(o)); });
-  try {
-    return await runAssaultInner(opts, noiseSamples);
-  } finally {
-    setHttpObserver(undefined);
-  }
+  return await withHttpObserver((o) => { noiseSamples.push(toNoiseSample(o)); }, () => runAssaultInner(opts, noiseSamples));
 }
 
 async function runAssaultInner(opts: AssaultOptions, noiseSamples: NoiseSample[]): Promise<AssaultResult> {

@@ -5,7 +5,9 @@
  * 같은 결과가 나와야 한다(보고서 재현성). 여기서 그 계약을 고정한다.
  */
 import { describe, it, expect } from "vitest";
+import { createServer } from "node:http";
 import { summarizeNoise, toNoiseSample, SIGNATURE_RULES, type NoiseSample } from "../../src/report/noise.js";
+import { httpRequest, withHttpObserver } from "../../src/net/http-client.js";
 
 const S = (method: string, path: string, status: number): NoiseSample => ({ method, path, status });
 
@@ -106,5 +108,35 @@ describe("summarizeNoise — 결정적 집계", () => {
     const sum = summarizeNoise([S("POST", "/login", 200)]);
     expect(sum.signatureHits).toBe(0);
     expect(SIGNATURE_RULES.length).toBeGreaterThan(5);
+  });
+});
+
+describe("관찰자 격리 — 동시 실행 경계", () => {
+  it("동시에 돈 두 실행은 서로의 요청을 세지 않는다", async () => {
+    const server = createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ok"); });
+    await new Promise<void>((ok) => server.listen(0, "127.0.0.1", ok));
+    const port = (server.address() as { port: number }).port;
+    const url = `http://127.0.0.1:${port}/`;
+
+    const run = (n: number) => {
+      const samples: NoiseSample[] = [];
+      return withHttpObserver((o) => samples.push(toNoiseSample(o)), async () => {
+        for (let i = 0; i < n; i++) await httpRequest(`${url}p/${i}`);
+        return samples;
+      });
+    };
+
+    const [a, b] = await Promise.all([run(3), run(5)]);
+    expect(a.length).toBe(3); // 자기 실행의 요청만
+    expect(b.length).toBe(5);
+    expect(summarizeNoise(a).statuses.ok2xx).toBe(3);
+    expect(summarizeNoise(b).statuses.ok2xx).toBe(5);
+
+    // 실행 범위 밖 요청은 어느 관찰자에게도 가지 않는다(누수 없음).
+    await httpRequest(`${url}outside`);
+    expect(a.length).toBe(3);
+    expect(b.length).toBe(5);
+
+    await new Promise<void>((ok) => server.close(() => ok()));
   });
 });

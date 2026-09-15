@@ -13,6 +13,7 @@
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
+import { AsyncLocalStorage } from "node:async_hooks";
 import tls from "node:tls";
 import { promises as dnsp } from "node:dns";
 import { URL } from "node:url";
@@ -114,14 +115,30 @@ export interface HttpObservation {
 }
 
 /**
- * 관찰자 훅 — 파이프라인이 실행 동안만 켜고 finally 에서 끈다.
- * 목적은 "이 실행이 대상에 어떻게 보였는가"를 세는 것뿐이다(은폐 기능이 아니다).
+ * 관찰자 훅 — 목적은 "이 실행이 대상에 어떻게 보였는가"를 세는 것뿐이다(은폐 기능이 아니다).
+ *
+ * 두 가지를 지원한다.
+ *   - 실행 범위(withHttpObserver): 동시에 여러 실행이 돌아도 각자 자기 실행의 요청만 받는다
+ *     (AsyncLocalStorage 로 실행별 격리 — 파이프라인이 쓰는 기본 경로).
+ *   - 전역(setHttpObserver): 프로세스 전체에서 한 번만 도는 경우(단일 실행 CLI 등)용.
  */
-let httpObserver: ((o: HttpObservation) => void) | undefined;
+let globalObserver: ((o: HttpObservation) => void) | undefined;
+const scopedObserver = new AsyncLocalStorage<(o: HttpObservation) => void>();
 
-/** 관찰자 설치/해제(undefined 로 해제). */
+/** 전역 관찰자 설치/해제(undefined 로 해제). 동시 실행이 있으면 withHttpObserver 를 쓴다. */
 export function setHttpObserver(fn?: (o: HttpObservation) => void): void {
-  httpObserver = fn;
+  globalObserver = fn;
+}
+
+/** 이 실행(run) 동안만 관찰자를 건다 — 동시 실행 간 교차 집계를 막는다. */
+export function withHttpObserver<T>(fn: (o: HttpObservation) => void, run: () => Promise<T>): Promise<T> {
+  return scopedObserver.run(fn, run);
+}
+
+/** 실제 요청 1건을 관찰자에게 알린다(관찰자 예외가 스캔을 깨뜨리지 않도록 삼킨다). */
+function observe(o: HttpObservation): void {
+  try { scopedObserver.getStore()?.(o); } catch { /* 관찰자 오류 무시 */ }
+  try { globalObserver?.(o); } catch { /* 관찰자 오류 무시 */ }
 }
 
 const DEFAULT_PROXY = () => process.env.REDCELL_PROXY || process.env.HTTPS_PROXY || process.env.HTTP_PROXY || undefined;
@@ -170,13 +187,13 @@ async function once(rawUrl: string, opt: HttpRequestOpts, depth: number): Promis
   } catch (e) {
     // 대상이 요청을 받았는데도 우리가 응답을 못 받은 경우(타임아·연결 종료)가 있다.
     // 관찰자는 시도 자체를 기록한다(status 0 = 무응답) — 그래야 인계용 수치가 대상 로그와 어긋나지 않는다.
-    try { httpObserver?.({ method, url: u.toString(), status: 0 }); } catch { /* 기록 실패 무시 */ }
+    observe({ method, url: u.toString(), status: 0 });
     throw e;
   }
   absorbCookies(opt.jar, u, res.setCookies);
   // 방어자 시점: 대상에 도달한 요청 1건 기록(리다이렉트 홉도 각각 1건).
   // 기록 실패가 스캔을 깨뜨리면 안 되므로 삼킨다.
-  try { httpObserver?.({ method, url: u.toString(), status: res.status }); } catch { /* 기록 실패 무시 */ }
+  observe({ method, url: u.toString(), status: res.status });
 
   // 리다이렉트 추적(follow, 최대 5회).
   if (opt.redirect === "follow" && res.status >= 300 && res.status < 400 && res.headers["location"] && depth < 5) {
