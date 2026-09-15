@@ -1033,8 +1033,13 @@ function toggleSummary() {
 // 요약의 '바로가기' → 해당 카드로 이동(본문 스크롤 테이너 안에서만 스크롤).
 function gotoCardSeg(ix) {
   const el = document.querySelector(`#resultsBody .md-card[data-ix="${ix}"]`);
-  if (!el) return;
-  el.scrollIntoView({ block: "start", behavior: "smooth" });
+  const body = $("resultsBody");
+  if (!el || !body) return;
+  // 스크롤 컨테이너의 scrollTop  직접 계산해 옮긴다.
+  // (WebKitGTK 에서는 중첩 스크롤러에 대한 scrollIntoView(smooth) 가 무시되는 경우가 있어
+  //  Chromium 검사만으로는 잡히지 않는다 — 실기기 창에서 확인하며 고정한 경로다.)
+  const top = el.getBoundingClientRect().top - body.getBoundingClientRect().top + body.scrollTop - 8;
+  body.scrollTop = Math.max(0, top);
   el.classList.add("flash");
   setTimeout(() => el.classList.remove("flash"), 1200);
 }

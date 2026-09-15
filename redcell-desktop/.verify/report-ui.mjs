@@ -103,7 +103,23 @@ for (const size of SIZES) {
   await page.locator(`#reportSummary .rs-nav-chip[data-f="${SEV_ALL}"]`).first().click();
   await page.waitForTimeout(200);
 
-  // 4) jump nav scrolls the body to the card, and scrolling collapses the summary
+  // 4) auto-collapse: with no manual pin, scrolling the body collapses the summary.
+  //    (Release any pin from step 2 by scrolling down and back to the top: the pin is
+  //     released by an actual scroll event reaching the top, not by an unchanged value.)
+  await page.evaluate(() => { const b = document.getElementById("resultsBody"); b.scrollTop = 200; });
+  await page.waitForTimeout(150);
+  await page.evaluate(() => { document.getElementById("resultsBody").scrollTop = 0; });
+  await page.waitForTimeout(250);
+  await page.evaluate(() => { document.getElementById("resultsBody").scrollTop = 300; });
+  await page.waitForTimeout(300);
+  const autoCollapsed = await stateOf();
+  console.log(size.name, "auto-collapse", JSON.stringify(autoCollapsed));
+  if (!autoCollapsed.collapsed) failures.push(`${size.name}: summary did not auto-collapse while scrolled`);
+  if (autoCollapsed.summaryH >= expandedState.summaryH) failures.push(`${size.name}: auto-collapse did not shrink the summary`);
+
+  // 4b) jump nav scrolls the body to the card (drawer may need opening first).
+  const cardCollapsed = await page.evaluate(() => document.querySelector("#reportSummary .rs-card").classList.contains("collapsed"));
+  if (cardCollapsed) { await page.locator("#rsToggle").click(); await page.waitForTimeout(200); }
   const beforeJump = await stateOf();
   await page.locator('#reportSummary .rs-jump-chip[data-goto="2"]').first().click();
   await page.waitForTimeout(700);
@@ -111,8 +127,15 @@ for (const size of SIZES) {
   const afterJump = await stateOf();
   console.log(size.name, "jump", JSON.stringify(afterJump));
   if (afterJump.scrollTop <= beforeJump.scrollTop) failures.push(`${size.name}: jump nav did not scroll the body`);
-  if (!afterJump.collapsed) failures.push(`${size.name}: summary did not auto-collapse while scrolled`);
-  if (afterJump.summaryH >= expandedState.summaryH) failures.push(`${size.name}: auto-collapse did not shrink the summary`);
+
+  // 4c) a manual pin wins over auto-collapse until the user returns to the top.
+  await page.evaluate(() => { const b = document.getElementById("resultsBody"); b.scrollTop = b.scrollHeight; });
+  await page.waitForTimeout(300);
+  const pinned = await page.evaluate(() => document.querySelector("#reportSummary .rs-card").classList.contains("collapsed"));
+  console.log(size.name, "pin-expanded-while-scrolled", JSON.stringify({ collapsed: pinned }));
+  if (pinned) failures.push(`${size.name}: manual expand pin was overridden by scrolling`);
+  await page.evaluate(() => { document.getElementById("resultsBody").scrollTop = 0; });
+  await page.waitForTimeout(250);
 
   // 5) back to top returns to the window's default state
   await page.evaluate(() => { document.getElementById("resultsBody").scrollTop = 0; });
