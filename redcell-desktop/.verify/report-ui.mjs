@@ -150,6 +150,30 @@ for (const size of SIZES) {
   if (exported.disabled) failures.push(`${size.name}: MD export button stayed disabled`);
   await page.screenshot({ path: `${OUT}/${size.name}-export-status.png` });
 
+  // 8) PDF/print path: the summary's PDF button writes the report into a hidden iframe
+  //    and triggers the print dialog. Headless cannot show the dialog, so assert the
+  //    wiring: the iframe exists, holds the full report HTML, and the status line reports.
+  await page.locator("#rsPdf").click();
+  await page.waitForTimeout(600);
+  const printed = await page.evaluate(() => {
+    const fr = document.getElementById("rsPrintFrame");
+    const st = document.querySelector("#rsExportStatus");
+    const doc = fr && fr.contentDocument;
+    const html = doc && doc.documentElement ? doc.documentElement.outerHTML : "";
+    return {
+      framePresent: !!fr,
+      frameLen: html.length,
+      hasReportShell: html.includes("RedCell"),
+      statusText: st.textContent.trim(),
+      statusClass: st.className,
+    };
+  });
+  console.log(size.name, "pdf", JSON.stringify(printed));
+  if (!printed.framePresent || printed.frameLen < 500 || !printed.hasReportShell) {
+    failures.push(`${size.name}: PDF path did not load the report into the print frame (${JSON.stringify(printed)})`);
+  }
+  if (!printed.statusText) failures.push(`${size.name}: PDF path left the status line empty`);
+
   // 6) non-diagnostic session (plain markdown results): the diagnostic summary must
   //    stay hidden and the results timeline must still fit without clipping.
   const plain = page.locator(".tab", { hasText: "vulnlab-web" }).first();
