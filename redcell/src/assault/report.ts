@@ -115,6 +115,28 @@ export function toMarkdown(r: AssaultReport): string {
   L.push("");
 
   // 5. 요약
+  // 4.5 방어자 시점 — 인계용(은폐 아님). 같은 시간대 대상 로그에서 확인해야 할 항목을 문서화한다.
+  if (r.noise) {
+    L.push(`## 🛡️ 방어자 시점 — 이 실행이 남긴 관찰 신호 (요청 ${r.noise.requests}건)`);
+    L.push("");
+    L.push("_블루팀/SOC 인계용 요약이다. 흔적을 지우는 기능이 아니라, 이 실행이 대상 로그에 어떻게 보였는지 기록한 것이다._");
+    L.push("");
+    L.push("_대상 로그에는 이 수보다 많은 요청이 보일 수 있다(스머글링·파이프라이닝 페이로드가 서버에서 추가로 파싱됨)._");
+    L.push("");
+    for (const n of r.noise.notes) L.push(`- ${n}`);
+    if (r.noise.topPaths.length > 0) {
+      L.push("");
+      L.push("| 경로 | 대표 상태 | 요청 수 |");
+      L.push("|---|---|---|");
+      for (const p of r.noise.topPaths) L.push(`| \`${p.path}\` | ${p.status === 0 ? "무응답" : p.status} | ${p.count} |`);
+    }
+    if (r.noise.signatures.length > 0) {
+      L.push("");
+      L.push(`시그니처별(URL 기준): ${r.noise.signatures.map((x) => `${x.name} ${x.count}건`).join(" · ")}`);
+    }
+    L.push("");
+  }
+
   L.push(`## 📋 전투 요약`);
   L.push("");
   L.push(r.narrative);
@@ -172,6 +194,15 @@ export function toHtml(r: AssaultReport): string {
     (f) => `<tr class="${sevCls(f.severity)}"><td>${esc(f.severity)}</td><td>${esc(f.phase)}</td><td>${esc(f.title)}</td><td>${esc((f.detail ?? "").slice(0, 90))}</td></tr>`,
   );
 
+  const noise = r.noise;
+  const noiseBlockHtml = !noise
+    ? "<p>기록 없음.</p>"
+    : `<p class="meta">블루팀/SOC 인계용 요약이다. 흔적을 지우는 기능이 아니라, 이 실행이 대상 로그에 어떻게 보였는지 기록한 것이다.</p>
+<p class="meta">대상 로그에는 이 수보다 많은 요청이 보일 수 있다(스머글링·파이프라이닝 페이로드가 서버에서 추가로 파싱됨).</p>
+<ul class="defs">${noise.notes.map((n) => `<li>${esc(n)}</li>`).join("")}</ul>
+${noise.topPaths.length === 0 ? "" : `<table><tr><th>경로</th><th>대표 상태</th><th>요청 수</th></tr>${noise.topPaths.map((p) => `<tr><td><code>${esc(p.path)}</code></td><td>${p.status === 0 ? "무응답" : p.status}</td><td>${p.count}</td></tr>`).join("")}</table>`}
+${noise.signatures.length === 0 ? "" : `<p class="refs">시그니처별(URL 기준): ${noise.signatures.map((x) => `${esc(x.name)} ${x.count}건`).join(" · ")}</p>`}`;
+
   const defItems = r.defense.map(
     (d: DefenseItem) => `<li class="${sevCls(d.severity)}"><b>${esc(d.control)}</b> — ${esc(d.detail)}</li>`,
   );
@@ -225,6 +256,7 @@ ${kpi("툴 실행", String(r.outcomes.length), `단계 ${Object.keys(r.stages).l
 ${kpi("발견", String(r.findings.length), `${r.findings.filter((f) => f.severity === "high" || f.severity === "critical").length}건 high+`)}
 ${kpi("탈취 가능 정보", String(r.exposed.length), `${r.exposed.filter((e) => e.severity === "high" || e.severity === "critical").length}건 high+`)}
 ${kpi("공격 경로", String(r.attackPaths.length), `방어 권고 ${r.defense.length}`)}
+${kpi("대상에 도달한 요청", String(r.noise?.requests ?? 0), `차단 ${r.noise?.statuses.denied ?? 0} · 429 ${r.noise?.statuses.limited ?? 0} · 5xx ${r.noise?.statuses.server5xx ?? 0}`)}
 </div>
 <h2>🧬 탈취 가능 정보 매니페스트</h2>
 ${r.exposed.length === 0 ? "<p>확인된 탈취 가능 데이터 없음.</p>" : `<table><tr><th>id</th><th>등급</th><th>분류</th><th>항목</th><th>위치</th><th>샘플</th></tr>${evRows.join("")}</table>`}
@@ -241,6 +273,8 @@ ${(r.attackRoutes ?? []).length === 0 ? "<p>합성 가능한 다단계 루트 �
 ${r.findings.length === 0 ? "<p>미탐.</p>" : `<table><tr><th>심각도</th><th>단계</th><th>제목</th><th>근거</th></tr>${findRows.join("")}</table>`}
 <h2>🛡️ 방어 권고</h2>
 ${r.defense.length ? `<ul class="defs">${defItems.join("")}</ul>` : "<p>권고 없음.</p>"}
+<h2>🛡️ 방어자 시점 — 이 실행이 남긴 관찰 신호 (요청 ${r.noise?.requests ?? 0}건)</h2>
+${noiseBlockHtml}
 <h2>📋 전투 요약</h2>
 <div class="narrative">${esc(r.narrative)}</div>
 <h2>📡 실행 단계</h2>

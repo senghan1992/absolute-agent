@@ -19,7 +19,7 @@ import path from "node:path";
 import { classifyTarget, DEFAULT_LIST_FILE } from "../scope/ip-list.js";
 import { loadAuthorization } from "../scope/load-auth.js";
 import { performLogin } from "../net/login.js";
-import { newJar } from "../net/http-client.js";
+import { newJar, setHttpObserver } from "../net/http-client.js";
 import { DefaultToolBox, OPT_IN_TOOLS } from "../tools/toolbox.js";
 import { decideVerdict } from "../core/autopilot.js";
 import type { Coverage, EngagementFinding, ModelAdapter, ToolContext } from "../core/types.js";
@@ -35,6 +35,7 @@ import { runPyAgent } from "./pyagent.js";
 import { analyze } from "./analysis.js";
 import { planRoutes } from "./routes.js";
 import { logLine, toHtml, toJson, toMarkdown } from "./report.js";
+import { summarizeNoise, toNoiseSample, type NoiseSample } from "../report/noise.js";
 import type { AssaultReport, AssaultStage, AssaultTarget, StageStatus, ToolOutcome } from "./types.js";
 
 export interface AssaultOptions {
@@ -139,7 +140,22 @@ function findingFrom(outcome: ToolOutcome): EngagementFinding | undefined {
 
 // ── 파이프라인 ───────────────────────────────────────────────────────────────
 
+/**
+ * 방어자 시점 기록기 — 실행 동안만 켠다(끝나면 finally 로 해제). 목적은 은폐가 아니라
+ * "이 실행이 대상 로그에 어떻게 보였는가"를 보고서에 남겨 블루팀에 인계하는 것이다.
+ * CLI 는 한 번에 하나만 돌리므로 전역 훅 하나로 충분하다(중첩 실행은 가정하지 않는다).
+ */
 export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
+  const noiseSamples: NoiseSample[] = [];
+  setHttpObserver((o) => { noiseSamples.push(toNoiseSample(o)); });
+  try {
+    return await runAssaultInner(opts, noiseSamples);
+  } finally {
+    setHttpObserver(undefined);
+  }
+}
+
+async function runAssaultInner(opts: AssaultOptions, noiseSamples: NoiseSample[]): Promise<AssaultResult> {
   const startedAt = new Date().toISOString();
   const t0 = parseAssaultUrl(opts.url);
   const proxy = opts.proxy ?? process.env.REDCELL_PROXY;
@@ -161,7 +177,7 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
   if (!pre.allowed) {
     emit({ type: "blocked", reason: pre.reason, target: { host: t0.host, port: t0.port } });
     transcript.push(logLine("assault", `SCOPE 차단: ${pre.reason}`));
-    return { exitCode: 3, reportDir: "", report: stubReport(opts, t0, startedAt, transcript, "blocked", pre.reason, loaded.kind, authFile) };
+    return { exitCode: 3, reportDir: "", report: stubReport(opts, t0, startedAt, transcript, "blocked", pre.reason, loaded.kind, authFile, noiseSamples) };
   }
 
   // 3. 로그인/세션 (인가 파일에 login 블록이 있을 때).
@@ -221,7 +237,7 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
     transcript.push(logLine("http_probe", pr.summary));
     if (!pr.ok && CONN_ERR.test(pr.summary)) {
       transcript.push(logLine("assault", `대상 미도달: ${pr.summary}`));
-      return { exitCode: 4, reportDir: "", report: stubReport(opts, t0, startedAt, transcript, "unreachable", pr.summary, loaded.kind, authFile) };
+      return { exitCode: 4, reportDir: "", report: stubReport(opts, t0, startedAt, transcript, "unreachable", pr.summary, loaded.kind, authFile, noiseSamples) };
     }
     outcomes.push({ tool: "http_probe", stage: "recon", ok: pr.ok, summary: pr.summary, durationMs: probeMs, data: pr.data as Record<string, unknown> | undefined, fp: pr.fingerprint });
     fp = mergeFp(fp, pr.fingerprint);
@@ -376,6 +392,15 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
   }
   const finishedAt = new Date().toISOString();
   const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
+  const noise = summarizeNoise(noiseSamples);
+  if (noise.requests > 0) {
+    transcript.push(
+      logLine(
+        "방어자시점",
+        `요청 ${noise.requests}건 (401/403 ${noise.statuses.denied} · 429 ${noise.statuses.limited} · 5xx ${noise.statuses.server5xx})`,
+      ),
+    );
+  }
 
   const report: AssaultReport = {
     target: t0,
@@ -394,6 +419,7 @@ export async function runAssault(opts: AssaultOptions): Promise<AssaultResult> {
     defense: analysis.defense,
     narrative: analysis.narrative,
     transcript,
+    noise: summarizeNoise(noiseSamples),
     meta: {
       command: "redcell assault",
       model: opts.modelLabel ?? (opts.model ? "custom" : "deterministic"),
@@ -432,6 +458,7 @@ function stubReport(
   reason: string,
   authKind: string,
   authFile: string,
+  noiseSamples: NoiseSample[] = [],
 ): AssaultReport {
   const finishedAt = new Date().toISOString();
   const blocked = why === "blocked";

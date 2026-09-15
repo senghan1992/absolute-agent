@@ -14,6 +14,7 @@
 
 import type { Phase, Fingerprint } from "../memory/skill-memory.js";
 import type { Coverage, GateVerdict, EngagementFinding } from "../core/types.js";
+import type { NoiseSummary } from "../report/noise.js";
 
 export type AssaultStage = "recon" | "enumerate" | "exploit" | "evidence" | "analysis";
 
@@ -128,6 +129,8 @@ export interface AssaultReport {
   attackRoutes: AttackRoute[];
   /** 방어 권고. */
   defense: DefenseItem[];
+  /** 방어자 시점 요약 — 이 실행이 대상 로그에 남긴 관찰 신호(블루팀 인계용). */
+  noise?: NoiseSummary;
   /** 실행 요약 내러티브(ai 또는 결정적 합성). */
   narrative: string;
   /** 원문 전사(요청/응답 로그). */

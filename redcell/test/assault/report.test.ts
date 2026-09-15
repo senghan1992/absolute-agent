@@ -24,6 +24,14 @@ const rep: AssaultReport = {
   defense: [{ severity: "high", control: "시크릿 매니저", detail: "d" }],
   narrative: "# 전투 요약\n본문",
   transcript: ["[00:00:00] http_probe ok"],
+  noise: {
+    requests: 7,
+    statuses: { ok2xx: 3, redirect3xx: 0, denied: 2, notFound: 1, limited: 1, other4xx: 0, server5xx: 0, unanswered: 0 },
+    topPaths: [{ path: "/admin", status: 403, count: 3 }],
+    signatureHits: 1,
+    signatures: [{ name: "SQL 주입", count: 1 }],
+    notes: ["요청 7건 — 401/403 2건", "레이트리밋(429) 1건"],
+  },
   meta: { command: "assault --url http://h:1/", model: "deterministic", authPath: "/x", authKind: "ip-list", aiAnalyzed: false, fullExposure: false, redact: true },
 };
 
@@ -54,4 +62,18 @@ describe("report renderers", () => {
     expect(logLine("http_probe", "ok")).toMatch(/^\[\d{2}:\d{2}:\d{2}\] http_probe\s+ok$/);
     expect(fmtDur(65_000)).toContain("1분");
   });
+  it("방어자 시점 섹션을 md/html/json 에 렌더링한다(인계용)", () => {
+    const md = toMarkdown(rep);
+    expect(md).toContain("\uBC29\uC5B4\uC790"); // 방어자
+    expect(md).toContain("/admin");
+    expect(md).toContain("429");
+    const html = toHtml(rep);
+    expect(html).toContain("/admin");
+    expect(html).toContain("429");
+    const j = JSON.parse(toJson(rep));
+    expect(j.noise.requests).toBe(7);
+    expect(j.noise.statuses.denied).toBe(2);
+    expect(j.noise.topPaths[0].path).toBe("/admin");
+  });
+
 });
