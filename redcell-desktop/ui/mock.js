@@ -465,6 +465,8 @@
         saveAuth();
         return { added: true, existed: false, host: norm, path: a.path, yaml: false, reason: null };
       }
+      // 리포트 저장(미리보기용 경로) — 실제 데스크톱에서는 Rust 측이 파일을 쓴다.
+      case "write_report": return `${store.settings.redcell_dir || "(preview)"}/reports/${args.name}.${args.format || "md"}`;
       default: console.warn("mock invoke: 알 수 없는 명령", cmd); return null;
     }
   }

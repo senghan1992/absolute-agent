@@ -19,7 +19,12 @@ const $ = (id) => document.getElementById(id);
 const cur = () => sessions.find((s) => s.id === activeId) || null;
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const clock = (ms) => { try { return new Date(ms).toLocaleTimeString("en-GB", { hour12: false }); } catch { return ""; } };
-const hhmm = (ts) => { try { return new Date(ts).toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" }); } catch { return ""; } };
+const hhmm = (ts) => {
+  if (ts == null) return "";
+  const d = new Date(ts);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleTimeString("ko-KR", { hour: "2-digit", minute: "2-digit" });
+};
 
 const eventsOf = (s) => (s && s.events) || [];
 function doneLog(s) { const d = [...eventsOf(s)].reverse().find((e) => e.type === "done"); return d ? d.log : null; }
@@ -979,51 +984,122 @@ function reportStats(docs) {
       : { letter: "A", label: "안전", cls: "g-a" };
   return { roots: m, sev, ver, score, grade };
 }
-function renderReportSummary(s, docs) {
+// ── 리포트 요약 바: 등급·카운트·내보내기를 한 줄로 압축하고 나머지는 접히는 서랍으로 ──
+// 리포트 본문이 상단 요약에 가리지 않도록:
+//   (1) 요약은 항상 얇은 한 줄(등급 · 루트/검증 카운트 · 내보내기)로 유지하고,
+//   (2) 본문을 스크롤하면 서랍(위험도 필터 · 바로가기 · 범례)이 자동으로 접히며,
+//   (3) [접기]/[펼치기] 로 직접 고정할 수도 있다. 맨 위로 돌아오면 자동 모드로 복귀.
+let summaryPinned = null;       // null=자동(스크롤 연동) · true=접힘 고정 · false=펼침 고정
+let summaryTightWindow = false; // 창이 낮으면 위에서도 접힘 유지(본문 우선)
+const SUMMARY_COLLAPSE_AT = 48; // 이만큼 스크롤하면 서랍 자동 접힘(px)
+const SUMMARY_TIGHT_H = 420;    // 리포트 영역이 이보다 낮으면 접고 시작
+
+function summaryCardEl() { return document.querySelector("#reportSummary .rs-card"); }
+
+// 스크롤 위치에 맞춰 요약 접힘 상태를 맞춘다(자동/고정).
+// 지금 접어야 하는지 판단: 고정값 → 스크롤 위치 → 짧은 창이 여부.
+function summaryCollapsedNow() {
+  if (summaryPinned != null) return summaryPinned;
+  const body = $("resultsBody");
+  if (body && body.scrollTop > SUMMARY_COLLAPSE_AT) return true;
+  return summaryTightWindow;
+}
+
+function syncSummaryCollapse() {
+  const card = summaryCardEl();
+  if (!card) return;
+  const collapsed = summaryCollapsedNow();
+  card.classList.toggle("collapsed", collapsed);
+  const t = card.querySelector(".rs-toggle");
+  if (t) {
+    t.textContent = collapsed ? "펼치기" : "접기";
+    t.setAttribute("aria-expanded", String(!collapsed));
+  }
+}
+
+// 본문 스크롤 이벤트: 맨 위로 돌아오면 자동 모드로 복귀.
+function onResultsScroll() {
+  const body = $("resultsBody");
+  if (body && body.scrollTop <= 8) summaryPinned = null;
+  syncSummaryCollapse();
+}
+
+// [접기]/[펼치기] — 사용자가 직접 고정(스크롤해도 유지).
+function toggleSummary() {
+  summaryPinned = !summaryCollapsedNow();
+  syncSummaryCollapse();
+}
+
+// 요약의 '바로가기' → 해당 카드로 이동(본문 스크롤 테이너 안에서만 스크롤).
+function gotoCardSeg(ix) {
+  const el = document.querySelector(`#resultsBody .md-card[data-ix="${ix}"]`);
+  if (!el) return;
+  el.scrollIntoView({ block: "start", behavior: "smooth" });
+  el.classList.add("flash");
+  setTimeout(() => el.classList.remove("flash"), 1200);
+}
+
+function renderReportSummary(s, docs, segs) {
   const top = $("reportSummary");
   if (!top) return;
   const isDiag = s && s.diag;
   if (!isDiag || !docs.length) { top.classList.add("hidden"); top.innerHTML = ""; return; }
   const st = reportStats(docs);
   const sevChip = (label, n, cls) =>
-    `<span class="rs-chip ${cls}"><b>${n}</b> ${label}</span>`;
+    `<span class="rs-chip ${cls}" title="${label} 위험도 ${n}건"><b>${n}</b> ${label}</span>`;
+  top.classList.remove("hidden");
   top.innerHTML = `
     <div class="rs-card">
-      <div class="rs-grade ${st.grade.cls}"><span class="rs-letter">${st.grade.letter}</span><div class="rs-grade-txt"><b>${st.grade.label}</b><span>위험도 등급</span></div></div>
-      <div class="rs-mid">
-        <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴${isDiag ? " · 실측 증거 반영 등급" : ""}</div>
-        <div class="rs-chips">
-          ${sevChip("치명", st.sev["치명"], "c-crit")}
-          ${sevChip("높음", st.sev["높음"], "c-high")}
-          ${sevChip("중간", st.sev["중간"], "c-med")}
-          ${sevChip("낮음", st.sev["낮음"], "c-low")}
+      <div class="rs-topline">
+        <div class="rs-grade ${st.grade.cls}" title="검증 상태(실증·징후·가정)를 반영해 산정한 위험도 등급">
+          <span class="rs-letter">${st.grade.letter}</span>
+          <div class="rs-grade-txt"><b>${st.grade.label}</b><span>위험도 등급</span></div>
+        </div>
+        <div class="rs-head">
+          <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴 <span class="rs-sub">· 실측 증거 반영</span><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
+          <div class="rs-chips">
+            ${sevChip("치명", st.sev["치명"], "c-crit")}
+            ${sevChip("높음", st.sev["높음"], "c-high")}
+            ${sevChip("중간", st.sev["중간"], "c-med")}
+            ${sevChip("낮음", st.sev["낮음"], "c-low")}
+          </div>
+        </div>
+        <div class="rs-verify" title="실측으로 어디까지 확인했는지 — 실증(초록) · 징후(노랑) · 가정(회색)">
+          <span class="rs-vtitle">검증</span>
+          <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 실증</span>
+          <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 징후</span>
+          <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 가정</span>
+        </div>
+        <div class="rs-actions">
+          <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
+          <button id="rsPdf" class="rs-btn primary" title="리포트를 인쇄 대화상자에서 PDF로 저장">PDF</button>
+          <button id="rsExport" class="rs-btn" title="리포트를 Markdown(.md) 파일로 저장">MD</button>
+          <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML</button>
+          <button id="rsToggle" class="rs-btn rs-toggle" aria-expanded="true" title="요약 접기/펼치기 — 접으면 리포트 본문이 더 넓게 보입니다">접기</button>
         </div>
       </div>
-      <div class="rs-verify">
-        <span class="rs-vtitle">검증 상태</span>
-        <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 실증</span>
-        <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 징후</span>
-        <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 가정</span>
+      <span id="rsExportStatus" class="rs-export-status"></span>
+      <div class="rs-drawer">
+        ${renderDiagNav(st, segs)}
+        <div class="rs-legend">
+          <span class="rs-legend-item"><span class="badge bx-crit">치명</span>위험도(치명→낮음)</span>
+          <span class="rs-legend-item"><span class="badge bx-proof">실증</span>실측 확인</span>
+          <span class="rs-legend-item"><span class="badge bx-sig">징후</span>부분 확인</span>
+          <span class="rs-legend-item"><span class="badge bx-assume">가정</span>추론(미확인)</span>
+        </div>
       </div>
-      <div class="rs-actions">
-        <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
-        <button id="rsPdf" class="rs-btn primary" title="리포트를 인쇄 대화상자에서 PDF로 저장">PDF 저장</button>
-        <button id="rsExport" class="rs-btn" title="리포트를 Markdown(.md) 파일로 저장">MD 저장</button>
-        <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML 저장</button>
-        <span id="rsExportStatus" class="rs-export-status"></span>
-      </div>
-      ${isDiag ? renderDiagNav(st) : ""}
     </div>`;
-  top.classList.remove("hidden");
   const exp = $("rsExport");
   const cpy = $("rsCopy");
   const expH = $("rsExportHtml");
   const pdf = $("rsPdf");
+  const tgl = $("rsToggle");
   if (exp) exp.onclick = async () => await exportReport(s);
   if (expH) expH.onclick = async () => await exportReport(s, true);
   if (cpy) cpy.onclick = async () => await copyReport(s);
   if (pdf) pdf.onclick = () => printReport(s);
-  // 진단 루트 위험도 필터 내비
+  if (tgl) tgl.onclick = () => toggleSummary();
+  // 위험도 필터(루트 보기) — 같은 칩을 다시 누르면 해제.
   document.querySelectorAll("#reportSummary [data-f]").forEach((chip) => {
     chip.onclick = () => {
       const v = chip.dataset.f;
@@ -1031,21 +1107,58 @@ function renderReportSummary(s, docs) {
       renderResults();
     };
   });
+  // 바로가기 — 해당 카드로 스크롤.
+  document.querySelectorAll("#reportSummary [data-goto]").forEach((chip) => {
+    chip.onclick = () => gotoCardSeg(Number(chip.dataset.goto));
+  });
+  // 리포트 영역이 이보다 낮으면 접고 시작해 본문을 우선 보여준다.
+  const rvH = ($("view-results") || {}).clientHeight || 0;
+  summaryTightWindow = rvH > 0 && rvH < SUMMARY_TIGHT_H;
+  syncSummaryCollapse();
 }
 
 // 진단 결과 위험도 필터 내비(루트 카드처럼 카드 렌더/숨김)
-function renderDiagNav(st) {
+// 위험도 필터 내비 — 위험도별로 루트 카드만 골라 본다(같은 칩을 다시 누르면 해제).
+function renderDiagNav(st, segs) {
   const sevs = ["치명", "높음", "중간", "낮음"];
   const clsFor = { "치명": "crit", "높음": "high", "중간": "med", "낮음": "low" };
   const active = diagFilter;
   const chip = (lbl, v, cls) => {
     const on = v === "ALL" ? !active || !active.size : !!(active && active.has(v));
-    return `<button class="rs-nav-chip ${cls}${on ? " on" : ""}" data-f="${v}">${lbl}</button>`;
+    return `<button class="rs-nav-chip ${cls}${on ? " on" : ""}" data-f="${v}" title="${lbl} 루트만 보기">${lbl}</button>`;
   };
-  return `<div class="rs-nav"><span class="rs-nav-label">루트 보기</span>
+  const filteredCount = (segs || []).filter((it) => it.kind === "root").length;
+  const filtered = !!(active && active.size);
+  const rootCountTxt = filtered
+    ? `${filteredCount}개 표시 · 전체 ${st.roots}개`
+    : `${st.roots}개 루트`;
+  return `<div class="rs-nav"><span class="rs-nav-label">위험도</span>
      ${chip("전체", "ALL", "n-all")}
      ${sevs.map((sv) => chip(sv, sv, "n-" + clsFor[sv])).join("")}
-     <span class="rs-nav-count">${st.roots}개 루트</span></div>`;
+     ${filtered ? `<span class="rs-nav-note">필터 적용 중 — 같은 칩을 누르면 전체로 돌아옵니다</span>` : ""}
+     <span class="rs-nav-sep"></span>
+     ${renderJumpNav(segs)}
+     <span class="rs-nav-count">${rootCountTxt}</span></div>`;
+}
+
+// 바로가기 내비 — 카드가 많아도 원하는 섹션으로 한 번에 이동(요약·루트 N·권고).
+const JUMP_CLS = { "치명": "j-crit", "높음": "j-high", "중간": "j-med", "낮음": "j-low" };
+function renderJumpNav(segs) {
+  if (!segs || segs.length < 3) return "";
+  let rootNo = 0;
+  const label = (it) => {
+    if (it.kind === "root") { rootNo++; return `루트 ${rootNo}`; }
+    if (it.kind === "prelude") return "요약";
+    if (it.kind === "tail") return "권고";
+    return "결과";
+  };
+  const chips = segs
+    .map((it, i) => {
+      const cls = it.sev ? JUMP_CLS[it.sev] || "" : "j-none";
+      return `<button class="rs-jump-chip ${cls}" data-goto="${i}" title="${esc(it.title || label(it))}">${label(it)}</button>`;
+    })
+    .join("");
+  return `<div class="rs-jump"><span class="rs-nav-label">바로가기</span>${chips}`;
 }
 
 // ── 보고서 내보내기/복사 ─────────────────────────────────────────────────────
@@ -1311,12 +1424,12 @@ function renderResults() {
   const el = $("resultsBody");
   const cnt = $("resultsCount");
   const docs = s ? resultDocs(s) : [];
-  renderReportSummary(s, docs);
   if (cnt) { cnt.textContent = String(docs.length); cnt.style.display = docs.length ? "inline-flex" : "none"; }
   if (!el) return;
   // 재렌더 전 이전 플레이어의 재생 타이머 정리
   el.querySelectorAll("[data-sim]").forEach(simStop);
   if (!docs.length) {
+    renderReportSummary(s, docs, null); // 결과 없음 → 요약도 감춘다
     el.innerHTML = `<div class="placeholder">아직 표시할 결과가 없습니다.<br/>에이전트가 정리한 마크다운 결과가 여기에 렌더링되어 표시됩니다.</div>`;
     return;
   }
@@ -1330,6 +1443,7 @@ function renderResults() {
     segs = segs.map((it) => (it.kind === "root" && fset.has(it.sev) ? it : it.kind === "root" ? null : it)).filter(Boolean);
   }
   resultsSegs = segs;
+  renderReportSummary(s, docs, segs);
   el.innerHTML = segs.map((it, i) => {
     const isRoot = it.kind === "root";
     const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
@@ -1337,7 +1451,7 @@ function renderResults() {
       : it.kind === "prelude" ? `<span class="md-kind pre">요약·범위</span>`
       : it.kind === "tail" ? `<span class="md-kind tail">권고·실측</span>`
       : `<span class="md-kind doc">결과</span>`;
-    const title = isRoot ? esc(it.title) : (it.seq != null ? `#${it.seq}` : (it.kind === "tail" ? "권고·실측 확인" : it.kind === "prelude" ? "요약·범위" : ""));
+    const title = isRoot ? esc(it.title) : (it.seq != null ? `#${it.seq}` : "");
     return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}" data-ix="${i}">
        <header class="md-card-head">
          ${tag}<span class="md-card-title">${title}</span>
@@ -2022,6 +2136,8 @@ function wire() {
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
   const rb = $("resultsBody");
+  // 리포트 본문을 스크롤하면 상단 요약을 접어 본문 공간을 넓게 쓴다.
+  if (rb) rb.addEventListener("scroll", onResultsScroll, { passive: true });
   if (rb) rb.addEventListener("click", (e) => {
     // 개별 결과 내보내기 (카드마다 복사/PDF/MD/HTML)
     const rdExp = e.target.closest(".rd-exp");
