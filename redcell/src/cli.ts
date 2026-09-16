@@ -364,6 +364,10 @@ async function cmdAssault(args: Args): Promise<void> {
   --target-map <file.json>  아는 경로/파라미터 주입 (정찰 보강)
   --ndjson               이벤트를 NDJSON 로 출력
 
+리포트: report.md/html/json 3종 — 각 실행은 "방어자 시점" 섹션을 포함한다
+         (대상에 보낸 요청 수 · 401/403 · 429 · 5xx · 시그니처). 블루팀/SOC 인계용이며
+         흔적을 지우는 기능이 아니다.
+
 종료코드: 0 clean · 2 findings · 3 인가 밖 차단 · 4 대상 미도달 · 1 오류`);
     return;
   }
@@ -445,6 +449,12 @@ async function cmdAssault(args: Args): Promise<void> {
   const r = res.report;
   console.error(`✅ 완료 — 판정 ${r.verdict}: ${r.verdictReason}`);
   console.error(`   발견 ${r.findings.length}건 · 탈취 가능 정보 ${r.exposed.length}건 · 툴 ${r.coverage.toolsRun}회`);
+  const noise = r.noise;
+  if (noise && noise.requests > 0) {
+    console.error(
+      `🛡️  방어자 시점: 요청 ${noise.requests}건 (401/403 ${noise.statuses.denied} · 429 ${noise.statuses.limited} · 5xx ${noise.statuses.server5xx}) — 인계용 수치는 report.md 참고`,
+    );
+  }
   if (!ndjson) {
     console.log(`📄 보고서: ${res.reportDir}/report.md`);
     console.log(`🖥️  HTML : ${res.reportDir}/report.html`);

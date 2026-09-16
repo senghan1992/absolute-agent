@@ -85,6 +85,9 @@ describe("runAssault e2e", () => {
     writeFileSync(authFile, "# RedCell 인가 목록\n198.51.100.1\n"); // 다른 호스트만 인가
     const res = await runAssault({ url: "http://203.0.113.7/", authFile, authorize: false, ai: false });
     expect(res.exitCode).toBe(3);
+    // 미인가 종료라도 같은 형태의 방어자 시점 필드를 낸다(요청은 0건).
+    expect(res.report.noise).toBeDefined();
+    expect(res.report.noise!.requests).toBe(0);
     rmSync(dir, { recursive: true, force: true });
   }, 30_000);
 
@@ -99,6 +102,7 @@ describe("runAssault e2e", () => {
     await new Promise<void>((ok) => tmp.close(() => ok()));
     const res = await runAssault({ url: `http://127.0.0.1:${openPort}/`, authFile, authorize: true, ai: false });
     expect(res.exitCode).toBe(4);
+    expect(res.report.noise).toBeDefined(); // 미도달이어도 필드 형태는 동일
     rmSync(dir, { recursive: true, force: true });
   }, 30_000);
 });

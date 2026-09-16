@@ -40,12 +40,14 @@ describe("runAssault 방어자 시점 요약", () => {
   it("보고서 요청 수 = 대상이 받은 요청 수 (기록 누락 없음)", async () => {
     const port = (server.address() as { port: number }).port;
     const dir = mkdtempSync(join(tmpdir(), "rc-noise-"));
+    const events: Array<{ type?: string; text?: string }> = [];
     const res = await runAssault({
       url: `http://127.0.0.1:${port}/`,
       authFile: join(dir, "authorization.list"),
       authorize: true,
       ai: false,
       outDir: join(dir, "out"),
+      onEvent: (e) => events.push(e as { type?: string; text?: string }),
     });
     const noise = res.report.noise;
     expect(noise).toBeDefined();
@@ -62,6 +64,10 @@ describe("runAssault 방어자 시점 요약", () => {
     expect(noise!.statuses.denied).toBe(statusTally[403] ?? 0);
     // 상위 경로는 대상에 실제로 간 경로 중 하나다.
     expect(noise!.topPaths.length).toBeGreaterThan(0);
+    // 이벤트 스트림(패널·--ndjson 소비자)에도 같은 수치가 흘러야 한다.
+    const note = events.find((e) => e.type === "note" && (e.text ?? "").includes("\uBC29\uC5B4\uC790\uC2DC\uC810"));
+    expect(note).toBeDefined();
+    expect(note!.text).toContain(String(noise!.requests));
     rmSync(dir, { recursive: true, force: true });
   }, 120_000);
 

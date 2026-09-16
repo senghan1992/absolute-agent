@@ -389,12 +389,10 @@ async function runAssaultInner(opts: AssaultOptions, noiseSamples: NoiseSample[]
   const durationMs = Date.parse(finishedAt) - Date.parse(startedAt);
   const noise = summarizeNoise(noiseSamples);
   if (noise.requests > 0) {
-    transcript.push(
-      logLine(
-        "방어자시점",
-        `요청 ${noise.requests}건 (401/403 ${noise.statuses.denied} · 429 ${noise.statuses.limited} · 5xx ${noise.statuses.server5xx})`,
-      ),
-    );
+    const line = `요청 ${noise.requests}건 (401/403 ${noise.statuses.denied} · 429 ${noise.statuses.limited} · 5xx ${noise.statuses.server5xx})`;
+    transcript.push(logLine("방어자시점", line));
+    // 인계용 수치를 이벤트 스트림에도 흘린다(패널·--ndjson 소비자가 같은 값을 본다).
+    emit({ type: "note", text: `[방어자시점] ${line}` });
   }
 
   const report: AssaultReport = {
@@ -486,6 +484,8 @@ function stubReport(
       ? `대상 ${target.host} 는 인가 목록에 없어 어떤 요청도 보내지 않았다. 인가 파일: ${authFile}`
       : `대상 ${target.host} 에 도달하지 못해 스캔을 시작하지 않았다: ${reason}`,
     transcript,
+    // 스텁(인가 차단·미도달)에도 같은 형태로 넣는다 — 소비자가 report.noise 유무로 분기하지 않도록.
+    noise: summarizeNoise(noiseSamples),
     meta: {
       command: "redcell assault",
       model: opts.modelLabel ?? (opts.model ? "custom" : "deterministic"),
