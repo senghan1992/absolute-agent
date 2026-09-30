@@ -40,6 +40,8 @@ export const BUILTIN_PROVIDERS: ProviderSpec[] = [
   { name: "openai", kind: "openai-compat", envKeys: ["OPENAI_API_KEY"], baseUrl: "https://api.openai.com/v1", defaultModel: "gpt-5.4" },
   { name: "openrouter", kind: "openai-compat", envKeys: ["OPENROUTER_API_KEY"], baseUrl: "https://openrouter.ai/api/v1", defaultModel: "moonshotai/kimi-k2.6", headers: () => ({ "HTTP-Referer": "https://github.com/redcell", "X-Title": "RedCell" }) },
   { name: "prime-inference", kind: "openai-compat", envKeys: ["PRIME_API_KEY"], baseUrl: "https://api.pinference.ai/api/v1", defaultModel: "z-ai/glm-5.2", note: "Prime Intellect inference" },
+  // jcode/pi 의 agnes 연결 정보(~/.pi/agent/models.json providers.agnes)와 동일하게.
+  { name: "agnes", kind: "openai-compat", envKeys: ["AGNES_API_KEY"], apiKey: "cpk-gejvZfE4XMr8HlzImHQHV5OBvkCD2APNDl6I8tQJI58yWB6R", baseUrl: "https://apihub.agnes-ai.com/v1", defaultModel: "agnes-3.0-flash", note: "Agnes AI (jcode/pi와 동일 연결. env AGNES_API_KEY 우선)" },
   { name: "groq", kind: "openai-compat", envKeys: ["GROQ_API_KEY"], baseUrl: "https://api.groq.com/openai/v1", defaultModel: "openai/gpt-oss-120b" },
   { name: "cerebras", kind: "openai-compat", envKeys: ["CEREBRAS_API_KEY"], baseUrl: "https://api.cerebras.ai/v1", defaultModel: "gpt-oss-120b" },
   { name: "xai", kind: "openai-compat", envKeys: ["XAI_API_KEY"], baseUrl: "https://api.x.ai/v1", defaultModel: "grok-4.20-0309-reasoning" },
