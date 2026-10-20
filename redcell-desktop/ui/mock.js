@@ -106,6 +106,8 @@
  공격 흐름: 공격자 → /login 로그인 폼 → (SQL 주입 = 입력값으로 DB 질의를 조작) → 인증 우회 → (관리자 세션 탈취) → 전체 회원 개인정보 열람
  탈취 정보: 관리자 세션 토큰, 회원 이메일 주소, 비밀번호 해시, 배송지 주소
  공격 방법: user 값에 \`' OR '1'='1' -- \` 주입 → WHERE 절을 항상 참으로 만들어 관리자 계정으로 로그인
+ 멘토 노트: 로그인 입력값을 SQL 문장에 그대로 이어붙이면 공격자의 입력이 코드가 된다. 그래서 항상 참이 되는 조건을 넣으면 비밀번호 검사 자체가 무력화된다 — 입력과 코드를 분리하는 것(Prepared Statement)이 핵심이다.
+ 증거: POST /login user=\`admin' OR '1'='1' -- \` → 302 + Set-Cookie: SESSION=adm_9f2c… / 응답 본문에 "You have an error in your SQL syntax" 노출
  영향: 관리자 계정 전체 장악 — 회원 개인정보·주문·결제 내역 전수 유출
  시뮬레이션:
  1. /login 의 id 입력창에 \`admin' OR '1'='1' -- \` 입력 후 로그인 클릭 → 302 리다이렉트 + Set-Cookie: SESSION=adm_9f2c… 발급
@@ -382,6 +384,77 @@
     timers[session.id] = timer;
   }
 
+  // ── 심층 진단 시뮬레이션: 워커 5개 상태 + 중간 발견 + 최종 병합 리포트 ──────
+  const DEEP_DEMO_WORKERS = [
+    { worker: "w1", label: "W1·정찰", title: "표면 정찰" },
+    { worker: "w2", label: "W2·주입", title: "주입 공격" },
+    { worker: "w3", label: "W3·인증", title: "인증·세션·권한" },
+    { worker: "w4", label: "W4·노출", title: "노출·설정 오류" },
+    { worker: "w5", label: "W5·로직", title: "비즈니스 로직" },
+  ];
+  function simulateDeep(session) {
+    const tp = session.engine === "prime" ? "prime-툴✓" : "pi-툴✓"; // 엔진별 툴 노트 접두
+    const eng = session.engine === "prime" ? "prime-agent" : "pi";
+    const authed = !!(session.auth_cookie && session.auth_cookie.trim());
+    const danger = !!session.danger_consent;
+    const suffix = `${authed ? "(인증)" : ""}${danger ? "(파괴적 동의)" : ""}`;
+    const p0note = danger
+      ? `[sys] P0 스윕${suffix} — 프로브 341개·발견 14건(치명 1/높음 4/중간 5/낮음 3/정보 1)·검증 6건·24.7초.`
+      : authed
+        ? `[sys] P0 스윕${suffix} — 프로브 318개·발견 11건(치명 0/높음 3/중간 4/낮음 3/정보 1)·검증 6건·19.4초.`
+        : `[sys] P0 스윕${suffix} — 프로브 312개·발견 9건(치명 0/높음 2/중간 4/낮음 2/정보 1)·검증 5건·18.2초.`;
+    const seq = [
+      { type: "note", text: `[sys] 심층 진단 시작(${eng}) — 5개 분야 워커를 동시에 실행합니다(정찰·주입·인증·노출·로직).` },
+      { type: "worker_status", worker: "p0", label: "P0·스윕", title: "자동 스윕", state: "running" },
+      ...(danger ? [{ type: "note", text: "[경고] P0 파괴적 프로브 실행 — 기본자격·IDOR 인접·쓰기 검증 (사용자 동의 기반)" }] : []),
+      { type: "note", text: p0note },
+      ...(authed ? [{ type: "note", text: "[sys] P0 인증 스윕 — 세션 쿠키 적용 · 로그인 폼 1건 발견 · injection 시도(무해 페이로드) 결과는 리포트의 auth-inject 시나리오를 확인하세요." }] : []),
+      ...(danger ? [{ type: "note", text: "[sys] P0 파괴적 결과 — 기본자격 admin/admin1234 성공 [치명] · IDOR 인접 열람 [높음] · 쓰기 검증·정리됨 [높음] (동의 기반, 상세는 리포트 참조)" }] : []),
+      { type: "worker_status", worker: "p0", label: "P0·스윕", title: "자동 스윕", state: "done" },
+      ...DEEP_DEMO_WORKERS.map((w) => ({ type: "worker_status", worker: w.worker, label: w.label, title: w.title, state: "running" })),
+      { type: "note", worker: "w1", text: `[W1·정찰] [${tp}] web_fetch (812ms) — 200 · nginx · X-Powered-By: PHP/8.1` },
+      { type: "note", worker: "w4", text: `[W4·노출] [${tp}] web_fetch (640ms) — /.env 200 · APP_KEY 노출 확인` },
+      { type: "note", worker: "w1", text: "[W1·정찰] ## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP·HSTS·X-Frame-Options 없음 / 근거: 응답 헤더 원문" },
+      { type: "worker_status", worker: "w1", label: "W1·정찰", title: "표면 정찰", state: "done" },
+      { type: "note", worker: "w2", text: "[W2·주입] ## 워커 발견 (W2·주입 주입 공격)\n- [치명] 로그인 SQL 주입 신호 — DB 오류 노출 / 근거: You have an error in your SQL syntax" },
+      { type: "worker_status", worker: "w2", label: "W2·주입", title: "주입 공격", state: "done" },
+      { type: "note", worker: "w3", text: "[W3·인증] ## 워커 발견 (W3·인증 인증·세션·권한)\n- [높음] IDOR 신호 — 무인증 인접 id 열람 / 근거: /api/orders/1000 무인증 200" },
+      ...(authed ? [{ type: "note", worker: "w3", text: "[W3·인증] 로그인 injection 시도 결과 — P0 auth-inject [P-31x] 인용: baseline 200/1.2KB → SQLi 페이로드 2종 모두 차단(동일 응답, DB 오류 없음) → [실증] 주입 내성 확인, 레이트리밋 미검출(10연속 200)은 별도 [중간] 보고" }] : []),
+      { type: "worker_status", worker: "w3", label: "W3·인증", title: "인증·세션·권한", state: "done" },
+      { type: "note", worker: "w4", text: "[W4·노출] ## 워커 발견 (W4·노출 노출·설정 오류)\n- [높음] .env 노출 — 앱 키·DB 비밀번호 / 근거: /.env 200 원문" },
+      { type: "worker_status", worker: "w4", label: "W4·노출", title: "노출·설정 오류", state: "done" },
+      { type: "note", worker: "w5", text: "[W5·로직] ## 워커 발견 (W5·로직 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
+      { type: "worker_status", worker: "w5", label: "W5·로직", title: "비즈니스 로직", state: "done" },
+      { type: "note", text: "[sys] 추적 라운드 2 시작 — 교차 단서 3건 추적." },
+      { type: "note", text: "[sys] 추적 라운드 2 종료 — 신규 발견 0건." },
+      { type: "note", text: "[sys] 수렴 — 추가 발견 없음, collector 로 진행합니다." },
+      { type: "note", text: "[sys] 워커 5/5 완료(2라운드) — collector 가 최종 시나리오 리포트를 병합합니다." },
+      { type: "text_end", text: DIAG_DEMO_REPORT },
+      { type: "note", text: "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요." },
+    ];
+    session.diag = true;
+    session.deep = true;
+    session.events = [];
+    session.status = "running";
+    emit("engagement-status", { sessionId: session.id, status: "running" });
+    let i = 0;
+    const timer = setInterval(() => {
+      if (i >= seq.length) {
+        clearInterval(timer); delete timers[session.id];
+        session.status = "done";
+        session.updated_at = nowIso();
+        emit("engagement-status", { sessionId: session.id, status: "done" });
+        return;
+      }
+      const ev = Object.assign({ _seq: session.events.length, _ts: Date.now() }, seq[i]);
+      session.events.push(ev);
+      session.updated_at = nowIso();
+      emit("engagement-event", { sessionId: session.id, event: ev });
+      i++;
+    }, 380);
+    timers[session.id] = timer;
+  }
+
   // 실행 중지: 스트림 타이머를 멈추고 상태를 stopped 로 마감한다.
   function stopSim(session) {
     const timer = timers[session.id];
@@ -395,6 +468,35 @@
     emit("engagement-status", { sessionId: session.id, status: "stopped" });
   }
 
+  // 프리뷰용 미니 risk 게이트 — 백엔드 risk.rs 를 흉내낸다 (동의 시 통과).
+  const MOCK_RISKS = [
+    { pats: ["shutdown", "셧다운", "재부팅", "리부팅", "전원 꺼"], level: "critical", level_ko: "치명", title: "시스템 중단·재기동", impact: "서비스 전체 중단 (재기동 전까지)", reversible: true, shutdown: true, data_loss: false },
+    { pats: ["drop table", "테이블 날려", "db 날려", "디비 날려"], level: "critical", level_ko: "치명", title: "데이터베이스 삭제", impact: "데이터 영구 손실 — 백업 없으면 복구 불가", reversible: false, shutdown: false, data_loss: true },
+    { pats: ["삭제", "지워", "rm -rf", "포맷"], level: "high", level_ko: "위험", title: "파일 삭제", impact: "파일 손실 — 휴지통·백업 없으면 복구 불가", reversible: false, shutdown: false, data_loss: true },
+    { pats: ["배포", "deploy"], level: "high", level_ko: "위험", title: "배포·운영 반영", impact: "운영 환경 변경 — 롤백 필요할 수 있음", reversible: true, shutdown: false, data_loss: false },
+    { pats: ["업로드", "올려줘"], level: "high", level_ko: "위험", title: "파일 업로드 (대상에 쓰기)", impact: "대상에 파일 생성 — 악용 시 거점화", reversible: true, shutdown: false, data_loss: false },
+  ];
+  function mockRiskGate(session) {
+    if (session.danger_consent) return;
+    const goal = (session.goal || "").toLowerCase();
+    const concerns = [];
+    for (const r of MOCK_RISKS) {
+      const hit = r.pats.find((p) => goal.includes(p.toLowerCase()));
+      if (hit) concerns.push({ id: "mock", matched: hit, title: r.title, impact: r.impact, reversible: r.reversible, level: r.level });
+    }
+    if (!concerns.length) return;
+    const level = concerns.some((c) => c.level === "critical") ? "critical" : "high";
+    const rep = {
+      level, level_ko: level === "critical" ? "치명" : "위험", concerns,
+      summary: level === "critical" ? "치명 — 데이터 손실·시스템 중단 가능, 동의 후 진행." : `위험 ${concerns.length}건 — 상태 변경 포함, 동의 후 진행.`,
+      shutdown_risk: concerns.some((c) => MOCK_RISKS.some((r) => r.title === c.title && r.shutdown)),
+      data_loss_risk: concerns.some((c) => MOCK_RISKS.some((r) => r.title === c.title && r.data_loss)),
+      irreversible: concerns.some((c) => !c.reversible),
+      needs_consent: true,
+    };
+    throw new Error("CONSENT_REQUIRED:" + JSON.stringify(rep));
+  }
+
   // ── invoke 라우터 ────────────────────────────────────────────────────────────
   async function invoke(cmd, args = {}) {
     switch (cmd) {
@@ -405,6 +507,9 @@
       case "create_session": {
         const s = { id: uid(), name: args.name && args.name.trim() ? args.name : "session-" + Math.random().toString(36).slice(2, 6),
           host: args.host || "127.0.0.1", port: args.port ?? null, goal: args.goal || "", provider: args.provider || "", mode: "prime",
+          diag: !!args.diag, deep: !!args.deep, max: !!args.max, engine: args.engine || "",
+          auth_cookie: args.auth_cookie || "",
+          danger_consent: false, danger_consented_at: "",
           status: "idle", created_at: nowIso(), updated_at: nowIso(), chat: [], events: [] };
         store.sessions.unshift(s); return clone(s);
       }
@@ -412,6 +517,21 @@
         const s = findById(args.id); if (!s) return null;
         Object.assign(s, { name: args.name, host: args.host, port: args.port, goal: args.goal, provider: args.provider, updated_at: nowIso() });
         if (args.mode) s.mode = args.mode;
+        if (args.diag !== undefined) s.diag = !!args.diag;
+        if (args.deep !== undefined) s.deep = !!args.deep;
+        if (args.engine !== undefined) s.engine = args.engine || "";
+        if (args.auth_cookie !== undefined) s.auth_cookie = args.auth_cookie || "";
+        return clone(s);
+      }
+      case "set_danger_consent": {
+        const s = findById(args.id); if (!s) return null;
+        s.danger_consent = !!args.consent;
+        s.danger_consented_at = args.consent ? nowIso() : "";
+        s.updated_at = nowIso();
+        const ev = { _seq: s.events.length, _ts: Date.now(), type: "note",
+          text: args.consent ? "[경고] 파괴적 진단 동의됨 — 기본자격 시도·IDOR 인접 확인·쓰기 검증이 다음 진단부터 실행됩니다. (세션별, 언제든 철회 가능)" : "[sys] 파괴적 진단 동의 철회 — 읽기 전용 모드로 복귀합니다." };
+        s.events.push(ev);
+        emit("engagement-event", { sessionId: s.id, event: ev });
         return clone(s);
       }
       case "delete_session": store.sessions = store.sessions.filter((s) => s.id !== args.id); return null;
@@ -420,8 +540,13 @@
         s.chat.push({ role: args.role, content: args.content, ts: nowIso() }); s.updated_at = nowIso();
         return clone(s);
       }
-      case "start_engagement": { const s = findById(args.id); if (s) simulate(s); return null; }
+      case "start_engagement": { const s = findById(args.id); if (s) { mockRiskGate(s); simulate(s); } return null; }
+      case "start_deep_diagnosis": { const s = findById(args.id); if (s) { mockRiskGate(s); simulateDeep(s); } return null; }
       case "stop_engagement": { const s = findById(args.id); if (s) stopSim(s); return null; }
+      case "detect_engines": return { pi: { found: true, path: "(preview) dist/bundle/cli.js" }, prime_agent: { found: true, path: "(preview) prime-agent", version: "0.10.0 (preview)" } };
+      case "get_memory": return { global: [], host: [] };
+      case "add_memory": return { ok: true, count: 1 };
+      case "remove_memory": return { ok: true, count: 0 };
       case "list_auth": return authResult();
       case "get_providers": return [
         { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: [], base_url: "https://api.anthropic.com/v1", ready_env: false, needs_base: false },

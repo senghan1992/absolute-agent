@@ -86,6 +86,15 @@
             <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더 (custom 등 — ⚙ 설정에서 키/모델 관리)" aria-label="LLM 프로바이더">
               <option value="">— provider 선택 —</option>
             </select>
+            <select id="shEngine" class="sh-input sh-engine" title="실행 엔진 — pi(확장 게이트) 또는 prime-agent(스킬+킬게이트)" aria-label="실행 엔진">
+              <option value="pi">pi</option>
+              <option value="prime">prime-agent</option>
+            </select>
+            <div class="sh-target sh-cookie" title="인증 스윕용 세션 쿠키(선택) — 로그인 후 브라우저에서 복사한 Cookie 값을 붙여넣으면 인증 영역까지 스윕하고 로그인 폼 injection 시도 결과를 리포트에 포함합니다. 비밀번호 저장·자동 로그인은 하지 않습니다.">
+              <span class="tgt-ico"><svg class="ic"><use href="#i-key"/></svg></span>
+              <span class="tgt-label">쿠키</span>
+              <input id="shCookie" type="password" class="sh-input sh-cookie-input" placeholder="세션 쿠키 (선택) — name=value; ..." spellcheck="false" autocomplete="off" />
+            </div>
             <span id="statusBadge" class="badge badge-idle">대기</span>
           </div>
           <div class="sh-row sh-action-row">
@@ -94,8 +103,12 @@
               <svg class="ic" id="diagIcon"><use href="#i-crosshair"/></svg>
               <span class="cmd-txt" id="diagLabel">진단 시작</span>
             </button>
+            <button id="dangerBtn" class="btn btn-danger btn-cmd" title="파괴적 진단 — 기본자격·IDOR 인접·쓰기 검증 (모달 동의 필요, 세션별)">
+              <svg class="ic"><use href="#i-alert"/></svg>
+              <span class="cmd-txt" id="dangerLabel">파괴적: 끔</span>
+            </button>
             <span class="cmd-note">
-              <b>진단 시작</b> = 대상 주소만 넣으면 보안 진단 리포트 자동 생성 · 그 외엔 오른쪽 <b>Agent</b> 패널에 하고 싶은 작업을 지시해 보세요
+              <b>진단 시작</b> = P0 자동 스윕(수백 프로브) + 5개 분야(정찰·주입·인증·노출·로직) 동시 심층 진단 후 시나리오 리포트 자동 생성 · 그 외엔 오른쪽 <b>Agent</b> 패널에 하고 싶은 작업을 지시해 보세요
             </span>
           </div>
         </div>
@@ -108,6 +121,7 @@
           <button class="subtab" data-view="results">결과<span class="count" id="resultsCount" style="display:none">0</span></button>
         </div>
         <div id="view-live" class="view active live">
+          <div id="workerBar" class="worker-bar hidden"></div>
           <div class="capture">
             <table class="cap-table">
               <thead>
@@ -157,6 +171,38 @@
         <div id="providerHint" class="provider-hint"></div>
       </aside>
     </main>
+
+    <!-- 첫 화면: URL 하나로 시작하는 온보딩 -->
+    <div id="onboardHero" class="hero hidden">
+      <div class="hero-inner">
+        <div class="hero-brand">
+          <span class="mark"><svg class="ic logo-svg"><use href="#i-logo"/></svg></span>
+          <span class="hero-brand-tx">RedCell <em>Security Diagnosis Console</em></span>
+        </div>
+        <h1>URL 하나면, 보안 진단 리포트가 나옵니다</h1>
+        <p class="hero-sub">P0 자동 스윕이 수백 가지 프로브로 빈틈을 쓸어 담은 뒤, 5개 분야 전문가 에이전트가 동시에 파고들어 공격 시나리오·증거·막는 방법까지 정리합니다. 해킹을 몰라도 읽히는 시니어 멘토 스타일 리포트.</p>
+        <div class="hero-form">
+          <input id="obUrl" class="hero-url" placeholder="https://example.com — 진단할 URL" spellcheck="false" autocomplete="off" />
+          <select id="obProvider" class="hero-provider" title="LLM 프로바이더" aria-label="LLM 프로바이더"></select>
+          <select id="obEngine" class="hero-engine" title="실행 엔진 — pi 또는 prime-agent" aria-label="실행 엔진">
+            <option value="pi">pi</option>
+            <option value="prime">prime-agent</option>
+          </select>
+          <button id="obDiag" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-crosshair"/></svg>심층 진단 시작</button>
+        </div>
+        <div id="obError" class="hero-error hidden"></div>
+        <div id="obEngines" class="hero-engines"></div>
+        <ol class="hero-steps">
+          <li><b>1</b><div><strong>URL 입력</strong><span>대상은 자동으로 인가 목록에 등록</span></div></li>
+          <li><b>2</b><div><strong>스윕+5개 분야 동시 진단</strong><span>수백 프로브 선행 후 정찰·주입·인증·노출·로직 병렬 수행</span></div></li>
+          <li><b>3</b><div><strong>시나리오 리포트</strong><span>공격 흐름·증거·보완책을 한눈에</span></div></li>
+        </ol>
+        <div class="hero-foot">
+          <span class="hero-note">모든 진단은 비파괴 실측이며 인가된 대상에만 수행됩니다</span>
+          <button id="obSkip" class="btn btn-ghost">직접 세션 만들기</button>
+        </div>
+      </div>
+    </div>
 
     <!-- 빈 상태 -->
     <div id="emptyState" class="empty-state hidden">
@@ -228,6 +274,10 @@
               <input id="setAuthPath" class="sh-input mono" placeholder="config/authorization.yaml" spellcheck="false" />
               <small class="fld-note">비우면 간단 IP 목록(<code style="font-size:inherit">~/.redcell/authorization.list</code>)을 인가로 사용합니다</small>
             </label>
+            <div class="fld">진단 엔진
+              <div id="engineStatus" class="engine-status"><span class="eng-dim">확인 중…</span></div>
+              <small class="fld-note">pi-coding-agent가 주 엔진입니다. prime-agent(Rust 하네스)가 설치돼 있으면 함께 표시됩니다.</small>
+            </div>
           </div>
 
           <div class="s-group">
@@ -263,6 +313,33 @@
         <div class="modal-actions">
           <button id="providerClose" class="btn btn-ghost">닫기</button>
           <button id="providerGoto" class="btn btn-primary">설정 열기 (⚙)</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- 파괴적 진단 동의 모달 (P0 고정 목록 + 동적 위험 평가 공용) -->
+    <div id="dangerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="파괴적 진단 동의">
+      <div class="modal-card danger-card">
+        <h3 id="dangerTitle">파괴적 진단 동의</h3>
+        <p class="danger-target">대상: <code id="dangerTarget">—</code></p>
+        <div id="dangerStatic">
+          <p style="color:var(--muted); font-size:12.5px; line-height:1.6;">아래 프로브는 대상에 <b>실제 영향</b>을 줄 수 있어 기본적으로 꺼져 있습니다. 동의하면 <b>이 세션의 다음 진단부터</b> 실행됩니다.</p>
+          <ul class="danger-list">
+            <li><b>기본자격 대입</b> — 흔한 초기 자격 5종으로 로그인 시도 <span class="danger-risk">위험: 계정 잠금·로그 흔적 (잠금 신호 즉시 중단)</span></li>
+            <li><b>IDOR 인접 확인</b> — 본인 세션으로 인접 번호 리소스 조회 <span class="danger-risk">위험: 타인 데이터 수신 (증거는 마스킹 저장)</span></li>
+            <li><b>쓰기 검증</b> — 무해 마커 파일 1건 생성 후 삭제 시도 <span class="danger-risk">위험: 잔여 파일 가능 (실패 시 경로 보고)</span></li>
+          </ul>
+        </div>
+        <div id="dangerDynamic" class="hidden">
+          <div class="risk-head"><span id="riskLevel" class="risk-level">위험</span><span id="riskSummary" class="risk-summary"></span></div>
+          <div id="riskFlags" class="risk-flags"></div>
+          <ul id="riskConcerns" class="danger-list"></ul>
+          <p class="danger-note">지시문 분석 결과입니다. 동의하면 이 지시를 실행하고, 이 세션의 파괴적 진단(P0 3종 포함)이 함께 활성화됩니다.</p>
+        </div>
+        <label class="danger-ack"><input type="checkbox" id="dangerAck" /> 대상에 대한 명시적 진단 인가를 보유하고 있으며, 위 위험을 이해하고 동의합니다.</label>
+        <div class="modal-actions">
+          <button id="dangerCancel" class="btn btn-ghost">취소</button>
+          <button id="dangerConfirm" class="btn btn-danger-solid" disabled>동의하고 활성화</button>
         </div>
       </div>
     </div>

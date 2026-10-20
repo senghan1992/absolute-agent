@@ -25,8 +25,60 @@ prime-agent 가 그 대상에서 작업(조사·정보 수집·파일 추출·�
 - **우측 패널에서 지시** — "하반기 1차 합격자 목록을 파일로 뽑아줘" 처럼 평범한 말로
   지시하면 prime-agent(pi)가 그 대상에서 알아서 수행하고, 결과물(파일 등)을 만들어 준다.
   같은 세션에서 이어서 지시하면 **대화가 이어진다**(pi `--session-id` 연속 대화).
-- **서비스 진단 모드(상단 '서비스 진단' 토글 / **[진단] 원클릭)** — **host/URL 만 넣고
-  [진단] 을 눌러도** 에이전트가 먼저 **실측 정찰**(web_fetch + recon_list 로 홈페이지·보안
+- **첫 화면 온보딩** — 세션이 없으면 URL 입력 화면이 먼저 뜬다. URL + 프로바이더만
+  고르고 **[심층 진단 시작]** 을 누르면 세션 생성·자동 인가·심층 진단이 한 번에 실행된다.
+- **P0 자동 스윕(결정적 대량 프로브)** — LLM이 움직이기 전에 Rust 엔진이 수백 건의
+  읽기 전용 프로브(민감 경로 130여 종·보안 헤더·쿠키 플래그·CORS·허용 메서드·TRACE·
+  HTTPS 대조·JS 비밀 스캔·무해 반사/XSS 마커·SQL 오류 지문·오픈 리다이렉트)를
+  수십 초 안에 실행한다. 결과는 증거 ID(`[P-###]`)와 함께 `sessions/probe-<id>.json`에
+  저장되고, 진행은 워커 보드의 **P0·스윕 칩**으로 확인한다.
+- **인증 스윕 + 로그인 injection 시도** — 상단 **쿠키** 란에 로그인 후 복사한 세션
+  쿠키를 붙여넣으면(저장되는 것은 이 세션의 스윕용 값뿐, 비밀번호 저장·자동 로그인
+  없음) 인증 영역까지 스윕한다(`P0 스윕(인증)`). 로그인 폼이 있으면 존재하지 않는
+  계정 + 고정 무해 페이로드로 baseline→SQLi 2종→레이트리밋 시도(`auth-inject`)를
+  실행하고 결과(우회 성공/차단/내성)를 시나리오 리포트에 녹인다.
+- **SPA 렌더 + P1 검증 루프** — 헤드리스 Chromium이 있으면 JS 렌더 DOM을 확보해
+  정적 HTML에 없는 폼·파라미터·스크립트까지 수집하고(없으면 정적 파싱으로 우아하게
+  진행), P1 패스에서 XSS 재반사·SQLi Boolean 차분·리다이렉트 제2호스트·민감 경로
+  재확인으로 1차 발견을 검증(`verify-*`, 요약의 `검증 N건`)한다. `[실증]`은 P0+P1
+  확정 또는 직접 재현에만 붙는다.
+- **반복 agentic loop** — 1차 워커 실행 후 신규 발견이 있으면 동일 세션에서 최대
+  2회 추적 라운드를 돈다. 각 워커는 자기 이전 보고 + 타 워커 교차 단서를 물고
+  `[가정]` 승격·연계 추적을 시도하고, 신규 발견이 0건이면 수렴 종료한다(결정적
+  상한 3라운드, 라운드별 `추적 라운드 N 시작/종료` 노트, collector 는 전 라운드
+  누적본을 병합).
+- **인증우회 퍼징(`auth-bypass`, 읽기 전용)** — 세션 쿠키가 JWT 형태면 오프라인
+  해석(alg=none 즉시 high, exp 없음 info) 후 **본인 세션만** 변조·재전송해서
+  alg=none·서명 제거 위조 수락 여부를 판정한다(GET 4회). 인증 필요 후보 경로
+  10종은 쿠키 유무 차분으로 게이트 누락을 찾고(무쿠키 200은 노출 medium/low),
+  응답 내 JWT 하드코딩은 마스킹 스캔한다. 기본자격 대입·타인 ID 인접 순회는
+  파괴적 진단 동의 시에만 열리는 별도 프로브(`danger-*`)로 분리돼 있다.
+- **쓰기계열 탐지형 진단(무발송)** — PUT/DELETE/PATCH·업로드 전송은 절대 하지 않고,
+  OPTIONS Allow 판독(`methods`, PUT/DELETE는 medium)·업로드 폼 표면 식별
+  (`upload-surface`, action·필드명 + 보완 권고)·`_method` 오버라이드 힌트
+  (`method-override`)까지 탐지·권고한다. W4 워커가 증거를 인용해 설정 보완안을
+  리포트에 녹인다.
+- **파괴적 진단(명시 동의 모달)** — 기본 읽기 전용 경계를 넘어서는 3종 프로브는
+  세션 헤더의 **[파괴적]** 버튼 → 동의 모달(대상 표시 + 항목별 위험 + 체크박스
+  확인)에서 동의해야 열린다(세션별, 버튼 재클릭으로 즉시 철회, 동의 시각 감사
+  기록). 동의 시 P0가 `danger-creds`(기본자격 5종, 잠금 신호 즉시 중단·비밀번호
+  마스킹) · `danger-idor`(본인 세션 인접 ±2, 1건 확정 시 중단·증거 마스킹) ·
+  `danger-write`(무해 마커 1건 PUT→GET→DELETE 정리, 잔여 시 경로 보고)를 실행하고,
+  요약에 `(파괴적 동의)`가 붙는다. 미동의 시 각 프로브는 fail-closed 로 빈 반환한다.
+- **파괴적 지시 가드레일(동적)** — Agent 패널 자유 지시문도 실행 전에 `risk.rs`
+  가이드라인으로 평가한다. 등급별 처리: Safe(읽기·조회·추출·리포트·진단) 진행 ·
+  Caution(대량 스캔·조회) 주의 노트 후 진행 · High(파일·설정·서비스·배포·업로드·
+  DB 쓰기·공격 실행) 모달 동의 필요 · Critical(DB 삭제·포맷·셧다운·전체 kill)
+  모달 동의 필요(강한 경고). 모달에는 등급·근거·예상 영향·복구 가능 여부·
+  서비스 중단/데이터 손실 플래그를 표시하고, 체크박스 확인 시 세션 동의를 받아
+  자동 재시도한다. 부정 표현("~하지 마", "don't")과 단어 경계로 오탐을 억제하고,
+  "파일로 뽑아줘" 같은 조회 지시는 모달 없이 진행된다.
+- **심층 진단([진단 시작] 원클릭)** — **host/URL 만 넣고 [진단 시작] 을 누르면** P0 스윕
+  증거 위에서 5개 분야 워커(정찰·주입·인증·노출·로직)가 **독립 세션으로 동시에** 파고들고,
+  collector 가 하나로 병합해 **공격 시나리오 리포트**(prime-agent builder/fan-in 패턴)를
+  발행한다. 시나리오는 P0 증거 ID를 인용해야 하며, 모순되면 삭제·강등된다.
+  진행은 라이브 뷰 상단 **워커 보드 칩**으로 확인한다. 단일 턴 진단은 우측 Agent 지시로도 가능.
+- **서비스 진단 리포트(시니어 멘토 스타일)** — 에이전트가 먼저 **실측 정찰**(web_fetch 로 홈페이지·보안
   헤더·쿠키·엔드포인트·민감 경로 robots.txt/.well-known/openapi/.env 등을 실제 조회)로
   서비스를 파악한 뒤, 취약점과 **대비해야 할 공격 시나리오 + 미리 막는 방법**을 리포트로
   작성한다. 서비스 설명을 함께 붙여넣으면 더 정밀해진다. 리포트 형식: ① 한눈에 보기 요약 표
@@ -58,14 +110,63 @@ prime-agent 가 그 대상에서 작업(조사·정보 수집·파일 추출·�
 
 ## 동작 원리
 
-이 앱은 **prime-agent(pi)를 감싼 표시/세션 계층**이다. 공격력을 새로 만들지 않는다.
+이 앱은 **pi-coding-agent(1.3.0) / prime-agent(0.10)를 감싼 표시/세션 계층**이다.
+공격력을 새로 만들지 않는다. 세션의 `engine` 값에 따라 실행 엔진이 갈린다.
 
 ```
 redcell-desktop (Tauri, Rust)
-   └─ start_engagement(session) ──▶ pi CLI (--mode json -e <redcell 확장> --session-id …)
-        │                             (REDCELL_GATE=1 — 모든 툴 호출을 인가 목록으로 검사)
-        └─ NDJSON 이벤트 스트림 ◀─────┘  → 좌측 pi 터미널 + 우측 대화 패널
+   ├─ start_engagement(session) ──▶ pi --mode json -e <redcell 확장> --session-id …
+   │                                 또는 prime-agent --mode json --print … --skill … --session-dir …
+   └─ start_deep_diagnosis(session) ──▶ 워커 5개 병렬 (rc-…-w1…w5 / prime-sessions/<id>/w1…)
+                                           + collector fan-in (…-merge)
+        │                             (pi: -e 확장 사전 차단 / prime: 스킬+반응형 킬게이트)
+        └─ JSON 이벤트 스트림 ◀────────┘  → 워커 보드 + 라이브 캡처 + 시나리오 리포트
 ```
+
+엔진 기준: pi CLI 진입점은 정식 번들(`dist/bundle/cli.js`, 구 `dist/cli.js` 폴백 유지),
+이벤트는 pi 1.3 json 프로토콜(`text_delta`·`tool_execution_start/end`·`message_end.stopReason`·
+`agent_settled`)로 파싱한다. prime-agent(Rust 하네스)는 라이브러리 임베딩을 제공하지 않아
+직접 실행 엔진으로도 쓴다 — 세션마다 `pi`/`prime-agent` 를 고른다(상단 셀렉트·첫 화면).
+`detect_engines` 로 설치 상태·버전을 감지해 설정 화면과 첫 화면에 표시한다.
+
+```
+pi 엔진 (기본)          node <pi dist/bundle/cli.js> --mode json -e <redcell 확장> --session-id …
+prime-agent 엔진        prime-agent --mode json --print … --skill <스코프 스킬> --session-dir …
+```
+
+- **pi**: RedCell 확장을 `-e` 로 명시 로드 — `tool_call` 훅이 호출 **전에** 인가를 검사해
+  차단한다(사전 차단). 방법론은 `before_agent_start` 로 시스템 프롬프트에 주입한다(pi 1.3 방식).
+- **prime-agent(Rust 하네스 직접 실행)**: 확장 훅이 없으므로 4중 방어로 scope 를 강제한다.
+  ① 실행마다 인가 목록을 채운 스코프 스킬(`SKILL.md`)을 `--skill` 로 주입,
+  ② **선행 차단**(Linux): `LD_PRELOAD` egress 필터(`netfilter`, `connect`/`getaddrinfo`
+  후킹)가 인가 밖 연결·DNS 를 호출 전에 차단 — 위반 호출의 첫 실행 자체가 나가지
+  못한다(차단 기록은 `sessions/netfilter-<id>.log`, pi 엔진에도 동일 적용),
+  ③ JSON 스트림의 `tool_execution_start` 를 볼 때마다 호스트를 판정하고 위반이면
+  프로세스를 즉시 kill (반응형 킬게이트 — `[차단]` 노트 + 상태 `error`),
+  ④ 읽기 전용 태스킹(웹 조회는 `python_repl`+urllib GET/HEAD 만 — prime-agent 에는
+  `web_fetch` 이 없다). 세션 연속대화는 `--session-dir` + `--continue` 로 유지된다.
+  선행 차단은 `cargo build` 시 자동 생성되는 `libredcell_netfilter.so` 를 바이너리 옆에
+  두고 활성화되며, 허용 집합 = 인가 목록 + 세션 대상 + LLM API 호스트, `!` 제외가
+  우선한다. 비-Linux·`.so` 부재 시에는 기존 방어(훅/킬게이트)로 폴백하고 노트로 명시한다.
+- **정직한 한계(잔여)**: 정식 YAML 인가를 쓸 때는 데스크톱이 scope 를 해석할 수 없어
+  반응형 킬게이트 대신 선행 차단(세션 대상 단일 호스트 + LLM API)으로 강제하고 경고를
+  띄운다. 정적 링킹 자식 프로세스(Go 바이너리 등)는 `LD_PRELOAD` 가 안 먹으므로
+  스킬·킬게이트 층이 커버한다.
+- 모델 설정: pi 는 `~/.pi/agent/models.json`, prime-agent 는 `~/.prime/agent/models.json`
+  (동일 스키마 — custom/ollama 는 앱이 자동 병합). `--provider/--model/--api-key` 규칙 동일.
+
+### prime-agent 설치
+
+```sh
+git clone https://github.com/PrimeIntellect-ai/prime-agent && cd prime-agent
+cargo build --release -p pa-cli
+install -m 0755 target/release/prime-agent /usr/local/bin/prime-agent
+# 또는 REDCELL_PRIME_BIN=/경로/prime-agent 로 바이너리 직접 지정
+```
+
+심층 진단의 병렬 워커+병합(builder)·진단 메모리(harness) 구조도 prime-agent 패턴을
+따른다. 진단 메모리는 앱 데이터 `memory.json`(전역+대상별)에 누적되며 진단 지시문에
+자동 주입된다.
 
 - 엔진은 전부 형제 프로젝트 [`../redcell`](../redcell) 의 `prime-agent/extension.ts`
   (인가 게이트 + 인가 대상 전용 툴) + pi CLI 다.
@@ -113,6 +214,18 @@ cargo build
 보존되며, pi 가 인식하지 못하는 `custom` 프로바이더로 인한
 "Unknown provider / No API key found" 오류가 나지 않는다. 키를 안 쓰는 로컬 서버
 (vLLM·Ollama)도 모델명만 지정하면 동작한다(placeholder 키 자동 기록).
+
+## 검증
+
+```bash
+cd redcell-desktop/src-tauri
+cargo test --workspace      # 백엔드 + netfilter (단위·스텁 실측·LD_PRELOAD 통합)
+
+cd redcell-desktop
+./preview.sh                # UI 프리뷰 (http://localhost:5173)
+cd .verify && npm run setup # 최초 1회 (playwright, 브라우저 DL 생략)
+npm run all                 # report-ui + deep-ui (인증 스윕·추적 라운드 포함)
+```
 
 ## 세션 데이터 위치
 - Linux: `~/.local/share/dev.redcell.desktop/sessions/*.json`

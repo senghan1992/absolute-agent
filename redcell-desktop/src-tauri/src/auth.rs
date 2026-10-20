@@ -51,6 +51,45 @@ pub fn default_list_path() -> PathBuf {
     home_dir().join("authorization.list")
 }
 
+/// 호스트 인가 판정 — prime-agent 반응형 게이트용 (데스크톱 내장 매처).
+/// 규칙: deny 우선 → allow(정확·`*.` 와일드카드·IPv4 CIDR) → 그 외 차단.
+/// 빈 allows 는 전부 차단(fail-closed). 대소문자 무시.
+pub fn is_host_allowed(auth: &AuthList, host: &str) -> bool {
+    let h = host.trim().trim_end_matches('.').to_lowercase();
+    if h.is_empty() {
+        return false;
+    }
+    if auth.denies.iter().any(|d| target_matches(d, &h)) {
+        return false;
+    }
+    auth.allows.iter().any(|a| target_matches(a, &h))
+}
+
+fn target_matches(pattern: &str, host: &str) -> bool {
+    let p = pattern.trim().trim_start_matches('!').to_lowercase();
+    if p.is_empty() {
+        return false;
+    }
+    if let Some(suffix) = p.strip_prefix("*.") {
+        // 와일드카드는 하위 도메인만 (베어 도메인 제외).
+        return host.len() > suffix.len() + 1
+            && host.ends_with(suffix)
+            && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
+    }
+    if let Some((net, bits)) = p.split_once('/') {
+        if let (Ok(ip), Ok(addr)) = (net.parse::<Ipv4Addr>(), host.parse::<Ipv4Addr>()) {
+            if let Ok(b) = bits.parse::<u32>() {
+                if b <= 32 {
+                    let mask = if b == 0 { 0u32 } else { u32::MAX << (32 - b) };
+                    return (u32::from(ip) & mask) == (u32::from(addr) & mask);
+                }
+            }
+        }
+        return false;
+    }
+    p == host
+}
+
 /// 대상 문자열 검증 — ip-list.ts 의 classifyTarget 과 동일 규칙.
 pub fn validate_target(value: &str) -> Result<(), String> {
     let v = value.trim();
@@ -539,5 +578,49 @@ mod tests {
         assert!(ensure_allowed(&p, "not an ip!").is_err());
 
         std::fs::remove_dir_all(p.parent().unwrap()).ok();
+    }
+
+    fn auth_list(allows: &[&str], denies: &[&str]) -> AuthList {
+        AuthList {
+            allows: allows.iter().map(|s| s.to_string()).collect(),
+            denies: denies.iter().map(|s| s.to_string()).collect(),
+            ..Default::default()
+        }
+    }
+
+    /// 호스트 인가 판정 — prime-agent 반응형 게이트의 판정 근거.
+    /// 정확 일치·와일드카드·CIDR·deny 우선·빈 목록 fail-closed.
+    #[test]
+    fn host_allowed_exact_and_case() {
+        let a = auth_list(&["10.13.37.5", "Demo.VulnLab.local"], &[]);
+        assert!(is_host_allowed(&a, "10.13.37.5"));
+        assert!(is_host_allowed(&a, "demo.vulnlab.local"));
+        assert!(is_host_allowed(&a, "DEMO.VULNLAB.LOCAL"));
+        assert!(!is_host_allowed(&a, "10.13.37.6"));
+        assert!(!is_host_allowed(&a, "other.local"));
+        assert!(!is_host_allowed(&a, ""));
+    }
+
+    #[test]
+    fn host_allowed_wildcard_and_cidr() {
+        let a = auth_list(&["*.vulnlab.local", "10.0.0.0/24"], &[]);
+        assert!(is_host_allowed(&a, "demo.vulnlab.local"));
+        assert!(is_host_allowed(&a, "a.b.vulnlab.local"));
+        assert!(!is_host_allowed(&a, "vulnlab.local")); // 베어 도메인은 매칭 안 함
+        assert!(!is_host_allowed(&a, "vulnlab.local.evil.com"));
+        assert!(is_host_allowed(&a, "10.0.0.5"));
+        assert!(is_host_allowed(&a, "10.0.0.0"));
+        assert!(!is_host_allowed(&a, "10.0.1.5"));
+        assert!(!is_host_allowed(&a, "evil.com"));
+    }
+
+    #[test]
+    fn host_allowed_deny_wins_and_empty_closed() {
+        let a = auth_list(&["10.0.0.0/24"], &["10.0.0.5"]);
+        assert!(is_host_allowed(&a, "10.0.0.6"));
+        assert!(!is_host_allowed(&a, "10.0.0.5")); // deny 우선
+        let empty = auth_list(&[], &[]);
+        assert!(!is_host_allowed(&empty, "10.0.0.1")); // 빈 목록 = 전부 차단
+        assert!(!is_host_allowed(&empty, "anything.local"));
     }
 }

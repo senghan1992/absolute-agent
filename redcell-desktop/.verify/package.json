@@ -1,0 +1,16 @@
+{
+  "name": "redcell-verify",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RedCell Desktop UI 검증 스크립트 (Playwright) — 프리뷰 서버 필요",
+  "type": "module",
+  "scripts": {
+    "setup": "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 npm install --no-audit --no-fund",
+    "report": "node report-ui.mjs",
+    "deep": "node deep-ui.mjs",
+    "all": "node report-ui.mjs && node deep-ui.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.64.1"
+  }
+}

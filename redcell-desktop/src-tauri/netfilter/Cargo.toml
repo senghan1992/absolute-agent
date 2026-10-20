@@ -1,0 +1,12 @@
+[package]
+name = "redcell-netfilter"
+version = "0.1.0"
+edition = "2021"
+description = "RedCell egress 선행 차단 — LD_PRELOAD connect/getaddrinfo 필터 (Linux)"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+libc = "0.2"

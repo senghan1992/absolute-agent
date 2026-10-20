@@ -101,8 +101,13 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
     authError = `인가 파일을 찾을 수 없습니다 (시도: ${AUTH_CANDIDATES.join(", ")})`;
   };
 
-  // 1) 방법론 시스템 프롬프트 주입.
-  pi.appendSystemPrompt?.(METHODOLOGY);
+  // 1) 방법론 시스템 프롬프트 주입 — pi 1.3 방식(before_agent_start 반환 교체).
+  //    구 appendSystemPrompt 는 1.3 에 없어 조용히 무시되므로 반드시 이 이벤트로 주입한다.
+  pi.on("before_agent_start", async (event: any) => {
+    const base = String(event?.systemPrompt ?? "");
+    if (base.includes("RedCell — 인가된 대상 전용 AI 조수")) return;
+    return { systemPrompt: `${base}\n\n${METHODOLOGY}` };
+  });
 
   // 2) [안전 핵심] 모든 tool_call 을 scope 로 게이팅.
   pi.on("tool_call", async (event: any, _ctx: ExtensionContext) => {
@@ -427,21 +432,27 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
     }),
   );
 
-  // 5) 슬래시 명령.
+  // 5) 슬래시 명령 — pi 1.3 핸들러 서명 (args, ctx).
+  const notify = (ctx: any, msg: string) => {
+    const ui = ctx?.ui;
+    if (ui?.notify) ui.notify(msg, "info");
+    else if (ui?.info) ui.info(msg);
+    else console.log(msg);
+  };
   pi.registerCommand?.("scope", {
     description: "현재 인가(scope) 상태를 출력",
-    handler: async (ctx: ExtensionContext) => {
+    handler: async (_args: string, ctx: ExtensionContext) => {
       await ensureGuard();
       const msg = authError
         ? `⛔ 인가 파일 없음/오류: ${authError}`
         : `✅ 인가 로드됨 (간단 IP 목록 우선: ${AUTH_CANDIDATES.join(" > ")})\nRPS 제한: ${guard!.requestsPerSecond}/s`;
-      ctx.ui?.info?.(msg) ?? console.log(msg);
+      notify(ctx, msg);
     },
   });
 
   pi.registerCommand?.("playbooks", {
     description: "학습된 playbook 개수 및 목록 요약",
-    handler: async (ctx: ExtensionContext) => {
+    handler: async (_args: string, ctx: ExtensionContext) => {
       const dir = path.resolve("redcell/knowledge/playbooks");
       let names: string[] = [];
       try {
@@ -449,8 +460,7 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
       } catch {
         /* ignore */
       }
-      const msg = `📚 playbook ${names.length}건 (${dir})`;
-      ctx.ui?.info?.(msg) ?? console.log(msg);
+      notify(ctx, `📚 playbook ${names.length}건 (${dir})`);
     },
   });
 }

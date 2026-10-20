@@ -48,17 +48,23 @@ declare module "@earendil-works/pi-coding-agent" {
 
   export interface RegisteredCommand {
     description?: string;
-    handler(ctx: ExtensionContext, args?: string): Promise<void> | void;
+    handler(args: string, ctx: ExtensionContext): Promise<void> | void;
   }
 
   export type ToolCallHookResult = { block: true; reason: string } | void;
 
+  export interface BeforeAgentStartEvent {
+    type: "before_agent_start";
+    systemPrompt: string;
+    [key: string]: unknown;
+  }
+
   export interface ExtensionAPI {
     on(event: "tool_call", handler: (event: any, ctx: ExtensionContext) => Promise<ToolCallHookResult> | ToolCallHookResult): void;
+    on(event: "before_agent_start", handler: (event: BeforeAgentStartEvent, ctx: ExtensionContext) => Promise<{ systemPrompt: string } | void> | { systemPrompt: string } | void): void;
     on(event: string, handler: (event: any, ctx: ExtensionContext) => unknown): void;
     registerTool?(tool: ToolDefinition<any, any, any>): void;
     registerCommand?(name: string, options: Omit<RegisteredCommand, "name">): void;
-    appendSystemPrompt?(text: string): void;
     [key: string]: unknown;
   }
 

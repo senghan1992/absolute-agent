@@ -86,6 +86,7 @@ function renderTabs() {
 
 // ── 렌더: 활성 세션 전체 ─────────────────────────────────────────────────────
 function renderActive() {
+  syncHero();
   const s = cur();
   const empty = $("emptyState");
   if (!s) { empty.classList.remove("hidden"); return; }
@@ -105,6 +106,10 @@ function renderActive() {
     }
     psel.value = clean;
   }
+  const esel = $("shEngine");
+  if (esel) esel.value = s.engine === "prime" ? "prime" : "pi";
+  if ($("shCookie")) $("shCookie").value = s.auth_cookie || "";
+  syncEngineSelects();
   const chatInput = $("chatInput");
   if (chatInput) {
     chatInput.placeholder = (s && s.diag)
@@ -112,6 +117,7 @@ function renderActive() {
       : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
   }
   setBadge(s.status);
+  renderDangerBtn(s);
 
   renderCapture(s);
   renderStepper(s);
@@ -121,6 +127,94 @@ function renderActive() {
   renderNext(s);
   renderChat();
   renderDetail(null);
+}
+
+// ── 파괴적 진단 동의 ─────────────────────────────────────────────────────────
+function renderDangerBtn(s) {
+  const btn = $("dangerBtn");
+  const label = $("dangerLabel");
+  if (!btn || !label) return;
+  const armed = !!(s && s.danger_consent);
+  btn.classList.toggle("armed", armed);
+  label.textContent = armed ? "파괴적: 켬" : "파괴적: 끔";
+  btn.title = armed
+    ? `파괴적 진단 동의됨${s.danger_consented_at ? " (" + s.danger_consented_at + ")" : ""} — 클릭하면 즉시 철회`
+    : "파괴적 진단 — 기본자격·IDOR 인접·쓰기 검증 (모달 동의 필요, 세션별)";
+}
+let pendingDangerRetry = null; // 동의 후 재시도할 실행 (취소 시 파기)
+function parseConsentError(e) {
+  const s = String((e && e.message) || e || "");
+  const i = s.indexOf("CONSENT_REQUIRED:");
+  if (i < 0) return null;
+  try { return JSON.parse(s.slice(i + "CONSENT_REQUIRED:".length)); } catch { return { level: "high", level_ko: "위험", concerns: [], summary: "파괴적 지시로 판단됨", shutdown_risk: false, data_loss_risk: false, irreversible: false }; }
+}
+function openDangerModal() {
+  const s = cur();
+  if (!s) return;
+  pendingDangerRetry = null;
+  $("dangerTitle").textContent = "파괴적 진단 동의";
+  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(대상 미지정)";
+  $("dangerStatic").classList.remove("hidden");
+  $("dangerDynamic").classList.add("hidden");
+  $("dangerAck").checked = false;
+  $("dangerConfirm").disabled = true;
+  $("dangerModal").classList.remove("hidden");
+}
+// 동적 위험 모달 — 백엔드 risk 평가를 표시하고 동의 시 retry() 재시도.
+function openRiskModal(risk, retry) {
+  const s = cur();
+  if (!s) return;
+  pendingDangerRetry = retry || null;
+  $("dangerTitle").textContent = "파괴적 지시 확인";
+  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(대상 미지정)";
+  $("dangerStatic").classList.add("hidden");
+  $("dangerDynamic").classList.remove("hidden");
+  const lv = $("riskLevel");
+  lv.textContent = risk.level_ko || risk.level || "위험";
+  lv.className = "risk-level " + (risk.level === "critical" ? "critical" : "high");
+  $("riskSummary").textContent = risk.summary || "";
+  const flags = [];
+  flags.push(risk.shutdown_risk ? `<span class="risk-flag">서비스 중단 가능</span>` : `<span class="risk-flag ok">서비스 중단 없음</span>`);
+  flags.push(risk.data_loss_risk ? `<span class="risk-flag">데이터 손실 가능</span>` : `<span class="risk-flag ok">데이터 손실 없음</span>`);
+  flags.push(risk.irreversible ? `<span class="risk-flag">되돌릴 수 없음</span>` : `<span class="risk-flag ok">복구 가능</span>`);
+  $("riskFlags").innerHTML = flags.join("");
+  $("riskConcerns").innerHTML = (risk.concerns || []).map((c) =>
+    `<li><b>${esc(c.title)}</b> — ${esc(c.impact)} <span class="danger-risk">근거: <span class="risk-match">${esc(c.matched)}</span> · ${c.reversible ? "복구 가능" : "비가역"}</span></li>`
+  ).join("") || `<li>상세 근거 없음 — 지시를 다시 확인하세요.</li>`;
+  $("dangerAck").checked = false;
+  $("dangerConfirm").disabled = true;
+  $("dangerModal").classList.remove("hidden");
+}
+async function cancelDangerPending(note) {
+  pendingDangerRetry = null;
+  const s = cur();
+  if (note && s) {
+    await invoke("append_chat", { id: s.id, role: "system", content: "파괴적 지시 보류됨 — 동의 없이 실행하지 않았습니다." });
+    const fresh = await invoke("get_session", { id: s.id });
+    if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
+    renderChat();
+  }
+}
+async function onDangerButton() {
+  const s = cur();
+  if (!s) return;
+  if (s.danger_consent) {
+    // 철회는 즉시 (안전한 방향 — 모달 없음).
+    const upd = await invoke("set_danger_consent", { id: s.id, consent: false });
+    if (upd) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = upd; renderActive(); }
+    return;
+  }
+  openDangerModal();
+}
+async function confirmDanger() {
+  const s = cur();
+  if (!s || !$("dangerAck").checked) return;
+  const retry = pendingDangerRetry;
+  pendingDangerRetry = null;
+  const upd = await invoke("set_danger_consent", { id: s.id, consent: true });
+  $("dangerModal").classList.add("hidden");
+  if (upd) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = upd; renderActive(); }
+  if (retry) { try { await retry(); } catch (e) { console.error(e); } }
 }
 
 function setBadge(status) {
@@ -152,8 +246,9 @@ function setBadge(status) {
 // ── 캡처 테이블 ──────────────────────────────────────────────────────────────
 function renderCapture(s) {
   if (resultsTabActive()) renderResults();
+  renderWorkerBar(s);
   const body = $("capBody");
-  const evs = eventsOf(s);
+  const evs = eventsOf(s).filter((e) => e.type !== "worker_status"); // 워커 상태는 상단 칩으로
   body.innerHTML = evs.map((e, i) => rowHtml(e, i)).join("");
   $("capEmpty").style.display = evs.length ? "none" : "block";
   wireRows();
@@ -452,9 +547,34 @@ async function pushAssistant(id, content) {
   if (id === activeId) renderChat();
 }
 
+// ── 심층 진단 워커 보드: 워커별 최신 상태를 칩으로 ──────────────────────────────
+function workerStates(s) {
+  const st = {};
+  for (const e of eventsOf(s)) {
+    if (e.type === "worker_status" && e.worker) {
+      st[e.worker] = { state: e.state || "running", title: e.title || "", label: e.label || e.worker };
+    }
+  }
+  return st;
+}
+function renderWorkerBar(s) {
+  const bar = $("workerBar"); if (!bar) return;
+  const st = s ? workerStates(s) : {};
+  const order = ["p0", "w1", "w2", "w3", "w4", "w5"].filter((id) => st[id]);
+  if (!order.length) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
+  bar.classList.remove("hidden");
+  bar.innerHTML = `<span class="wk-title">심층 진단</span>` + order.map((id) => {
+    const w = st[id];
+    const dot = w.state === "done" ? "ok" : w.state === "error" ? "err" : w.state === "stopped" ? "stop" : "run";
+    const txt = w.state === "done" ? "완료" : w.state === "error" ? "실패" : w.state === "stopped" ? "중지" : "진행 중";
+    return `<span class="wk-chip ${dot}" title="${esc(w.title)}"><i></i>${esc(w.label)}<em>${txt}</em></span>`;
+  }).join("");
+}
+
 // ── 라이브 이벤트 반영 ───────────────────────────────────────────────────────
 function onLiveEvent(event) {
   const s = cur(); if (!s) return;
+  if (event.type === "worker_status") { renderWorkerBar(s); return; } // 칩만 갱신
   const body = $("capBody");
   $("capEmpty").style.display = "none";
   const seq = event._seq != null ? event._seq : eventsOf(s).length - 1;
@@ -493,7 +613,9 @@ async function onFinished(id, status) {
   {
     const summary = status === "error"
       ? "prime-agent 가 오류로 종료되었습니다. 라이브 캡처의 [sys]/[오류] 노트를 확인하세요."
-      : "완료 — 아래에서 이어서 지시할 수 있습니다(같은 대화로 이어집니다).";
+      : (s && s.deep)
+        ? "심층 진단 완료 — 결과 탭에서 공격 시나리오 리포트(흐름·증거·멘토 노트·보완책)를 확인하세요. 이어서 질문하면 같은 세션에서 답변합니다."
+        : "완료 — 아래에서 이어서 지시할 수 있습니다(같은 대화로 이어집니다).";
     await invoke("append_chat", { id, role: "assistant", content: summary });
   }
   const upd = await invoke("get_session", { id });
@@ -546,6 +668,8 @@ async function persistHeader(overrides = {}) {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
     goal: overrides.goal !== undefined ? overrides.goal : s.goal,
     provider: ($("shProvider") && $("shProvider").value && $("shProvider").value !== "mock" ? $("shProvider").value : "") || (s.provider !== "mock" ? s.provider : "") || (settings.default_provider !== "mock" ? settings.default_provider : "") || "",
+    engine: $("shEngine") ? ($("shEngine").value === "prime" ? "prime" : "") : (s.engine || ""),
+    auth_cookie: $("shCookie") ? $("shCookie").value : (s.auth_cookie || ""),
     diag: !!s.diag,
     mode: "prime", // 이 앱은 prime-agent(pi) 전용 셸이다
     max: false,
@@ -616,6 +740,12 @@ async function runEngagement() {
     setBadge("running");
     await invoke("start_engagement", { id: s.id });
   } catch (e) {
+    const risk = parseConsentError(e);
+    if (risk) { // 파괴적 지시 — 에러가 아니라 동의 모달로 전환
+      setBadge("idle");
+      openRiskModal(risk, () => runEngagement());
+      return;
+    }
     setBadge("error");
     const msg = "실행 실패: " + e;
     await invoke("append_chat", { id: s.id, role: "system", content: msg });
@@ -679,16 +809,67 @@ function setDiagPlaceholder() {
     : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
 }
 
-// ── [진단 시작] 원클릭: URL 만으로 자동 보안 진단 (취약점 + 대비 시나리오) ──────
+// ── [진단 시작] 원클릭: URL 만으로 심층 진단 (5개 분야 병렬 + 시나리오 리포트) ─
+const DEFAULT_DIAG_GOAL = "이 서비스의 보안 진단을 해줘 — 취약점, 실행 가능한 공격 시나리오, 대비해야 할 위협, 그리고 미리 막는 방법까지 리포트로 정리해줘.";
+function activeEngine() {
+  const sel = $("shEngine");
+  if (sel && sel.value) return sel.value === "prime" ? "prime" : "pi";
+  const s = cur();
+  return s && s.engine === "prime" ? "prime" : "pi";
+}
+async function beginDeepDiagnosis(s) {
+  const goal = (s.goal || "").trim() || DEFAULT_DIAG_GOAL;
+  const eng = s.engine === "prime" ? "prime-agent" : "pi";
+  await invoke("append_chat", { id: s.id, role: "user", content: goal });
+  await invoke("append_chat", { id: s.id, role: "assistant", content: `심층 진단 시작(${eng}) — 정찰·주입·인증·노출·로직 5개 워커가 동시에 파고든 뒤 하나의 시나리오 리포트로 병합합니다. 왼쪽에서 진행을 확인하세요.` });
+  const fresh = await invoke("get_session", { id: s.id });
+  if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = fresh; }
+  renderChat();
+  switchView("live");
+  try {
+    setBadge("running");
+    await invoke("start_deep_diagnosis", { id: s.id });
+  } catch (e) {
+    const risk = parseConsentError(e);
+    if (risk) { // 파괴적 진단 목표 — 동의 모달로 전환 (채팅 중복 없이 재시도)
+      setBadge("idle");
+      const sid = s.id;
+      openRiskModal(risk, async () => {
+        setBadge("running");
+        try {
+          await invoke("start_deep_diagnosis", { id: sid });
+        } catch (e2) {
+          if (parseConsentError(e2)) { setBadge("idle"); return; }
+          throw e2;
+        }
+      });
+      return;
+    }
+    setBadge("error");
+    const msg = "심층 진단 실패: " + e;
+    await invoke("append_chat", { id: s.id, role: "system", content: msg });
+    const f2 = await invoke("get_session", { id: s.id });
+    if (f2) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = f2; }
+    renderChat();
+    alert(msg);
+  }
+}
 async function runDiagnose() {
   const s = cur(); if (!s) return;
   if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 host/URL 을 입력하세요."); return; }
-  s.diag = true;
+  await persistHeader();
+  if (!activeProvider()) { showProviderModal(); return; } // 입력 보존 + 설정 유도
+  const s2 = cur();
+  const upd = await invoke("update_session", {
+    id: s2.id, name: s2.name, host: s2.host, port: s2.port,
+    goal: (s2.goal || "").trim() || DEFAULT_DIAG_GOAL,
+    provider: activeProvider() || s2.provider || "", mode: "prime", diag: true, deep: true,
+    engine: activeEngine() === "prime" ? "prime" : "",
+  });
+  if (upd) { const i = sessions.findIndex((x) => x.id === s2.id); if (i >= 0) sessions[i] = upd; }
   setDiagPlaceholder();
-  if (!activeProvider()) { showProviderModal(); return; }
-  // 단순 URL 만 있어도 에이전트가 실측 정찰로 서비스를 파악해 리포트를 낸다 (P0).
-  $("chatInput").value = "이 서비스의 보안 진단을 해줘 — 취약점, 실행 가능한 공격 시나리오, 대비해야 할 위협, 그리고 미리 막는 방법까지 리포트로 정리해줘.";
-  await sendChat();
+  await ensureTargetAuthorized();
+  await beginDeepDiagnosis(cur());
 }
 
 // ── 프로바이더: 연결된 것만 리스트에 노출, 미설정 시 모달 유도 ────────────────
@@ -894,6 +1075,7 @@ async function refreshProviders() {
       ? `LLM 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
       : "LLM 프로바이더 미연결 — ⚙ 설정에서 API 키를 등록하세요.";
   }
+  syncObProvider();
 }
 
 // ── 뷰 전환 ──────────────────────────────────────────────────────────────────
@@ -911,21 +1093,25 @@ function switchView(name) {
 // 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
 function resultDocs(s) {
   const out = [];
+  const workerFallback = []; // collector 실패 시 워커 발견이라도 보여준다
   const seen = new Set();
   let prevText = null; // text_end/message_end 이중 저장 등 연속 중복은 1개만
   for (const e of eventsOf(s)) {
     const t = (e.text || "").trim();
     if (!t) continue;
-    if (/^\[(sys|pi-툴|오류|완료|인텔)\]/.test(t)) continue;
+    if (/^\[(sys|pi-툴|prime-툴|오류|완료|인텔)\]/.test(t)) continue;
     if (/^대상 .*(인가|자동 추가)/.test(t)) continue;
     const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (t === prevText) continue; // 같은 결과가 연속 2번 저장된 경우
     prevText = t;
-    out.push({ seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t });
+    const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t };
+    // 심층 진단 워커 중간 발견([Wn·…] 태그)은 최종 리포트가 아니면 결과에서 제외.
+    if (e.worker) { workerFallback.push(doc); continue; }
+    out.push(doc);
   }
-  return out;
+  return out.length ? out : workerFallback;
 }
 
 function resultsTabActive() {
@@ -1515,11 +1701,15 @@ const VERIFY_ST = [
 ];
 function diagFieldHtml(label, content) {
   const l = label.trim();
-  const cls = l.includes("탈취") ? "field-loss" : l === "위험도" ? "field-risk" : l.includes("보완") ? "field-fix" : l === "검증" ? "field-verify" : "";
+  const cls = l.includes("탈취") ? "field-loss" : l === "위험도" ? "field-risk" : l.includes("보완") ? "field-fix" : l === "검증" ? "field-verify" : l.includes("멘토") ? "field-mentor" : l === "증거" ? "field-evidence" : l === "재현" ? "field-repro" : "";
   let body;
   if (l.includes("탈취")) {
     body = content.split(/[,，·、\/]/).map((s) => s.trim()).filter(Boolean)
       .map((s) => `<span class="dchip">${escHtml(s)}</span>`).join("");
+  } else if (l.includes("멘토")) {
+    body = `<span class="mentor-body">${inlineMd(escHtml(content))}</span>`;
+  } else if (l === "증거") {
+    body = `<pre class="ev-pre">${escHtml(content)}</pre>`;
   } else if (l === "검증") {
     // 검증 상태 마커: [실증]/[징후]/[가정] 또는 '실증 :'/'실증 —' 등 접두 — 없으면 일반 표기
     const mk = /^\s*[\[(]?(실증|징후|가정)[\])]?\s*[:：]?\s*/.exec(content);
@@ -1663,8 +1853,8 @@ function mdToHtml(src) {
       out.push(html);
       continue;
     }
-    // 진단 필드 라인 (위험도:/진입점:/탈취 정보:/공격 방법:/영향:/보완:/검증:) — 들여쓰기 허용
-    const fld = /^\s*(위험도|진입점|탈취\s*정보|공격\s*방법|영향|보완|검증|우선순위|문제)[:：]\s*(.*)$/.exec(raw);
+    // 진단 필드 라인 (위험도:/진입점:/탈취 정보:/공격 방법:/멘토 노트:/증거:/재현:/영향:/보완:/검증:) — 들여쓰기 허용
+    const fld = /^\s*(위험도|진입점|탈취\s*정보|공격\s*방법|멘토\s*노트|증거|재현|영향|보완|검증|우선순위|문제)[:：]\s*(.*)$/.exec(raw);
     if (fld) {
       flushPara();
       const lines2 = [fld[2]];
@@ -2105,16 +2295,20 @@ function wire() {
   $("providerClose").onclick = () => $("providerModal").classList.add("hidden");
   wireProviderCards();
   // 모달 공통: 바깥 클릭 / Esc 로 닫기
-  ["settingsModal", "authModal", "providerModal", "historyModal"].forEach((id) => {
+  ["settingsModal", "authModal", "providerModal", "historyModal", "dangerModal"].forEach((id) => {
     const m = $(id);
     if (!m) return;
-    m.addEventListener("pointerdown", (e) => { if (e.target === m) m.classList.add("hidden"); });
+    m.addEventListener("pointerdown", (e) => { if (e.target === m) { m.classList.add("hidden"); if (id === "dangerModal") cancelDangerPending(true); } });
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Escape") return;
-    ["settingsModal", "authModal", "providerModal", "historyModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) m.classList.add("hidden"); });
+    ["settingsModal", "authModal", "providerModal", "historyModal", "dangerModal"].forEach((id) => { const m = $(id); if (m && !m.classList.contains("hidden")) { m.classList.add("hidden"); if (id === "dangerModal") cancelDangerPending(true); } });
   });
   $("diagBtn").onclick = onDiagButton;
+  $("dangerBtn").onclick = onDangerButton;
+  $("dangerCancel").onclick = () => { $("dangerModal").classList.add("hidden"); cancelDangerPending(true); };
+  $("dangerAck").addEventListener("change", (e) => { $("dangerConfirm").disabled = !e.target.checked; });
+  $("dangerConfirm").onclick = confirmDanger;
   $("chatSend").onclick = sendChat;
   $("chatInput").addEventListener("keydown", (e) => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendChat(); } });
   $("scopeBtn").onclick = openAuth;
@@ -2137,7 +2331,7 @@ function wire() {
     $("chatInput").value = b.dataset.goal || b.textContent.trim();
     sendChat();
   });
-  ["shName", "shHost", "shPort", "shProvider"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
+  ["shName", "shHost", "shPort", "shProvider", "shEngine", "shCookie"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
   const rb = $("resultsBody");
@@ -2198,12 +2392,100 @@ async function listenEngagement() {
   });
 }
 
+// ── 온보딩 히어로: 세션이 없으면 URL 입력 첫 화면 ─────────────────────────────
+function syncHero() {
+  const hero = $("onboardHero"); if (!hero) return;
+  hero.classList.toggle("hidden", sessions.length > 0);
+  if (sessions.length === 0) syncObProvider();
+}
+function obError(msg) {
+  const el = $("obError"); if (!el) return;
+  if (!msg) { el.classList.add("hidden"); el.textContent = ""; return; }
+  el.classList.remove("hidden"); el.textContent = msg;
+}
+function syncObProvider() {
+  const sel = $("obProvider"); if (!sel) return;
+  const connected = PROVIDER_CATALOG.filter(providerConnected);
+  const prev = sel.value || settings.default_provider || "";
+  sel.innerHTML = `<option value="">— provider 선택 —</option>`
+    + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+  if (prev && connected.some((p) => p.name === prev)) sel.value = prev;
+  if (!connected.length) {
+    sel.insertAdjacentHTML("beforeend", `<option value="__setup">⚙ 프로바이더 연결하기…</option>`);
+  }
+}
+async function obStart() {
+  const raw = $("obUrl").value.trim();
+  if (!raw) { obError("진단할 URL을 입력하세요. (예: https://example.com)"); $("obUrl").focus(); return; }
+  const norm = normalizeTargetInput(raw);
+  if (!norm.host) { obError("URL에서 대상을 읽지 못했습니다. https:// 로 시작하는 주소를 입력하세요."); return; }
+  let prov = $("obProvider").value || settings.default_provider || "";
+  if (!prov || prov === "__setup") { showProviderModal(); return; }
+  const eng = $("obEngine").value === "prime" ? "prime" : "";
+  if (eng === "prime" && enginesInfo && !primeAvailable()) { obError("prime-agent 바이너리가 설치돼 있지 않습니다. pi 엔진을 선택하거나 prime-agent를 설치하세요."); return; }
+  obError(null);
+  const port = norm.port ? parseInt(norm.port, 10) : null;
+  const s = await invoke("create_session", {
+    name: norm.host, host: norm.host,
+    port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : null,
+    goal: DEFAULT_DIAG_GOAL, provider: prov, mode: "prime", diag: true, deep: true, engine: eng,
+  });
+  sessions.unshift(s);
+  activeId = s.id;
+  renderTabs();
+  renderActive();
+  await ensureTargetAuthorized();
+  await beginDeepDiagnosis(cur());
+}
+function wireOb() {
+  const btn = $("obDiag"); if (!btn) return;
+  btn.onclick = obStart;
+  $("obUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); obStart(); } });
+  $("obProvider").addEventListener("change", (e) => { if (e.target.value === "__setup") { e.target.value = ""; showProviderModal(); } });
+  $("obSkip").onclick = newSession;
+}
+
+// ── 엔진 상태: pi + prime-agent(직접 실행) 감지 표시 ────────────────────────────
+let enginesInfo = null;
+function engineBadge(ok, name, detail) {
+  return `<span class="eng-pill ${ok ? "on" : "off"}"><i></i>${esc(name)}<em>${esc(detail)}</em></span>`;
+}
+function primeAvailable() {
+  return !!(enginesInfo && enginesInfo.prime_agent && enginesInfo.prime_agent.found);
+}
+function syncEngineSelects() {
+  const ok = primeAvailable() || !enginesInfo; // 감지 전에는 막지 않음
+  ["shEngine", "obEngine"].forEach((id) => {
+    const sel = $(id); if (!sel) return;
+    const opt = [...sel.options].find((o) => o.value === "prime");
+    if (!opt) return;
+    opt.disabled = !ok;
+    opt.textContent = ok ? "prime-agent" : "prime-agent (미설치)";
+    if (!ok && sel.value === "prime") sel.value = "pi";
+    sel.title = ok ? "실행 엔진 — pi(확장 게이트) 또는 prime-agent(스킬+킬게이트)" : "prime-agent 미설치 — pi 엔진 사용 중";
+  });
+}
+async function refreshEngines() {
+  let info = null;
+  try { info = await invoke("detect_engines"); } catch { /* 구 백엔드·프리뷰 폴백 */ }
+  enginesInfo = info;
+  const pv = info && info.prime_agent && info.prime_agent.version;
+  const html = info
+    ? engineBadge(!!(info.pi && info.pi.found), "pi-coding-agent", info.pi && info.pi.found ? "연결됨" : "미설치 — npm i -g @earendil-works/pi-coding-agent")
+      + engineBadge(!!(info.prime_agent && info.prime_agent.found), "prime-agent", info.prime_agent && info.prime_agent.found ? `직접 실행 가능${pv ? ` (${pv})` : ""}` : "미설치(선택)")
+    : "";
+  const ob = $("obEngines"); if (ob) ob.innerHTML = html;
+  const st = $("engineStatus"); if (st) st.innerHTML = html || '<span class="eng-dim">엔진 정보를 가져오지 못했습니다</span>';
+  syncEngineSelects();
+}
+
 async function boot() {
   if (!TAURI) {
     document.body.innerHTML = '<div class="placeholder" style="margin-top:80px">이 페이지는 Tauri 앱 안에서 실행해야 합니다.<br/>터미널에서 <code>cargo tauri dev</code> 로 띄우세요.</div>';
     return;
   }
   wire();
+  wireOb();
   switchView("live");
   settings = await invoke("get_settings");
   sessions = await invoke("list_sessions");
@@ -2212,6 +2494,8 @@ async function boot() {
   renderActive();
   await listenEngagement();
   await refreshProviders();
+  syncObProvider();
+  await refreshEngines();
 }
 
 window.addEventListener("DOMContentLoaded", boot);
