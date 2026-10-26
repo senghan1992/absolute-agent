@@ -15,9 +15,13 @@
 //! `dlsym(RTLD_NEXT)` 로 다음 심볼을 찾아야 한다.)
 
 use std::collections::HashSet;
+// 아래 3개는 Linux 전용 `mod imp` 에서만 쓴다 (`use super::*` 경유) — Windows 빌드 경고를 막는다.
+#[cfg(target_os = "linux")]
 use std::ffi::CStr;
 use std::net::{IpAddr, Ipv4Addr};
+#[cfg(target_os = "linux")]
 use std::os::raw::{c_char, c_int, c_void};
+#[cfg(target_os = "linux")]
 use std::sync::OnceLock;
 
 #[derive(Debug, Clone, PartialEq, Eq)]

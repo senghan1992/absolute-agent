@@ -27,14 +27,7 @@ pub enum RiskLevel {
 }
 
 impl RiskLevel {
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            RiskLevel::Safe => "safe",
-            RiskLevel::Caution => "caution",
-            RiskLevel::High => "high",
-            RiskLevel::Critical => "critical",
-        }
-    }
+    // (as_str 는 미사용이라 제거 — 직렬화는 serde rename_all 이 담당)
     pub fn label_ko(&self) -> &'static str {
         match self {
             RiskLevel::Safe => "안전",

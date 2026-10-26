@@ -165,6 +165,8 @@ pub struct SweepFeedback {
 }
 
 impl SweepFeedback {
+    // 진행률 폴링용 접근자 — 현재 호출자는 테스트뿐이라 일반 빌드 경고를 끈다.
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn phase_label(&self) -> String {
         self.phase.lock().map(|p| p.clone()).unwrap_or_default()
     }
@@ -362,6 +364,36 @@ pub fn audit_cookies(set_cookies: &[&str], is_https: bool) -> Vec<(String, Sever
     out
 }
 
+/// 바이트 구간을 문자 경계에 맞춰 잘라 반환한다 — 어떤 오프셋이 와도 패닉 없음.
+/// 웹 본문 파싱은 신뢰할 수 없는 입력(한글 등 멀티바이트)을 다루므로 고정 바이트
+/// 잘라내기(`&s[a..b]`)를 직접 쓰지 않고 이 헬퍼를 쓴다.
+fn safe_slice(s: &str, start: usize, end: usize) -> &str {
+    let mut a = start.min(s.len());
+    while a < s.len() && !s.is_char_boundary(a) {
+        a += 1;
+    }
+    let mut b = end.min(s.len());
+    while b > a && !s.is_char_boundary(b) {
+        b -= 1;
+    }
+    &s[a..b]
+}
+
+/// ASCII 바늘의 대소문자 무시 탐색 — 원문 바이트 오프셋 반환.
+/// `to_lowercase()` 복사본에서 찾은 오프셋을 원문에 쓰면 안 된다: 소문자 변환이
+/// 바이트 길이를 바꿀 수 있어(예: 'İ' → 2문자) 원문의 문자 경계와 어긋나 패닉난다.
+/// needle 은 소문자 ASCII 여야 한다.
+fn find_ascii_ci(hay: &str, needle: &str, from: usize) -> Option<usize> {
+    let h = hay.as_bytes();
+    let n = needle.as_bytes();
+    if n.is_empty() || from >= h.len() {
+        return None;
+    }
+    (from..=h.len().saturating_sub(n.len())).find(|&i| {
+        h[i..i + n.len()].iter().zip(n.iter()).all(|(a, b)| a.to_ascii_lowercase() == *b)
+    })
+}
+
 /// 비밀 문자열 스캔 — (종류, 마스킹 발췌). 마스킹: 앞 8자 + … + 뒤 4자.
 pub fn find_secrets(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
@@ -408,17 +440,17 @@ pub fn find_secrets(text: &str) -> Vec<(String, String)> {
     ] {
         let mut rest = text;
         while let Some(pos) = rest.find(needle) {
-            let end = (pos + take).min(rest.len());
-            push(kind, &rest[pos..end]);
+            push(kind, safe_slice(rest, pos, pos + take));
             rest = &rest[pos + needle.len()..];
         }
     }
     // key=value 대입형 (따옴표 값 12자 이상, 흔한 키 이름).
-    let lower = text.to_lowercase();
+    // 원문에서 직접 대소문자 무시 탐색한다 — lowercased 복사본 오프셋을 원문에
+    // 쓰면 문자 경계가 어긋나 패닉난다 (esdp.lge.com 한글 본문에서 실발생).
     for word in SECRET_WORDS {
         let mut from = 0;
-        while let Some(pos) = lower[from..].find(word).map(|p| from + p) {
-            let seg = &text[pos..(pos + 80).min(text.len())];
+        while let Some(pos) = find_ascii_ci(text, word, from) {
+            let seg = safe_slice(text, pos, pos + 80);
             if let Some(v) = assignment_value(seg, word.len()) {
                 if v.len() >= 12 {
                     push("하드코딩 비밀 추정", v);
@@ -453,7 +485,10 @@ fn mask_secret(raw: &str) -> String {
     if r.len() <= 16 {
         return r;
     }
-    format!("{}…{}", &r[..8.min(r.len())], r[r.len().saturating_sub(4)..].to_string())
+    // 앞 8자 + … + 뒤 4자 — 문자 단위로 잘라 멀티바이트 경계 패닉을 방지한다.
+    let head: String = r.chars().take(8).collect();
+    let tail: String = r.chars().rev().take(4).collect::<String>().chars().rev().collect();
+    format!("{head}…{tail}")
 }
 
 /// `key = "value"` / `key: 'value'` 형태에서 따옴표 값을 뽑는다.
@@ -571,10 +606,11 @@ pub fn extract_params(html: &str) -> Vec<String> {
             i += 1;
         }
     }
-    // <input name="...">
-    let lower = html.to_lowercase();
+    // <input name="..."> — 원문에서 직접 대소문자 무시 탐색한다.
+    // lowercased 복사본 오프셋을 원문에 쓰면 문자 경계가 어긋나 패닉난다.
     let mut from = 0;
-    while let Some(pos) = lower[from..].find("name=\"").map(|p| from + p + 6) {
+    while let Some(found) = find_ascii_ci(html, "name=\"", from) {
+        let pos = found + 6;
         if let Some(end) = html[pos..].find('"').map(|e| pos + e) {
             push(&html[pos..end]);
             from = end + 1;
@@ -1008,8 +1044,14 @@ fn run_jobs(
                     };
                     let resp = fetch(&agent, job.method, &job.url, &hs, cap);
                     let mut local = Vec::new();
-                    classify_job(&job, resp, &mut local);
-                    if !local.is_empty() {
+                    // 단일 잡 파싱 실패가 스윕 전체를 죽이지 않게 격리한다.
+                    // 신뢰할 수 없는 웹 본문을 파싱하므로, 어떤 입력이 와도 워커는
+                    // 살아남고 다음 잡으로 넘어간다 (실패한 잡의 부분 결과는 버린다).
+                    let ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        classify_job(&job, resp, &mut local);
+                    }))
+                    .is_ok();
+                    if ok && !local.is_empty() {
                         out.lock().unwrap().extend(local);
                     }
                 }
@@ -1849,10 +1891,11 @@ pub fn scan_write_surface(html: &str, base_url: &str) -> Vec<ProbeHit> {
             Some(rest[..end].to_string())
         }).unwrap_or_default();
         let multipart = tag.contains("multipart/form-data");
-        // 폼 본문 (다음 </form> 또는 8KB 캡).
+        // 폼 본문 (다음 </form> 또는 8KB 캡) — 끝을 문자 경계로 내림한다.
+        // (to_ascii_lowercase 는 멀티바이트를 그대로 두므로 +8192 가 문자 한가운데 가능)
         let body_end = low[tag_end..].find("</form>").map(|e| tag_end + e).unwrap_or((tag_end + 8192).min(low.len()));
         let body_end = body_end.min(bytes.len());
-        let fbody = &low[tag_end..body_end];
+        let fbody = safe_slice(&low, tag_end, body_end);
         let has_file = fbody.contains("type=\"file\"") || fbody.contains("type='file'") || fbody.contains("type=file");
         let has_spoof = fbody.contains("_method") || fbody.contains("x-http-method-override");
         if has_file || multipart {
@@ -1870,7 +1913,7 @@ pub fn scan_write_surface(html: &str, base_url: &str) -> Vec<ProbeHit> {
             let mut fp = 0;
             while fields.len() < 3 {
                 let Some(fi) = fbody[fp..].find("type") else { break };
-                let seg = &fbody[fp + fi..(fp + fi + 300).min(fbody.len())];
+                let seg = safe_slice(fbody, fp + fi, fp + fi + 300);
                 if seg.contains("file") {
                     if let Some(ni) = seg.find("name=") {
                         let nv = seg[ni + 5..].trim_start_matches(['"', '\'']);
@@ -1903,7 +1946,11 @@ pub fn scan_write_surface(html: &str, base_url: &str) -> Vec<ProbeHit> {
                     if action.is_empty() { "(self)" } else { &action }),
                 String::new(), "폼 오프라인 스캔".into(), None));
         }
+        // 다음 폼 탐색 위치 — 문자 경계로 올림한다 (그대로 +7 하면 한글 한가운데 가능).
         pos = body_end + 7;
+        while pos < low.len() && !low.is_char_boundary(pos) {
+            pos += 1;
+        }
         if pos >= low.len() {
             break;
         }
@@ -2569,6 +2616,8 @@ pub fn sweep_summary_line(rep: &ProbeReport) -> String {
 }
 
 /// LLM 주입용 증거 다이제스트 — 심각도순, 글자 상한 (초과는 "외 N건 생략").
+/// main 바이너리에서만 쓴다 — sweep 은 같은 모듈을 공유하므로 미사용 경고를 끈다.
+#[allow(dead_code)]
 pub fn evidence_digest(rep: &ProbeReport, cap_chars: usize) -> String {
     let mut out = format!(
         "P0 자동 스윕 — 대상 {} · 프로브 {}개 · {:.1}초{}{} · P1 검증 {}건\n",
@@ -2657,6 +2706,51 @@ mod tests {
             assert!(!ex.contains("EXAMPLE") || ex.len() < 24, "마스킹 필요: {ex}");
         }
         assert!(find_secrets("print(40 + 2)").is_empty());
+    }
+
+    /// esdp.lge.com 실발생 회귀: lowercased 복사본 오프셋 + 고정 바이트 잘라내기가
+    /// 한글 문자 경계에서 패닉나 스윕 워커 전체를 죽였다. 아래 입력들은 전부
+    /// 패닉 없이 끝나고, 탐지 결과도 유지되어야 한다.
+    /// ('İ' U+0130 은 소문자화하면 2문자(i̇)로 불어나 오프셋을 어긋나게 한다.)
+    #[test]
+    fn korean_body_never_panics_slicing() {
+        let tricky = format!(
+            "İ{} password=\"hunter2-hunter2-1234\" <input NAME=\"Q\">ghp_한글토큰값1234567890",
+            "기".repeat(300)
+        );
+        let kinds: Vec<String> = find_secrets(&tricky).iter().map(|(k, _)| k.clone()).collect();
+        assert!(kinds.contains(&"하드코딩 비밀 추정".to_string()), "탐지 유지: {kinds:?}");
+        assert!(kinds.contains(&"GitHub 토큰".to_string()), "접두사 탐지 유지: {kinds:?}");
+        let p = extract_params(&tricky);
+        assert!(p.contains(&"Q".to_string()), "대소문자 무시 NAME 탐지 유지: {p:?}");
+        // 소문자화가 바이트를 줄이는 문자(U+212A: 3B→1B) 뒤의 매치:
+        // 구 코드는 lowercased 오프셋을 원문에 써서 '가' 한가운데에서 패닉났다.
+        let shrink = format!("\u{212A}{}password=\"hunter2-hunter2-1234\"", "가".repeat(10));
+        let kinds2: Vec<String> = find_secrets(&shrink).iter().map(|(k, _)| k.clone()).collect();
+        assert!(kinds2.contains(&"하드코딩 비밀 추정".to_string()), "축소 오프셋 탐지: {kinds2:?}");
+        // 마스킹이 한글 한가운데를 자르지 않는다.
+        let m = mask_secret(&format!("토큰값-{}-끝", "가".repeat(40)));
+        assert!(m.contains('…') && m.starts_with("토큰값-"), "{m}");
+        // 폼 본문 8KB/300B 캡 + 다음-폼 탐색(+7)이 한글 한가운데에 걸리는 케이스.
+        let long_form = format!(
+            "<form action=\"/up\" method=\"post\" enctype=\"multipart/form-data\">{}</form>",
+            format!("<input type=\"file\" name=\"f\">{}", "한".repeat(9000))
+        );
+        let hits = scan_write_surface(&long_form, "http://t:1");
+        assert!(hits.iter().any(|h| h.category == "upload-surface"), "{hits:?}");
+        let no_close = format!("<form action=\"/up\">{}{}", "기".repeat(9000), "<input type=\"file\" name=\"avatar\">");
+        let _ = scan_write_surface(&no_close, "http://t:1");
+        let two_forms = format!("<form>{}</form><form>{}</form>", "가".repeat(300), "나".repeat(300));
+        let _ = scan_write_surface(&two_forms, "http://t:1");
+        // safe_slice 경계 케이스.
+        assert_eq!(safe_slice("가나다", 0, 5), "가");
+        assert_eq!(safe_slice("가나다", 3, 8), "나");
+        assert_eq!(safe_slice("abc", 2, 99), "c");
+        assert_eq!(safe_slice("abc", 9, 99), "");
+        // ASCII 대소문자 무시 탐색.
+        assert_eq!(find_ascii_ci("xxPASSWord=1", "password", 0), Some(2));
+        assert_eq!(find_ascii_ci("xxPASSWord=1", "password", 3), None);
+        assert_eq!(find_ascii_ci("한글NAME=\"Q\"", "name=\"", 0), Some(6));
     }
 
     #[test]
