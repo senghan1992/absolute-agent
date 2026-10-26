@@ -812,7 +812,12 @@ fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
 /// 요구하는 authHeader·compat 를 함께 기록하고, OpenAI 방언으로 돌아오면 제거한다.
 /// apiKey 가 `!명령` 형태(pi 의 !command)면 그대로 기록한다 — pi 가 요청마다 실행해
 /// 토큰을 받아오므로 만료되는 키를 파일에 박지 않아도 된다 (`ug auth-token ...` 용).
+/// models.json 은 심층 진단의 5개 워커 스레드가 동시에 갱신할 수 있다 —
+/// read-modify-write 가 겹치면 엔트리가 사라지거나 반쯤 쓰인 파일이 남으므로 직렬화한다.
+static MODELS_JSON_LOCK: Mutex<()> = Mutex::new(());
+
 fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: &str, model: &str, api: &str) -> Result<(), String> {
+    let _guard = MODELS_JSON_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut root: Value = fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -839,8 +844,24 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
         compat.insert("supportsEagerToolInputStreaming".into(), Value::Bool(false));
         prov.insert("compat".into(), Value::Object(compat));
     } else {
+        // 게이트웨이 전용 필드만 걷어내고 사용자가 쓴 compat 은 보존한다.
         prov.remove("authHeader");
-        prov.remove("compat");
+        if let Some(compat) = prov.get_mut("compat").and_then(|v| v.as_object_mut()) {
+            compat.remove("supportsEagerToolInputStreaming");
+        }
+        // 보수적 OpenAI 호환 기본값 — pi 는 기본으로 stream_options.include_usage 를
+        // 보내는데, 이를 모르는 엔드포인트(구버전 vLLM·사내 프록시·ollama 구버전)는
+        // 이 필드 하나로 400 을 돌려준다. store·developer 역할도 알 수 없는
+        // 엔드포인트엔 끄고 시작한다 — 사용자가 직접 쓴 compat 값은 존중한다.
+        let mut compat = prov.get("compat").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        for (k, v) in [
+            ("supportsUsageInStreaming", json!(false)),
+            ("supportsStore", json!(false)),
+            ("supportsDeveloperRole", json!(false)),
+        ] {
+            compat.entry(k.to_string()).or_insert(v);
+        }
+        prov.insert("compat".into(), Value::Object(compat));
     }
     // apiKey 는 반드시 비어있지 않은 문자열로 남긴다 — pi 는 빈 apiKey 가 있으면
     // 프로바이더 자체를 목록에서 내려버리므로, 미설정이면 placeholder 를 쓴다
@@ -984,8 +1005,21 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
         .unwrap_or_default();
         (format!("{}/v1/messages", base.trim_end_matches('/')), Some(payload))
     } else {
-        let path = if provider == "ollama" { "/tags" } else { "/models" };
-        (format!("{}{}", base.trim_end_matches('/'), path), None)
+        let m = model.as_deref().unwrap_or("").trim();
+        if provider != "ollama" && !m.is_empty() {
+            // 모델이 지정됐으면 실제 1토큰 생성 호출로 검증한다 — GET 도달성만으로는
+            // 잡히지 않는 400(모델명 오류·필드 거부·방언 불일치)까지 잡아낸다.
+            let payload = serde_json::to_string(&json!({
+                "model": m,
+                "max_tokens": 1,
+                "messages": [{ "role": "user", "content": "ok" }],
+            }))
+            .unwrap_or_default();
+            (format!("{}/chat/completions", base.trim_end_matches('/')), Some(payload))
+        } else {
+            let path = if provider == "ollama" { "/tags" } else { "/models" };
+            (format!("{}{}", base.trim_end_matches('/'), path), None)
+        }
     };
     // GET 은 도달성 프로브(응답만 오면 OK — /models 없는 서버도 있음),
     // Anthropic POST 는 키·모델 실검증(2xx 일 때만 OK)이다.
@@ -1722,7 +1756,7 @@ fn run_prime(
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
 
-    let prep = prepare_engine_run(app, id, Engine::Pi, settings, provider, redcell, &piq, instruction)?;
+    let prep = prepare_engine_run(app, id, Engine::Pi, settings, provider, redcell, &piq, instruction, false)?;
     let (child, pipes) = spawn_prepared(&prep, provider, settings)?;
     app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
     set_status(app, id, "running");
@@ -1886,6 +1920,7 @@ fn prepare_engine_run(
     redcell: &str,
     run_tag: &str,
     instruction: String,
+    quiet: bool, // true = 방어 상태 노트를 생략 (심층 워커·사전 점검 — 실행당 1회만 출력)
 ) -> Result<PreparedRun, String> {
     match engine {
         Engine::Pi => {
@@ -1896,7 +1931,9 @@ fn prepare_engine_run(
             // 선행 차단 (pi 확장 훅과 이중 방어).
             let auth = auth::load(&resolve_app_auth_path(app));
             let nf = netfilter_extra_env(app, id, &auth, provider, settings);
-            emit_netfilter_note(app, id, !nf.is_empty());
+            if !quiet {
+                emit_netfilter_note(app, id, !nf.is_empty());
+            }
             Ok(PreparedRun {
                 prog: node,
                 args: full,
@@ -1912,7 +1949,7 @@ fn prepare_engine_run(
             let skill = write_scope_skill(&sdir.join("redcell-scope"), &auth.allows, &auth.denies)?;
             let cont = prime_session_has_history(&sdir);
             let (bin, args) = prime_run_args(settings, provider, &skill, &sdir, cont, instruction)?;
-            if auth.yaml {
+            if auth.yaml && !quiet {
                 let ev = json!({ "type": "note", "text": "[sys] 경고: 인가 파일이 정식 YAML 이라 prime-agent 반응형 킬게이트가 동작하지 않습니다 — 선행 차단(세션 대상 단일 호스트)으로 강제됩니다." });
                 let stamped = append_event(app, id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
@@ -1941,6 +1978,57 @@ fn spawn_prepared(
 ) -> Result<(Child, PiPipes), String> {
     let ee: Vec<(&str, &str)> = prep.extra_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
     launch_child(&prep.prog, &prep.args, &prep.cwd, provider, settings, &ee, "엔진 실행 실패")
+}
+
+/// LLM 연결 사전 점검 — 1턴 핑으로 프로바이더 실동작을 확인한다.
+/// 키·모델·API 방언·base URL 문제는 워커 5개가 모두 400 을 내고 collector 가
+/// "비정상 종료" 하기 전에, 여기서 원인 1건으로 잡아낸다 (심층 진단 전용).
+fn preflight_llm_check(
+    app: &AppHandle,
+    id: &str,
+    engine: Engine,
+    settings: &Settings,
+    provider: &str,
+    redcell: &str,
+    piq: &str,
+) -> Result<(), String> {
+    let ping = "연결 확인 핑입니다. 어떤 도구도 사용하지 말고 'pong' 이라고만 답하세요.".to_string();
+    // 본 대화 세션을 더럽히지 않게 버림 세션 id 로 실행한다.
+    let run_tag = if engine == Engine::Prime { "ping".to_string() } else { format!("{piq}-ping") };
+    let prep = prepare_engine_run(app, id, engine, settings, provider, redcell, &run_tag, ping, true)?;
+    let (child, pipes) = spawn_prepared(&prep, provider, settings)?;
+    let key = format!("{id}#preflight");
+    app.state::<Procs>().0.lock().unwrap().insert(key.clone(), child);
+    let app2 = app.clone();
+    let id2 = id.to_string();
+    let key2 = key.clone();
+    let prefix = prep.tool_prefix;
+    let (tx, rx) = std::sync::mpsc::channel();
+    thread::spawn(move || {
+        let outcome = pump_and_wait(&app2, &id2, &key2, pipes, None, prefix, None);
+        let _ = tx.send(outcome);
+    });
+    let timeout = std::time::Duration::from_secs(90);
+    let outcome = match rx.recv_timeout(timeout) {
+        Ok(o) => o,
+        Err(_) => {
+            // 시간 초과 — 자식을 정리하고 실패로 마감.
+            if let Some(mut c) = app.state::<Procs>().0.lock().unwrap().remove(&key) {
+                let _ = c.kill();
+            }
+            return Err(format!(
+                "모델 연결 확인(핑) 시간 초과 ({:?}) — '{provider}' 엔드포인트가 응답하지 않습니다. 네트워크·base URL 을 확인하세요.",
+                timeout
+            ));
+        }
+    };
+    if outcome.failed || outcome.aborted {
+        let detail = if outcome.error.is_empty() { "오류 메시지 없음".to_string() } else { outcome.error.clone() };
+        return Err(format!(
+            "모델 연결 확인(핑) 실패 — provider '{provider}' 가 요청을 거부했습니다: {detail}\n설정(⚙) > 프로바이더에서 연결 테스트를 실행해 API 키·모델명·API 방식을 확인하세요."
+        ));
+    }
+    Ok(())
 }
 
 /// 펌프+대기 — 등록된 자식을 펌핑하고 제거·대기한 뒤 outcome 을 확정한다.
@@ -1973,6 +2061,22 @@ fn pump_and_wait(
 /// 단일 실행 마감 — 완료 노트 + 상태 전이 (실행 중일 때만).
 fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: &str) {
     let ok = !outcome.failed && !outcome.aborted;
+    // 실패 원인 한 줄 — 어느 프로바이더/모델이 거부했는지와 점검 경로를 함께 보여준다.
+    let err_hint = if ok || outcome.aborted || outcome.blocked {
+        String::new()
+    } else {
+        let p = read_session(app, id).map(|s| s.provider).unwrap_or_default();
+        let model = get_settings(app.clone())
+            .providers
+            .get(p.trim())
+            .map(|c| c.model.trim().to_string())
+            .unwrap_or_default();
+        let model_part = if model.is_empty() { String::new() } else { format!("/ {model}") };
+        let detail = if outcome.error.is_empty() { String::new() } else { format!(" 마지막 오류: {}", outcome.error) };
+        format!(
+            " — provider '{p}'{model_part} 연결을 점검하세요 (설정(⚙) > 프로바이더 연결 테스트).{detail}"
+        )
+    };
     let ev2 = json!({ "type": "note", "text": if outcome.aborted {
         format!("[중지] {engine_label} 실행이 중단됐습니다.")
     } else if outcome.blocked {
@@ -1980,7 +2084,7 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
     } else if ok {
         format!("[완료] {engine_label} 종료.")
     } else {
-        format!("[완료] {engine_label} 비정상 종료 — [오류] 노트를 확인하세요.")
+        format!("[완료] {engine_label} 비정상 종료{err_hint}")
     }});
     let stamped = append_event(app, id, &ev2);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
@@ -2019,7 +2123,7 @@ fn run_prime_agent(
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
 
-    let prep = prepare_engine_run(app, id, Engine::Prime, settings, provider, "", "main", instruction)?;
+    let prep = prepare_engine_run(app, id, Engine::Prime, settings, provider, "", "main", instruction, false)?;
     let (child, pipes) = spawn_prepared(&prep, provider, settings)?;
     app.state::<Procs>().0.lock().unwrap().insert(id.to_string(), child);
     set_status(app, id, "running");
@@ -2148,6 +2252,7 @@ fn emit_note(app: &AppHandle, id: &str, text: String, worker: Option<&WorkerTag>
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
 }
 
+#[derive(Default)]
 #[allow(dead_code)] // settled: 프로토콜 완성도용 플래그 (완료 판정은 failed/aborted+exit)
 struct PumpOutcome {
     text: String, // 어시스턴트 텍스트 전체 누적 (워커 발견·collector 입력용)
@@ -2155,6 +2260,7 @@ struct PumpOutcome {
     aborted: bool, // stopReason=aborted / settled(aborted) / 중지 kill
     settled: bool, // agent_settled 수신 (pi 1.3 정식 완료 신호)
     blocked: bool, // 반응형 스코프 게이트 발동 (인가 밖 툴 호출로 kill)
+    error: String, // 마지막 LLM/실행 오류 메시지 — 사전 점검·마감 안내에 쓴다
 }
 
 /// 반응형 스코프 게이트 — prime-agent 엔진용. tool_execution_start 를 볼 때마다
@@ -2253,6 +2359,7 @@ fn pump_pi_stdio(
         aborted: false,
         settled: false,
         blocked: false,
+        error: String::new(),
     };
     let mut buf = String::new();
     let mut last_text: Option<String> = None; // text_end/message_end 중복 노트 방지
@@ -2333,6 +2440,7 @@ fn pump_pi_stdio(
                                 .and_then(|e| e.as_str())
                                 .unwrap_or("pi 요청 실패")
                                 .to_string();
+                            outcome.error = msg.clone();
                             emit_note(app, id, format!("[오류] {msg}"), worker.as_ref());
                         }
                         Some("aborted") => {
@@ -2365,6 +2473,7 @@ fn pump_pi_stdio(
                 // 레거시 폴백 — 현 프로토콜에 최상위 error 는 없지만 무시하지 않는다.
                 outcome.failed = true;
                 let text = ev.get("error").and_then(|e| e.as_str()).unwrap_or("pi 오류").to_string();
+                outcome.error = text.clone();
                 emit_note(app, id, format!("[오류] {text}"), worker.as_ref());
             }
             _ => {}
@@ -2531,6 +2640,25 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     } else {
         prime_cli_path(&redcell)?;
     }
+    // LLM 사전 점검 — 프로바이더가 죽어 있으면 워커 5개가 전부 실패하기 전에
+    // 여기서 원인(400/401/타임아웃)을 한 번에 보여주고 즉시 중단한다.
+    preflight_llm_check(&app, &id, engine, &settings, &provider, &redcell, &piq)?;
+    {
+        let ev = json!({ "type": "note", "text": format!("[sys] 모델 연결 확인 완료({provider}) — 심층 진단을 시작합니다.") });
+        let stamped = append_event(&app, &id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    }
+    // 방어 상태 노트 — 워커마다 반복되지 않게 실행당 1회만.
+    {
+        let auth = auth::load(&resolve_app_auth_path(&app));
+        if auth.yaml {
+            let ev = json!({ "type": "note", "text": "[sys] 경고: 인가 파일이 정식 YAML 이라 prime-agent 반응형 킬게이트가 동작하지 않습니다 — 선행 차단(세션 대상 단일 호스트)으로 강제됩니다." });
+            let stamped = append_event(&app, &id, &ev);
+            app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+        }
+        let nf = netfilter_extra_env(&app, &id, &auth, &provider, &settings);
+        emit_netfilter_note(&app, &id, !nf.is_empty());
+    }
 
     set_status(&app, &id, "running");
     app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
@@ -2585,7 +2713,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                     // 라운드가 바뀌어도 세션은 유지 (pi session-id / prime session-dir 연속).
                     let run_tag = if engine == Engine::Prime { def.id.to_string() } else { format!("{piq}-{}", def.id) };
                     let key = format!("{id}#{}", def.id);
-                    let outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, instruction) {
+                    let outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, instruction, true) {
                         Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
                             Ok((child, pipes)) => {
                                 app.state::<Procs>().0.lock().unwrap().insert(key.clone(), child);
@@ -2593,12 +2721,12 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                             }
                             Err(e) => {
                                 emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
-                                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
                             }
                         },
                         Err(e) => {
                             emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
-                            PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                            PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
                         },
                     };
                     let state = if outcome.aborted { "stopped" } else if outcome.failed { "error" } else { "done" };
@@ -2612,7 +2740,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 .into_iter()
                 .map(|h| {
                     h.join().unwrap_or_else(|_| {
-                        ("w?".into(), PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false })
+                        ("w?".into(), PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: "워커 스레드 패닉".into() })
                     })
                 })
                 .collect();
@@ -2634,6 +2762,24 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                     seen.insert(k);
                 }
             }
+        }
+        // 1라운드 전체 실패 = 프로바이더 연결 문제 — 추적 라운드·collector 는 시도할 가치가
+        // 없다. "수렴" 으로 포장하지 말고 원인을 그대로 보여주고 즉시 마감한다.
+        if !results.is_empty() && results.iter().all(|(_, o)| o.failed) {
+            let detail = results
+                .iter()
+                .find_map(|(_, o)| if o.error.is_empty() { None } else { Some(o.error.clone()) })
+                .unwrap_or_default();
+            let ev = json!({ "type": "note", "text": format!(
+                "[오류] 모든 워커가 모델 호출에 실패해 심층 진단을 중단합니다 — 설정(⚙) > 프로바이더에서 '{provider}' 연결을 점검하세요. 마지막 오류: {detail}"
+            )});
+            let stamped = append_event(&app, &id, &ev);
+            app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            if read_session(&app, &id).map(|s| s.status == "running").unwrap_or(false) {
+                set_status(&app, &id, "error");
+                app.emit("engagement-status", json!({ "sessionId": id, "status": "error" })).ok();
+            }
+            return;
         }
         let mut rounds_run: u32 = 1;
         for round in 1..DEEP_MAX_ROUNDS {
@@ -2729,7 +2875,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         }
         merge.push_str(&digest_c);
         let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
-        let merge_outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge) {
+        let merge_outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, true) {
             Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
                 Ok((child, pipes)) => {
                     app.state::<Procs>().0.lock().unwrap().insert(id.clone(), child);
@@ -2737,12 +2883,12 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 }
                 Err(e) => {
                     emit_note(&app, &id, format!("[오류] collector 실행 실패: {e}"), None);
-                    PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                    PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
                 }
             },
             Err(e) => {
                 emit_note(&app, &id, format!("[오류] collector 준비 실패: {e}"), None);
-                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false }
+                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
             }
         };
         let ok = !merge_outcome.failed && !merge_outcome.aborted;
@@ -3313,6 +3459,11 @@ mod tests {
         assert_eq!(providers["custom"]["apiKey"], "sk-test");
         assert_eq!(providers["custom"]["api"], "openai-completions");
         assert_eq!(providers["custom"]["models"][0]["id"], "my-model");
+        // 보수적 OpenAI 호환 기본값 — stream_options/include_usage 를 모르는 게이트웨이의
+        // "400 status code (no body)" 회귀 방식.
+        assert_eq!(providers["custom"]["compat"]["supportsUsageInStreaming"], false);
+        assert_eq!(providers["custom"]["compat"]["supportsStore"], false);
+        assert_eq!(providers["custom"]["compat"]["supportsDeveloperRole"], false);
         // 두 번째 호출: 같은 모델 중복 없음 + 새 모델 추가.
         sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model", "").unwrap();
         sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "second-model", "").unwrap();
@@ -3355,13 +3506,22 @@ mod tests {
         assert_eq!(custom["compat"]["supportsEagerToolInputStreaming"], false);
         assert_eq!(custom["apiKey"], "!ug auth-token --host https://ws.example --profile test");
         assert_eq!(custom["models"][0]["id"], "system.ai.claude-sonnet-5-5");
-        // OpenAI 방언으로 전환 — 게이트웨이 전용 필드 제거, 키·모델은 유지.
+        // 사용자가 compat 을 직접 쓰면 그 값을 존중한다(기본값으로 덮지 않는다).
+        sync_pi_models_json_at(&path, "custom", "https://ws.example/ai-gateway/anthropic", "!ug auth-token", "m", "anthropic-messages").unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(root["providers"]["custom"]["compat"]["supportsEagerToolInputStreaming"], false);
+        // OpenAI 방언으로 전환 — 게이트웨이 전용 필드 제거 + 보수적 기본값, 키·모델·사용자
+        // compat 값은 유지.
         sync_pi_models_json_at(&path, "custom", "http://llm.local/v1", "sk-x", "local-model", "openai-completions").unwrap();
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let custom = &root["providers"]["custom"];
         assert_eq!(custom["api"], "openai-completions");
         assert!(custom.get("authHeader").is_none(), "authHeader 잔재: {custom}");
-        assert!(custom.get("compat").is_none(), "compat 잔재: {custom}");
+        assert!(
+            custom["compat"]["supportsEagerToolInputStreaming"].is_null(),
+            "anthropic 전용 compat 잔재: {custom}"
+        );
+        assert_eq!(custom["compat"]["supportsUsageInStreaming"], false, "보수적 기본값");
         assert_eq!(custom["apiKey"], "sk-x");
         std::fs::remove_dir_all(&dir).ok();
     }
