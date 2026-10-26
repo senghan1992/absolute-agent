@@ -895,9 +895,9 @@ const PROVIDER_CATALOG = [
   { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", envKeys: ["MISTRAL_API_KEY"], baseUrl: "https://api.mistral.ai/v1", needsBase: false },
   { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", envKeys: ["MOONSHOT_API_KEY"], baseUrl: "https://api.moonshot.ai/v1", needsBase: false },
   { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", envKeys: ["ZAI_API_KEY"], baseUrl: "https://api.z.ai/api/coding/paas/v4", needsBase: false },
-  // 기본 내장 연결 — Claude Code(ucc) 가 쓰는 LGE Databricks AI Gateway 와 동일.
+  // 기본 내장 연결 — LGE Databricks AI Gateway MLflow Responses 엔드포인트.
   // keyLabel 이 있으면 API 키 입력칸을 렌더링한다(envKeys 없이 키만 지정하는 내장 연결용).
-  { name: "lge-aigw", kind: "anthropic", note: "LGE Databricks AI Gateway — Claude Code(ucc) 와 동일 연결(기본 GLM 5.3 Flash, ug 가 토큰 자동 발급)", default_model: "system.ai.glm-5-3-flash", envKeys: [], keyLabel: "ug auth-token (자동 발급)", baseUrl: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic", needsBase: false },
+  { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (GLM 5.3 Flash)", default_model: "system.ai.glm-5-3-flash", envKeys: [], keyLabel: "Databricks 토큰", baseUrl: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needsBase: false },
   { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", envKeys: [], baseUrl: "http://localhost:11434/v1", needsBase: true },
   { name: "custom", kind: "openai-compat", note: "임의 엔드포인트 — vLLM·LM Studio·원격 ollama·Databricks AI Gateway(Anthropic 방식)", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
 ];
@@ -962,17 +962,19 @@ function renderProviderCards() {
         ${p.name === "custom" ? `<label class="fld"><span>API 방식</span>
           <select class="sh-input mono" data-f="api" style="width:100%">
             <option value=""${!st.api ? " selected" : ""}>OpenAI 호환 (/chat/completions)</option>
+            <option value="openai-responses"${st.api === "openai-responses" ? " selected" : ""}>OpenAI Responses (Databricks MLflow 게이트웨이 등)</option>
             <option value="anthropic-messages"${st.api === "anthropic-messages" ? " selected" : ""}>Anthropic Messages (Databricks AI Gateway 등)</option>
           </select>
         </label>` : ""}
         ${p.needsBase ? `<label class="fld"><span>Base URL</span><input class="sh-input mono" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
         ${hasKeyField ? `<label class="fld"><span>API 키 <span class="lbl-dim">(${keyLabel})</span></span>
           <span class="pcard-keyrow">
-            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="${p.name === "custom" ? "sk-… 또는 !ug auth-token …" : (p.name === "lge-aigw" ? "!ug auth-token (기본 — ug 저장 워크스페이스 사용)" : "sk-…")}" spellcheck="false" autocomplete="off" />
+            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="${p.name === "custom" ? "sk-… 또는 !명령어 …" : (p.name === "lge-aigw" ? "Databricks 토큰을 붙여넣으세요 (터미널의 $DATABRICKS_TOKEN)" : "sk-…")}" spellcheck="false" autocomplete="off" />
             <button class="btn btn-icon" data-act="eye" title="표시/숨김" aria-label="키 표시/숨김"><svg class="ic"><use href="#i-eye"/></svg></button>
           </span>
         </label>` : ""}
         ${p.name === "custom" ? `<div class="pcard-howto"><b>ug claude 와 같은 연결(Databricks)</b> — API 방식 <b>Anthropic Messages</b>, Base URL <code>https://&lt;workspace&gt;/ai-gateway/anthropic</code>, 모델 <code>system.ai.claude-sonnet-5-5</code>, 키 <code>!ug auth-token --host &lt;workspace&gt; --profile &lt;프로필&gt;</code> (<code>!</code>로 시작하면 요청마다 토큰 자동 발급). Anthropic 테스트는 최소 1토큰을 사용합니다.</div>` : ""}
+        ${p.name === "lge-aigw" ? `<div class="pcard-howto"><b>연결 방법</b> — 터미널에서 <code>ug auth-token</code> 의 출력(Databricks 토큰)을 복사해 위 API 키 칸에 붙여넣고 연결 저장을 누르세요. 토큰은 만료되면 다시 발급해 붙여넣으면 됩니다. Base URL·모델은 기본값을 그대로 써도 됩니다.</div>` : ""}
         <label class="fld"><span>모델 <span class="lbl-dim">(선택 — 비우면 기본 ${p.default_model || "엔드포인트 기본"})</span></span><input class="sh-input mono" data-f="model" value="${esc(st.model)}" placeholder="${modelPh}" spellcheck="false" /></label>
         <div class="pcard-actions">
           <span class="pcard-test" data-r></span>

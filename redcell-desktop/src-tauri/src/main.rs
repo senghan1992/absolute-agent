@@ -245,19 +245,32 @@ fn get_settings(app: AppHandle) -> Settings {
             s.redcell_dir = dir;
         }
     }
-    // 기본 내장 연결 심기 — Claude Code(ucc) 와 동일한 LGE AIGW GLM 연결을
-    // 설정 없이 바로 쓰게 한다. 키는 `!ug auth-token`(요청마다 자동 발급)이라
-    // 비밀을 저장하지 않는다. 사용자가 카드를 비우면 다음 로드에서 다시 심긴다.
+    // 기본 내장 연결 심기 — LGE AIGW MLflow Responses 엔드포인트를 설정 없이
+    // 바로 쓰게 한다. 키는 사용자가 카드에 직접 붙여넣는 Databricks 토큰이며,
+    // 비어 있으면 pi 가 "--api-key 미지정"으로 실패하고 안내 메시지를 낸다.
+    // 사용자가 카드를 비우면 다음 로드에서 다시 심긴다.
     if !s.providers.contains_key("lge-aigw") {
         s.providers.insert(
             "lge-aigw".to_string(),
             ProviderConn {
-                api_key: "!ug auth-token".into(),
+                api_key: String::new(),
                 base_url: String::new(), // 빈 값 = 카탈로그 기본 base URL 사용
                 model: "system.ai.glm-5-3-flash".into(),
-                api: "anthropic-messages".into(),
+                api: "openai-responses".into(),
             },
         );
+    } else if let Some(conn) = s.providers.get_mut("lge-aigw") {
+        // 구버전 기본값(`!ug auth-token` + Anthropic 경로)에서 새 기본값으로 이행 —
+        // 셸 명령 키 해석은 데스크톱 실행 환경에 따라 실패하기 쉽다(핑 오류 원인).
+        // 정확히 구버전 기본 조합일 때만 되돌리고, 사용자가 쓴 값은 존중한다.
+        let old_default = conn.api_key.trim() == "!ug auth-token"
+            && conn.base_url.trim().is_empty()
+            && (conn.api.trim() == "anthropic-messages" || conn.api.trim().is_empty());
+        if old_default {
+            conn.api_key = String::new();
+            conn.base_url = String::new();
+            conn.api = "openai-responses".into();
+        }
     }
     if s.default_provider.trim().is_empty() || s.default_provider == "mock" {
         s.default_provider = "lge-aigw".into();
@@ -465,9 +478,11 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", env_keys: &["MISTRAL_API_KEY"], base_url: "https://api.mistral.ai/v1", needs_base: false },
     ProviderMeta { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", env_keys: &["MOONSHOT_API_KEY"], base_url: "https://api.moonshot.ai/v1", needs_base: false },
     ProviderMeta { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", env_keys: &["ZAI_API_KEY"], base_url: "https://api.z.ai/api/coding/paas/v4", needs_base: false },
-    // 기본 내장 연결 — Claude Code(ucc) 가 쓰는 LGE Databricks AI Gateway 와 동일.
-    // 키는 `!ug auth-token`(pi !command — 요청마다 토큰 자동 발급)이므로 저장 키가 없다.
-    ProviderMeta { name: "lge-aigw", kind: "anthropic", note: "LGE Databricks AI Gateway — Claude Code(ucc) 와 동일 연결(기본 GLM 5.3 Flash, ug 가 토큰 자동 발급)", default_model: "system.ai.glm-5-3-flash", env_keys: &[], base_url: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic", needs_base: false },
+    // 기본 내장 연결 — LGE Databricks AI Gateway MLflow Responses 엔드포인트.
+    // 키는 사용자가 ⚙ 설정 > 프로바이더 카드에 직접 붙여넣는 Databricks 토큰
+    // ($DATABRICKS_TOKEN, ug auth-token 출력과 동일) — CLI --api-key 로 주입되므로
+    // 셸 명령 해석(!command)에 의존하지 않는다.
+    ProviderMeta { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (키: Databricks 토큰을 키란에 직접 입력)", default_model: "system.ai.glm-5-3-flash", env_keys: &[], base_url: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needs_base: false },
     ProviderMeta { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: &[], base_url: "http://localhost:11434/v1", needs_base: true },
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
@@ -841,8 +856,8 @@ fn needs_models_json_sync(provider: &str) -> bool {
 /// 프로바이더별 기본 API 방언 — 앱 설정(api)이 비었을 때 쓴다.
 fn provider_default_api(provider: &str) -> &'static str {
     match provider {
-        // LGE AIGW 는 Anthropic Messages 경로다 (Claude Code 와 동일).
-        "lge-aigw" => "anthropic-messages",
+        // LGE AIGW 는 MLflow Responses API 다 (OpenAI Responses 방언).
+        "lge-aigw" => "openai-responses",
         _ => "",
     }
 }
@@ -1054,15 +1069,16 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
     } else {
         api_key.trim().to_string()
     };
-    // 카드에서 명시한 방식이 없으면 프로바이더 기본 방언을 따른다 (lge-aigw = anthropic).
+    // 카드에서 명시한 방식이 없으면 프로바이더 기본 방언을 따른다 (lge-aigw = responses).
     let effective_api = if api.as_deref().unwrap_or("").is_empty() {
         provider_default_api(&provider).to_string()
     } else {
         api.unwrap_or_default()
     };
     let anthropic = effective_api == "anthropic-messages";
-    let (url, body) = if anthropic {
-        let m = model.as_deref().unwrap_or("").trim();
+    let responses = effective_api == "openai-responses";
+    let m = model.as_deref().unwrap_or("").trim();
+    let (url, body, anthropic_headers) = if anthropic {
         if m.is_empty() {
             return Err("Anthropic 방식 테스트는 모델명이 필요합니다 — 모델란에 입력하세요.".into());
         }
@@ -1072,28 +1088,37 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
             "messages": [{ "role": "user", "content": "ok" }],
         }))
         .unwrap_or_default();
-        (format!("{}/v1/messages", base.trim_end_matches('/')), Some(payload))
-    } else {
-        let m = model.as_deref().unwrap_or("").trim();
-        if provider != "ollama" && !m.is_empty() {
-            // 모델이 지정됐으면 실제 1토큰 생성 호출로 검증한다 — GET 도달성만으로는
-            // 잡히지 않는 400(모델명 오류·필드 거부·방언 불일치)까지 잡아낸다.
-            let payload = serde_json::to_string(&json!({
-                "model": m,
-                "max_tokens": 1,
-                "messages": [{ "role": "user", "content": "ok" }],
-            }))
-            .unwrap_or_default();
-            (format!("{}/chat/completions", base.trim_end_matches('/')), Some(payload))
-        } else {
-            let path = if provider == "ollama" { "/tags" } else { "/models" };
-            (format!("{}{}", base.trim_end_matches('/'), path), None)
+        (format!("{}/v1/messages", base.trim_end_matches('/')), Some(payload), true)
+    } else if responses {
+        if m.is_empty() {
+            return Err("Responses 방식 테스트는 모델명이 필요합니다 — 모델란에 입력하세요.".into());
         }
+        // OpenAI Responses 방언 — Databricks MLflow 게이트웨이 등.
+        let payload = serde_json::to_string(&json!({
+            "model": m,
+            "max_output_tokens": 16,
+            "input": [{ "role": "user", "content": [{ "type": "input_text", "text": "ok" }] }],
+        }))
+        .unwrap_or_default();
+        (format!("{}/responses", base.trim_end_matches('/')), Some(payload), false)
+    } else if provider != "ollama" && !m.is_empty() {
+        // 모델이 지정됐으면 실제 1토큰 생성 호출로 검증한다 — GET 도달성만으로는
+        // 잡히지 않는 400(모델명 오류·필드 거부·방언 불일치)까지 잡아낸다.
+        let payload = serde_json::to_string(&json!({
+            "model": m,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "ok" }],
+        }))
+        .unwrap_or_default();
+        (format!("{}/chat/completions", base.trim_end_matches('/')), Some(payload), false)
+    } else {
+        let path = if provider == "ollama" { "/tags" } else { "/models" };
+        (format!("{}{}", base.trim_end_matches('/'), path), None, false)
     };
-    // GET 은 도달성 프로브(응답만 오면 OK — /models 없는 서버도 있음),
-    // Anthropic POST 는 키·모델 실검증(2xx 일 때만 OK)이다.
+    // POST 는 키·모델 실검증(2xx 일 때만 OK), GET 은 도달성 프로브(응답만 오면 OK —
+    // /models 없는 서버도 있음). Anthropic 방언만 x-api-key·anthropic-version 을 쓴다.
     let script = if body.is_some() {
-        r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"",b=JSON.parse(process.env.RC_TEST_BODY||"null");try{const r=await fetch(u,{method:"POST",headers:Object.assign({"content-type":"application/json","anthropic-version":"2023-06-01"},k?{Authorization:"Bearer "+k,"x-api-key":k}:{}),body:JSON.stringify(b)});const t=await r.text();console.log((r.ok?"OK ":"ERR ")+r.status+" "+r.statusText+" "+t.slice(0,300))}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#
+        r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"",b=JSON.parse(process.env.RC_TEST_BODY||"null"),ah=process.env.RC_TEST_ANTHROPIC==="1";const h={"content-type":"application/json"};if(k){h.Authorization="Bearer "+k;if(ah)h["x-api-key"]=k;}if(ah)h["anthropic-version"]="2023-06-01";try{const r=await fetch(u,{method:"POST",headers:h,body:JSON.stringify(b)});const t=await r.text();console.log((r.ok?"OK ":"ERR ")+r.status+" "+r.statusText+" "+t.slice(0,300))}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#
     } else {
         r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"";try{const r=await fetch(u,{headers:k?{Authorization:"Bearer "+k,"x-api-key":k,"anthropic-version":"2023-06-01"}:{}});console.log("OK "+r.status+" "+r.statusText)}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#
     };
@@ -1105,6 +1130,9 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
         .env("RC_TEST_KEY", &key)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if anthropic_headers {
+        probe.env("RC_TEST_ANTHROPIC", "1");
+    }
     if let Some(b) = body {
         probe.env("RC_TEST_BODY", b);
     }
@@ -2233,6 +2261,13 @@ fn pi_cli_args(
     args.push("--provider".into());
     args.push(provider.to_string());
     let conn = settings.providers.get(provider).cloned().unwrap_or_default();
+    // lge-aigw 는 키를 카드에 직접 붙여넣는다 — 비어 있으면 pi 가 placeholder 키로
+    // 요청을 보내 401 이 나므로, 실행 전에 붙잡고 붙여넣을 곳을 안내한다.
+    if provider == "lge-aigw" && conn.api_key.trim().is_empty() {
+        return Err(
+            "lge-aigw API 키가 비어 있습니다 — 설정(⚙) > 프로바이더 > lge-aigw 카드에 Databricks 토큰(터미널 `ug auth-token` 출력)을 붙여넣고 연결 저장을 누르세요.".into(),
+        );
+    }
     // 커스텀/로컬/내장 게이트웨이(pi 기본 카탈로그에 없음): models.json 에 병합해
     // pi 가 프로바이더·키(bang 명령 포함)를 알도록 항상 동기화한다.
     if needs_models_json_sync(provider) {
@@ -3550,19 +3585,19 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// 기본 내장 연결(lge-aigw): 설정이 비어도 카탈로그 기본 base URL·Anthropic 방언으로
-    /// 동기화되고, 빈 signature thinking 재생·모델 메타데이터가 기록되어야 한다 —
-    /// Claude Code(ucc) 와 동일한 GLM 연결을 설정 없이 쓰게 하는 직접 회귀 테스트.
+    /// 기본 내장 연결(lge-aigw): 설정이 비어도 카탈로그 기본 base URL(MLflow Responses)·
+    /// openai-responses 방언으로 동기화되고, 모델 메타데이터가 기록되어야 한다 —
+    /// 셸 명령 키(`!ug auth-token`) 없이 붙여넣은 토큰(--api-key)으로 쓰는 직접 회귀 테스트.
     #[test]
     fn sync_pi_models_json_lge_aigw_defaults() {
         let dir = std::env::temp_dir().join(format!("rc-models-aigw-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("models.json");
         let conn = ProviderConn {
-            api_key: "!ug auth-token".into(),
+            api_key: "dbcsi-abc123".into(),
             base_url: String::new(), // 시딩된 기본값 — 카탈로그 base URL 로 폴백
             model: "system.ai.glm-5-3-flash".into(),
-            api: "anthropic-messages".into(),
+            api: "openai-responses".into(),
         };
         sync_pi_models_json_at(
             &path,
@@ -3577,14 +3612,12 @@ mod tests {
         let aigw = &root["providers"]["lge-aigw"];
         assert_eq!(
             aigw["baseUrl"],
-            "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic",
+            "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1",
             "빈 base_url 은 카탈로그 기본값으로: {aigw}"
         );
-        assert_eq!(aigw["api"], "anthropic-messages");
-        assert_eq!(aigw["authHeader"], true);
-        assert_eq!(aigw["compat"]["supportsEagerToolInputStreaming"], false);
-        assert_eq!(aigw["compat"]["allowEmptySignature"], true, "GLM 빈 signature thinking 재생");
-        assert_eq!(aigw["apiKey"], "!ug auth-token", "bang 명령 키는 그대로 기록");
+        assert_eq!(aigw["api"], "openai-responses");
+        assert!(aigw.get("authHeader").is_none(), "responses 방언은 Bearer 기본 — authHeader 불필요: {aigw}");
+        assert_eq!(aigw["apiKey"], "dbcsi-abc123", "붙여넣은 토큰은 그대로 기록");
         assert_eq!(aigw["models"][0]["id"], "system.ai.glm-5-3-flash");
         assert_eq!(aigw["models"][0]["reasoning"], true);
         assert!(aigw["models"][0]["maxTokens"].as_u64().unwrap_or(0) >= 8192, "thinking 상한 확보");
