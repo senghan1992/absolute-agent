@@ -895,6 +895,9 @@ const PROVIDER_CATALOG = [
   { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", envKeys: ["MISTRAL_API_KEY"], baseUrl: "https://api.mistral.ai/v1", needsBase: false },
   { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", envKeys: ["MOONSHOT_API_KEY"], baseUrl: "https://api.moonshot.ai/v1", needsBase: false },
   { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", envKeys: ["ZAI_API_KEY"], baseUrl: "https://api.z.ai/api/coding/paas/v4", needsBase: false },
+  // 기본 내장 연결 — Claude Code(ucc) 가 쓰는 LGE Databricks AI Gateway 와 동일.
+  // keyLabel 이 있으면 API 키 입력칸을 렌더링한다(envKeys 없이 키만 지정하는 내장 연결용).
+  { name: "lge-aigw", kind: "anthropic", note: "LGE Databricks AI Gateway — Claude Code(ucc) 와 동일 연결(기본 GLM 5.3 Flash, ug 가 토큰 자동 발급)", default_model: "system.ai.glm-5-3-flash", envKeys: [], keyLabel: "ug auth-token (자동 발급)", baseUrl: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic", needsBase: false },
   { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", envKeys: [], baseUrl: "http://localhost:11434/v1", needsBase: true },
   { name: "custom", kind: "openai-compat", note: "임의 엔드포인트 — vLLM·LM Studio·원격 ollama·Databricks AI Gateway(Anthropic 방식)", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
 ];
@@ -941,7 +944,8 @@ function renderProviderCards() {
   const catalog = [...PROVIDER_CATALOG].sort((a, b) => (rank[a.name] ?? 9) - (rank[b.name] ?? 9));
   el.innerHTML = catalog.map((p) => {
     const st = providerConnState(p);
-    const keyLabel = p.name === "custom" ? "API Key" : (p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : "");
+    const keyLabel = p.name === "custom" ? "API Key" : (p.envKeys.length ? p.envKeys[p.envKeys.length - 1] : (p.keyLabel || ""));
+    const hasKeyField = p.envKeys.length > 0 || !!p.keyLabel;
     const basePlaceholder = p.name === "ollama" ? "http://localhost:11434/v1" : "https://your-endpoint/v1";
     const modelPh = p.default_model || "예: gpt-4o";
     const open = expandedProvider === p.name;
@@ -962,9 +966,9 @@ function renderProviderCards() {
           </select>
         </label>` : ""}
         ${p.needsBase ? `<label class="fld"><span>Base URL</span><input class="sh-input mono" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
-        ${p.envKeys.length ? `<label class="fld"><span>API 키 <span class="lbl-dim">(${keyLabel})</span></span>
+        ${hasKeyField ? `<label class="fld"><span>API 키 <span class="lbl-dim">(${keyLabel})</span></span>
           <span class="pcard-keyrow">
-            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="${p.name === "custom" ? "sk-… 또는 !ug auth-token …" : "sk-…"}" spellcheck="false" autocomplete="off" />
+            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="${p.name === "custom" ? "sk-… 또는 !ug auth-token …" : (p.name === "lge-aigw" ? "!ug auth-token (기본 — ug 저장 워크스페이스 사용)" : "sk-…")}" spellcheck="false" autocomplete="off" />
             <button class="btn btn-icon" data-act="eye" title="표시/숨김" aria-label="키 표시/숨김"><svg class="ic"><use href="#i-eye"/></svg></button>
           </span>
         </label>` : ""}

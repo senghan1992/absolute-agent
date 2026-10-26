@@ -245,8 +245,22 @@ fn get_settings(app: AppHandle) -> Settings {
             s.redcell_dir = dir;
         }
     }
-    if s.default_provider.trim().is_empty() {
-        s.default_provider = "mock".into();
+    // 기본 내장 연결 심기 — Claude Code(ucc) 와 동일한 LGE AIGW GLM 연결을
+    // 설정 없이 바로 쓰게 한다. 키는 `!ug auth-token`(요청마다 자동 발급)이라
+    // 비밀을 저장하지 않는다. 사용자가 카드를 비우면 다음 로드에서 다시 심긴다.
+    if !s.providers.contains_key("lge-aigw") {
+        s.providers.insert(
+            "lge-aigw".to_string(),
+            ProviderConn {
+                api_key: "!ug auth-token".into(),
+                base_url: String::new(), // 빈 값 = 카탈로그 기본 base URL 사용
+                model: "system.ai.glm-5-3-flash".into(),
+                api: "anthropic-messages".into(),
+            },
+        );
+    }
+    if s.default_provider.trim().is_empty() || s.default_provider == "mock" {
+        s.default_provider = "lge-aigw".into();
     }
     s
 }
@@ -451,6 +465,9 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "mistral", kind: "openai-compat", note: "Mistral AI", default_model: "devstral-medium-latest", env_keys: &["MISTRAL_API_KEY"], base_url: "https://api.mistral.ai/v1", needs_base: false },
     ProviderMeta { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", env_keys: &["MOONSHOT_API_KEY"], base_url: "https://api.moonshot.ai/v1", needs_base: false },
     ProviderMeta { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", env_keys: &["ZAI_API_KEY"], base_url: "https://api.z.ai/api/coding/paas/v4", needs_base: false },
+    // 기본 내장 연결 — Claude Code(ucc) 가 쓰는 LGE Databricks AI Gateway 와 동일.
+    // 키는 `!ug auth-token`(pi !command — 요청마다 토큰 자동 발급)이므로 저장 키가 없다.
+    ProviderMeta { name: "lge-aigw", kind: "anthropic", note: "LGE Databricks AI Gateway — Claude Code(ucc) 와 동일 연결(기본 GLM 5.3 Flash, ug 가 토큰 자동 발급)", default_model: "system.ai.glm-5-3-flash", env_keys: &[], base_url: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic", needs_base: false },
     ProviderMeta { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: &[], base_url: "http://localhost:11434/v1", needs_base: true },
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
@@ -816,6 +833,40 @@ fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
 /// read-modify-write 가 겹치면 엔트리가 사라지거나 반쯤 쓰인 파일이 남으므로 직렬화한다.
 static MODELS_JSON_LOCK: Mutex<()> = Mutex::new(());
 
+/// pi 가 기본 카탈로그에 없는 프로바이더 — 실행 전 models.json 병합이 필요하다.
+fn needs_models_json_sync(provider: &str) -> bool {
+    matches!(provider, "custom" | "ollama" | "lge-aigw")
+}
+
+/// 프로바이더별 기본 API 방언 — 앱 설정(api)이 비었을 때 쓴다.
+fn provider_default_api(provider: &str) -> &'static str {
+    match provider {
+        // LGE AIGW 는 Anthropic Messages 경로다 (Claude Code 와 동일).
+        "lge-aigw" => "anthropic-messages",
+        _ => "",
+    }
+}
+
+/// 동기화에 쓸 base URL — 앱 설정이 비었으면 카탈로그 기본값(lge-aigw 등 내장 연결).
+fn sync_base_url(provider: &str, conn: &ProviderConn) -> String {
+    if !conn.base_url.trim().is_empty() {
+        return conn.base_url.trim().to_string();
+    }
+    PROVIDER_CATALOG
+        .iter()
+        .find(|p| p.name == provider)
+        .map(|p| p.base_url.to_string())
+        .unwrap_or_default()
+}
+
+/// 동기화에 쓸 API 방언 — 앱 설정이 비었으면 프로바이더 기본값.
+fn sync_api(provider: &str, conn: &ProviderConn) -> String {
+    if !conn.api.trim().is_empty() {
+        return conn.api.trim().to_string();
+    }
+    provider_default_api(provider).to_string()
+}
+
 fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: &str, model: &str, api: &str) -> Result<(), String> {
     let _guard = MODELS_JSON_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let mut root: Value = fs::read_to_string(path)
@@ -842,6 +893,10 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
         prov.insert("authHeader".into(), Value::Bool(true));
         let mut compat = prov.get("compat").and_then(|v| v.as_object()).cloned().unwrap_or_default();
         compat.insert("supportsEagerToolInputStreaming".into(), Value::Bool(false));
+        if provider == "lge-aigw" {
+            // AIGW GLM 은 thinking 블록에 빈 signature 를 돌려준다 — 그대로 재생한다.
+            compat.insert("allowEmptySignature".into(), Value::Bool(true));
+        }
         prov.insert("compat".into(), Value::Object(compat));
     } else {
         // 게이트웨이 전용 필드만 걷어내고 사용자가 쓴 compat 은 보존한다.
@@ -884,7 +939,15 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
         let id = model.trim().to_string();
         let exists = models.iter().any(|m| m.get("id").and_then(|i| i.as_str()) == Some(id.as_str()));
         if !exists {
-            models.push(json!({ "id": id }));
+            let mut entry = json!({ "id": id });
+            if provider == "lge-aigw" {
+                // thinking 이 max_tokens 를 먼저 쓴다 — 상한·컨텍스트를 명시해
+                // "thinking 만 하고 답이 잘리는" 현상을 막는다.
+                entry["reasoning"] = json!(true);
+                entry["contextWindow"] = json!(200000);
+                entry["maxTokens"] = json!(16384);
+            }
+            models.push(entry);
         }
     }
     if models.is_empty() {
@@ -991,7 +1054,13 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
     } else {
         api_key.trim().to_string()
     };
-    let anthropic = api.as_deref().unwrap_or("") == "anthropic-messages";
+    // 카드에서 명시한 방식이 없으면 프로바이더 기본 방언을 따른다 (lge-aigw = anthropic).
+    let effective_api = if api.as_deref().unwrap_or("").is_empty() {
+        provider_default_api(&provider).to_string()
+    } else {
+        api.unwrap_or_default()
+    };
+    let anthropic = effective_api == "anthropic-messages";
     let (url, body) = if anthropic {
         let m = model.as_deref().unwrap_or("").trim();
         if m.is_empty() {
@@ -1628,22 +1697,20 @@ fn prime_run_args(
     args.push("--provider".into());
     args.push(provider.to_string());
     let conn = settings.providers.get(provider).cloned().unwrap_or_default();
-    if provider == "custom" || provider == "ollama" {
+    if needs_models_json_sync(provider) {
         let mpath = prime_models_json_path()?;
-        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model, &conn.api)?;
+        sync_pi_models_json_at(&mpath, provider, &sync_base_url(provider, &conn), &conn.api_key, &conn.model, &sync_api(provider, &conn))?;
     }
     {
         let m = conn.model.trim().to_string();
         if !m.is_empty() {
             args.push("--model".into());
             args.push(if provider == "custom" || provider == "ollama" { m } else { format!("{provider}/{m}") });
-        } else if provider == "anthropic" || provider == "openai" || provider == "openrouter" {
-            if let Some(d) = PROVIDER_CATALOG.iter().find(|x| x.name == provider) {
-                if !d.default_model.is_empty() {
-                    let d = d.default_model.to_string();
-                    args.push("--model".into());
-                    args.push(format!("{provider}/{d}"));
-                }
+        } else if let Some(d) = PROVIDER_CATALOG.iter().find(|x| x.name == provider) {
+            if !d.default_model.is_empty() && provider != "custom" {
+                let d = d.default_model.to_string();
+                args.push("--model".into());
+                args.push(if needs_models_json_sync(provider) { d } else { format!("{provider}/{d}") });
             }
         }
     }
@@ -2166,11 +2233,11 @@ fn pi_cli_args(
     args.push("--provider".into());
     args.push(provider.to_string());
     let conn = settings.providers.get(provider).cloned().unwrap_or_default();
-    // 커스텀/로컬(baseUrl 필요) 프로바이더: pi 는 models.json 에만 존재할 수 있으므로
-    // 앱 설정(base URL·키·모델)을 ~/.pi/agent/models.json 에 병합해 항상 동기화한다.
-    if provider == "custom" || provider == "ollama" {
+    // 커스텀/로컬/내장 게이트웨이(pi 기본 카탈로그에 없음): models.json 에 병합해
+    // pi 가 프로바이더·키(bang 명령 포함)를 알도록 항상 동기화한다.
+    if needs_models_json_sync(provider) {
         let mpath = pi_models_json_path()?;
-        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model, &conn.api)?;
+        sync_pi_models_json_at(&mpath, provider, &sync_base_url(provider, &conn), &conn.api_key, &conn.model, &sync_api(provider, &conn))?;
     }
     // 모델 지정: custom/ollama 도 --model 로 명시( pi 모델 패턴 "provider/id" 또는 순수 id ).
     {
@@ -2178,12 +2245,13 @@ fn pi_cli_args(
         if !m.is_empty() {
             args.push("--model".into());
             args.push(if provider == "custom" || provider == "ollama" { m } else { format!("{provider}/{m}") });
-        } else if provider == "anthropic" || provider == "openai" || provider == "openrouter" {
+        } else {
+            // 모델 미지정 — 카탈로그 기본 모델로 폴백(custom 은 기본이 없다).
             if let Some(d) = PROVIDER_CATALOG.iter().find(|x| x.name == provider) {
-                if !d.default_model.is_empty() {
+                if !d.default_model.is_empty() && provider != "custom" {
                     let d = d.default_model.to_string();
                     args.push("--model".into());
-                    args.push(format!("{provider}/{d}"));
+                    args.push(if needs_models_json_sync(provider) { d } else { format!("{provider}/{d}") });
                 }
             }
         }
@@ -3479,6 +3547,47 @@ mod tests {
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["providers"]["ollama"]["apiKey"], "redcell-placeholder");
         assert_eq!(root["providers"]["ollama"]["models"][0]["id"], "llama3.1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 기본 내장 연결(lge-aigw): 설정이 비어도 카탈로그 기본 base URL·Anthropic 방언으로
+    /// 동기화되고, 빈 signature thinking 재생·모델 메타데이터가 기록되어야 한다 —
+    /// Claude Code(ucc) 와 동일한 GLM 연결을 설정 없이 쓰게 하는 직접 회귀 테스트.
+    #[test]
+    fn sync_pi_models_json_lge_aigw_defaults() {
+        let dir = std::env::temp_dir().join(format!("rc-models-aigw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        let conn = ProviderConn {
+            api_key: "!ug auth-token".into(),
+            base_url: String::new(), // 시딩된 기본값 — 카탈로그 base URL 로 폴백
+            model: "system.ai.glm-5-3-flash".into(),
+            api: "anthropic-messages".into(),
+        };
+        sync_pi_models_json_at(
+            &path,
+            "lge-aigw",
+            &sync_base_url("lge-aigw", &conn),
+            &conn.api_key,
+            &conn.model,
+            &sync_api("lge-aigw", &conn),
+        )
+        .unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let aigw = &root["providers"]["lge-aigw"];
+        assert_eq!(
+            aigw["baseUrl"],
+            "https://lge-esdatapf.cloud.databricks.com/ai-gateway/anthropic",
+            "빈 base_url 은 카탈로그 기본값으로: {aigw}"
+        );
+        assert_eq!(aigw["api"], "anthropic-messages");
+        assert_eq!(aigw["authHeader"], true);
+        assert_eq!(aigw["compat"]["supportsEagerToolInputStreaming"], false);
+        assert_eq!(aigw["compat"]["allowEmptySignature"], true, "GLM 빈 signature thinking 재생");
+        assert_eq!(aigw["apiKey"], "!ug auth-token", "bang 명령 키는 그대로 기록");
+        assert_eq!(aigw["models"][0]["id"], "system.ai.glm-5-3-flash");
+        assert_eq!(aigw["models"][0]["reasoning"], true);
+        assert!(aigw["models"][0]["maxTokens"].as_u64().unwrap_or(0) >= 8192, "thinking 상한 확보");
         std::fs::remove_dir_all(&dir).ok();
     }
 
