@@ -526,7 +526,7 @@ const DIAG_ROLE: &str = r#"# RedCell 서비스 진단 — 시니어 해커 멘�
 
 /// 최종 리포트 형식 + 집필 원칙 (단일 진단·심층 collector 공용).
 const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를 지킨다 — UI 가 자동 시각화한다)
-# 서비스 진단 리포트 — <서비스명>
+# <서비스명> 진단 리포트
 ## 0. 한눈에 보기 (맨 앞 요약 표)
   3줄 요약: 비전문가도 이해하는 "그래서 뭐가 위험한가" 3줄 (등급·최대 피해·급한 조치)
   | 루트 | 위험도 | 공격 방법 | 탈취 정보 | 보완 요약 |
@@ -726,6 +726,33 @@ fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str) ->
         outputs = outputs,
         mem = mem,
     )
+}
+
+/// 워커 출력 병합 — collector 입력용. 분야당 6000자로 절단하고 빈 워커는
+/// 플레이스홀더로 채운다. 조기(1차)·최종 병합이 같은 규칙을 쓰도록 공용화.
+/// (combined, 내용 있는 워커 수) 반환.
+fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rounds_run: u32) -> (String, usize) {
+    let mut combined = String::new();
+    let mut ok_n = 0;
+    for def in DEEP_WORKERS {
+        let wid = def.id;
+        let body = accum.get(wid).map(|s| s.trim()).unwrap_or("");
+        if !body.is_empty() {
+            ok_n += 1;
+        }
+        let body = if body.is_empty() {
+            "(이 워커는 결과를 내지 못했습니다 — collector 가 해당 분야를 보강할 것)".to_string()
+        } else {
+            body.chars().take(6000).collect::<String>()
+        };
+        combined.push_str(&format!("\n\n--- {} ({wid}) [라운드 {rounds_run}] ---\n{body}", def.label));
+    }
+    (combined, ok_n)
+}
+
+/// 조기(1차) 병합 지시문 — 최종 병합 본문에 1차 표기 지시만 덧붙인다.
+fn early_merge_instruction(base: String) -> String {
+    format!("{base}\n\n주: 이는 1라운드 직후의 조기(중간) 병합이다. 리포트 제목에 '(1차)' 를 붙이고, 서두에 '추적 라운드가 백그라운드로 계속되며 최종 리포트로 갱신될 수 있음'을 한 줄로 명시하라.")
 }
 
 /// 심층 진단 추적 라운드 상한 (1차 + 추적 2회 = 최대 3라운드, 결정적 수렴).
@@ -1922,7 +1949,7 @@ fn run_prime(
         let id = id.to_string();
         let prefix = prep.tool_prefix;
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, None);
             finalize_run(&app, &id, &outcome, "pi");
         });
     }
@@ -2160,7 +2187,7 @@ fn preflight_llm_check(
     let prefix = prep.tool_prefix;
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let outcome = pump_and_wait(&app2, &id2, &key2, pipes, None, prefix, None);
+        let outcome = pump_and_wait(&app2, &id2, &key2, pipes, None, prefix, None, None);
         let _ = tx.send(outcome);
     });
     let timeout = std::time::Duration::from_secs(90);
@@ -2384,9 +2411,10 @@ fn pump_and_wait(
     worker: Option<WorkerTag>,
     tool_prefix: &str,
     enforce_auth: Option<auth::AuthList>,
+    report_tag: Option<&str>,
 ) -> PumpOutcome {
     let enforce = enforce_auth.map(|auth| ScopeEnforce { proc_key: proc_key.to_string(), auth });
-    let mut oc = pump_pi_stdio(app, id, pipes, worker, tool_prefix, enforce);
+    let mut oc = pump_pi_stdio(app, id, pipes, worker, tool_prefix, enforce, report_tag);
     match app.state::<Procs>().0.lock().unwrap().remove(proc_key) {
         Some(mut c) => {
             if !c.wait().map(|st| st.success()).unwrap_or(false) {
@@ -2403,7 +2431,7 @@ fn pump_and_wait(
 
 /// 단일 실행 마감 — 완료 노트 + 상태 전이 (실행 중일 때만).
 fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: &str) {
-    let ok = !outcome.failed && !outcome.aborted;
+    let ok = (!outcome.failed && !outcome.aborted) || has_usable_text(outcome);
     // 실패 원인 한 줄 — 어느 프로바이더/모델이 거부했는지와 점검 경로를 함께 보여준다.
     let err_hint = if ok || outcome.aborted || outcome.blocked {
         String::new()
@@ -2427,6 +2455,8 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
     } else if ok {
         if is_empty_success(outcome) {
             format!("[완료] {engine_label} 종료 — 빈 응답: 모델이 텍스트를 반환하지 않았습니다(상류 필터·게이트웨이 응답 확인).")
+        } else if outcome.failed {
+            format!("[완료] {engine_label} 종료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)")
         } else {
             format!("[완료] {engine_label} 종료.")
         }
@@ -2482,7 +2512,7 @@ fn run_prime_agent(
         let prefix = prep.tool_prefix;
         let auth = prep.enforce_auth;
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, None);
             finalize_run(&app, &id, &outcome, "prime-agent");
         });
     }
@@ -2632,6 +2662,14 @@ fn emit_note(app: &AppHandle, id: &str, text: String, worker: Option<&WorkerTag>
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
 }
 
+/// 리포트 텍스트 1건 저장 + 프론트 전송 — collector 병합 결과용.
+/// `report` 표식("early"|"final")으로 결과 탭이 1차/최종을 구분한다.
+fn emit_report_text(app: &AppHandle, id: &str, text: String, tag: &str) {
+    let ev = json!({ "type": "note", "text": text, "report": tag });
+    let stamped = append_event(app, id, &ev);
+    app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+}
+
 #[derive(Default)]
 #[allow(dead_code)] // settled: 프로토콜 완성도용 플래그 (완료 판정은 failed/aborted+exit)
 struct PumpOutcome {
@@ -2650,6 +2688,17 @@ fn is_empty_success(o: &PumpOutcome) -> bool {
     !o.failed && !o.aborted && o.text.trim().is_empty()
 }
 
+/// 부분 성공 판정 하한 (문자) — 이 이상의 텍스트가 있으면 말미 스트림 오류와
+/// 무관하게 리포트로 발행한다. 정상 리포트는 수천 자, 오류 부속 문구는 수십 자다.
+const MIN_USABLE_CHARS: usize = 500;
+
+/// 부분 성공 — 중단은 아니고(stop 존중) 충분한 텍스트가 있으면 true.
+/// 게이트웨이가 응답 말미를 자른 경우(status incomplete 등 pi stopReason=error)에도
+/// 확보된 리포트·발견을 살린다.
+fn has_usable_text(o: &PumpOutcome) -> bool {
+    !o.aborted && o.text.chars().count() >= MIN_USABLE_CHARS
+}
+
 /// 반응형 스코프 게이트 — prime-agent 엔진용. tool_execution_start 를 볼 때마다
 /// 인가를 판정하고, 위반이면 레지스트리의 자식을 즉시 kill 한다.
 #[derive(Clone)]
@@ -2666,6 +2715,7 @@ fn flush_assistant_text(
     worker: Option<&WorkerTag>,
     outcome: &mut PumpOutcome,
     last_text: &mut Option<String>,
+    report_tag: Option<&str>,
 ) {
     let t = t.trim().to_string();
     if t.is_empty() || last_text.as_deref() == Some(t.as_str()) {
@@ -2675,7 +2725,13 @@ fn flush_assistant_text(
         outcome.text.push_str("\n\n");
     }
     outcome.text.push_str(&t);
-    emit_note(app, id, t.clone(), worker);
+    match worker {
+        Some(w) => emit_note(app, id, t.clone(), Some(w)),
+        None => match report_tag {
+            Some(tag) => emit_report_text(app, id, t.clone(), tag),
+            None => emit_note(app, id, t.clone(), None),
+        },
+    }
     *last_text = Some(t);
 }
 
@@ -2722,6 +2778,7 @@ fn pump_pi_stdio(
     worker: Option<WorkerTag>,
     tool_prefix: &str,
     enforce: Option<ScopeEnforce>,
+    report_tag: Option<&str>,
 ) -> PumpOutcome {
     let PiPipes { out, err } = pipes;
     // stderr → [sys] 노트(모델/스코프 로그·print 모드 오류).
@@ -2810,7 +2867,7 @@ fn pump_pi_stdio(
                         }
                         Some("text_end") => {
                             let b = buf.clone();
-                            flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text);
+                            flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
                             buf.clear();
                         }
                         _ => {}
@@ -2828,7 +2885,13 @@ fn pump_pi_stdio(
                                 .unwrap_or("pi 요청 실패")
                                 .to_string();
                             outcome.error = msg.clone();
-                            emit_note(app, id, format!("[오류] {msg}"), worker.as_ref());
+                            // 이미 충분한 텍스트를 받았으면 오류가 아니라 주의로만 알린다 —
+                            // 받은 내용까지 발행하므로 사용자를 놀라게 하지 않는다.
+                            if has_usable_text(&outcome) {
+                                emit_note(app, id, format!("[sys] 주의: {msg} — 받은 내용까지 사용합니다."), worker.as_ref());
+                            } else {
+                                emit_note(app, id, format!("[오류] {msg}"), worker.as_ref());
+                            }
                         }
                         Some("aborted") => {
                             outcome.aborted = true;
@@ -2841,7 +2904,7 @@ fn pump_pi_stdio(
                             for part in content {
                                 if part.get("type").and_then(|t| t.as_str()) == Some("text") {
                                     if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                        flush_assistant_text(app, id, t, worker.as_ref(), &mut outcome, &mut last_text);
+                                        flush_assistant_text(app, id, t, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
                                     }
                                 }
                             }
@@ -2868,7 +2931,7 @@ fn pump_pi_stdio(
     }
     if !buf.trim().is_empty() {
         let b = buf.clone();
-        flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text);
+        flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
     }
     let _ = err_handle.join();
     outcome
@@ -2983,8 +3046,44 @@ fn https_hint_for(host: &str, port: Option<u16>) -> String {
     }
 }
 
+/// collector 병합 1회 실행 — 조기(1차)·최종 공용.
+/// `report_tag`("early"|"final")는 결과 탭의 1차/최종 구분 표식이다.
+#[allow(clippy::too_many_arguments)]
+fn run_collector_merge(
+    app: &AppHandle,
+    id: &str,
+    engine: Engine,
+    settings: &Settings,
+    provider: &str,
+    redcell: &str,
+    run_tag: &str,
+    instruction: String,
+    proc_key: &str,
+    report_tag: &str,
+    label: &str,
+) -> PumpOutcome {
+    match prepare_engine_run(app, id, engine, settings, provider, redcell, run_tag, instruction, true) {
+        Ok(prep) => match spawn_prepared(&prep, provider, settings) {
+            Ok((child, pipes)) => {
+                app.state::<Procs>().0.lock().unwrap().insert(proc_key.to_string(), child);
+                pump_and_wait(app, id, proc_key, pipes, None, prep.tool_prefix, prep.enforce_auth, Some(report_tag))
+            }
+            Err(e) => {
+                emit_note(app, id, format!("[오류] {label} 실행 실패: {e}"), None);
+                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
+            }
+        },
+        Err(e) => {
+            emit_note(app, id, format!("[오류] {label} 준비 실패: {e}"), None);
+            PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
+        }
+    }
+}
+
 /// 심층 진단 — 워커 5개를 독립 pi 세션으로 동시에 실행한 뒤 collector 가 병합.
 /// prime-agent builder(factory) 패턴의 RedCell 구현: 병렬 섹션 작성자 + fan-in 병합.
+/// 1라운드 직후 1차 리포트를 먼저 발행하고 추적 라운드는 백그라운드로 계속한다 —
+/// 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
 /// 즉시 반환하며, 진행은 `engagement-event`(worker_status·노트)/`engagement-status` 로 전달된다.
 #[tauri::command]
 fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
@@ -3106,7 +3205,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                         Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
                             Ok((child, pipes)) => {
                                 app.state::<Procs>().0.lock().unwrap().insert(key.clone(), child);
-                                pump_and_wait(&app, &id, &key, pipes, Some(tag.clone()), prep.tool_prefix, prep.enforce_auth)
+                                pump_and_wait(&app, &id, &key, pipes, Some(tag.clone()), prep.tool_prefix, prep.enforce_auth, None)
                             }
                             Err(e) => {
                                 emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
@@ -3118,7 +3217,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                             PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
                         },
                     };
-                    let state = if outcome.aborted { "stopped" } else if outcome.failed { "error" } else { "done" };
+                    let state = if outcome.aborted { "stopped" } else if outcome.failed && !has_usable_text(&outcome) { "error" } else { "done" };
                     let ev = json!({ "type": "worker_status", "worker": def.id, "title": def.title, "label": def.label, "state": state });
                     let stamped = append_event(&app, &id, &ev);
                     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
@@ -3145,7 +3244,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut results = run_round(0, &std::collections::HashMap::new());
         for (wid, o) in &results {
-            if !o.failed {
+            if !o.failed || has_usable_text(o) {
                 accum.insert(wid.clone(), o.text.clone());
                 for k in extract_finding_keys(&o.text) {
                     seen.insert(k);
@@ -3154,7 +3253,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         }
         // 1라운드 전체 실패 = 프로바이더 연결 문제 — 추적 라운드·collector 는 시도할 가치가
         // 없다. "수렴" 으로 포장하지 말고 원인을 그대로 보여주고 즉시 마감한다.
-        if !results.is_empty() && results.iter().all(|(_, o)| o.failed) {
+        if !results.is_empty() && results.iter().all(|(_, o)| o.failed && !has_usable_text(o)) {
             let detail = results
                 .iter()
                 .find_map(|(_, o)| if o.error.is_empty() { None } else { Some(o.error.clone()) })
@@ -3170,6 +3269,31 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 app.emit("engagement-status", json!({ "sessionId": id, "status": "error" })).ok();
             }
             return;
+        }
+        // 조기 리포트 — 1라운드 결과로 1차 리포트를 먼저 발행하고, 추적 라운드는
+        // 백그라운드로 계속한다. 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
+        let mut early_published = false;
+        {
+            let (combined_early, ok_early) = combine_worker_outputs(&accum, 1);
+            if ok_early > 0 && !is_stopped(&results) {
+                emit_note(&app, &id, format!("[sys] 1라운드 완료(워커 {ok_early}/{}) — 조기 리포트를 발행합니다…", DEEP_WORKERS.len()), None);
+                let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem));
+                if engine == Engine::Prime {
+                    merge = prime_adapt(merge);
+                }
+                merge.push_str(&digest_c);
+                let run_tag = if engine == Engine::Prime { "merge-early".to_string() } else { format!("{piq}-merge-early") };
+                let key = format!("{id}#merge-early");
+                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 collector");
+                if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
+                    early_published = true;
+                    emit_note(&app, &id, "[완료] 1차 리포트 발행 — 결과 탭에서 확인하세요. 추적 라운드는 백그라운드로 계속됩니다.".to_string(), None);
+                } else if outcome.aborted || read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false) {
+                    return; // 조기 병합 중 중지 — 1차 리포트 없이 stopped 유지
+                } else {
+                    emit_note(&app, &id, "[sys] 1차 리포트 발행 실패 — 추적 라운드 후 최종 병합을 시도합니다.".to_string(), None);
+                }
+            }
         }
         let mut rounds_run: u32 = 1;
         for round in 1..DEEP_MAX_ROUNDS {
@@ -3211,7 +3335,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             rounds_run += 1;
             let mut new_n = 0usize;
             for (wid, o) in &results {
-                if o.failed {
+                if o.failed && !has_usable_text(o) {
                     continue;
                 }
                 for k in extract_finding_keys(&o.text) {
@@ -3234,26 +3358,18 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
         }
 
-        // 중단됐으면 collector 없이 마감 (stop_engagement 가 이미 stopped 로 마감했다).
+        // 중단됐으면 collector 없이 마감. 1차 리포트가 있으면 유지하고 done 으로
+        // 마감해 사용자가 "리포트만 받고 취소" 할 수 있게 한다.
         if is_stopped(&results) {
+            if early_published {
+                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 1차 리포트를 유지합니다.".to_string(), None);
+                set_status(&app, &id, "done");
+                app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
+            }
             return;
         }
         // collector fan-in — 워커 발견(전 라운드 누적)을 시나리오 리포트로 병합.
-        let mut combined = String::new();
-        let mut ok_n = 0;
-        for def in DEEP_WORKERS {
-            let wid = def.id;
-            let body = accum.get(wid).map(|s| s.trim()).unwrap_or("");
-            if !body.is_empty() {
-                ok_n += 1;
-            }
-            let body = if body.is_empty() {
-                "(이 워커는 결과를 내지 못했습니다 — collector 가 해당 분야를 보강할 것)".to_string()
-            } else {
-                body.chars().take(6000).collect::<String>()
-            };
-            combined.push_str(&format!("\n\n--- {} ({wid}) [라운드 {rounds_run}] ---\n{body}", def.label));
-        }
+        let (combined, ok_n) = combine_worker_outputs(&accum, rounds_run);
         {
             let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 최종 시나리오 리포트를 병합합니다.", DEEP_WORKERS.len()) });
             let stamped = append_event(&app, &id, &ev);
@@ -3280,26 +3396,15 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         }
         merge.push_str(&digest_c);
         let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
-        let merge_outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, true) {
-            Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
-                Ok((child, pipes)) => {
-                    app.state::<Procs>().0.lock().unwrap().insert(id.clone(), child);
-                    pump_and_wait(&app, &id, &id, pipes, None, prep.tool_prefix, prep.enforce_auth)
-                }
-                Err(e) => {
-                    emit_note(&app, &id, format!("[오류] collector 실행 실패: {e}"), None);
-                    PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
-                }
-            },
-            Err(e) => {
-                emit_note(&app, &id, format!("[오류] collector 준비 실패: {e}"), None);
-                PumpOutcome { text: String::new(), failed: true, aborted: false, settled: false, blocked: false, error: e }
-            }
-        };
-        let ok = !merge_outcome.failed && !merge_outcome.aborted;
+        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "collector");
+        let ok = (!merge_outcome.failed && !merge_outcome.aborted) || has_usable_text(&merge_outcome);
         {
             let ev = json!({ "type": "note", "text": if ok {
-                "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
+                if merge_outcome.failed {
+                    "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
+                } else {
+                    "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
+                }
             } else if merge_outcome.aborted {
                 "[중지] collector 가 중단됐습니다.".to_string()
             } else {
@@ -3315,6 +3420,11 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 let st = if ok { "done" } else { "error" };
                 set_status(&app, &id, st);
                 app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
+            } else if cur.status == "stopped" && early_published {
+                // 최종 병합 중 취소 — 1차 리포트를 유지하고 done 으로 마감한다.
+                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 1차 리포트를 유지합니다.".to_string(), None);
+                set_status(&app, &id, "done");
+                app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
             }
         }
     });
@@ -4318,6 +4428,46 @@ mod tests {
     }
 
     /// 추적 지시문 — 라운드·자가 요약·교차 단서·추가 발견 형식 포함.
+    /// 조기 리포트용 워커 출력 병합 — 최종 병합과 동일한 규칙(분야당 6000자·빈 워커
+    /// 플레이스홀더·라운드 표기)이어야 1차/최종 리포트가 같은 품질로 나온다.
+    #[test]
+    fn combine_worker_outputs_shape() {
+        let mut accum = std::collections::HashMap::new();
+        accum.insert("w1".to_string(), "발견 A".to_string());
+        accum.insert("w2".to_string(), "x".repeat(9000));
+        let (combined, ok_n) = combine_worker_outputs(&accum, 1);
+        assert_eq!(ok_n, 2, "내용 있는 워커만 계수");
+        assert!(combined.contains("발견 A"), "w1 내용: {combined}");
+        assert!(combined.contains("[라운드 1]"), "라운드 표기: {combined}");
+        assert!(combined.contains("결과를 내지 못했습니다"), "빈 워커 플레이스홀더: {combined}");
+        let w2sec = combined.split("\n\n--- ").find(|s| s.starts_with("W2·")).unwrap_or("");
+        assert!(w2sec.chars().count() <= 6000 + 200, "분야당 6000자 절단: {}자", w2sec.chars().count());
+    }
+
+    /// 조기 병합 지시문은 최종과 같은 본문에 "(1차)" 표기 지시만 덧붙인다 —
+    /// 결과 탭에서 1차/최종을 구분하는 유일한 표식이다.
+    #[test]
+    fn early_merge_instruction_marks_preliminary() {
+        let inst = early_merge_instruction("BASE".to_string());
+        assert!(inst.starts_with("BASE"), "본문 보존");
+        assert!(inst.contains("(1차)"), "1차 표기: {inst}");
+    }
+
+    /// 부분 성공 판정 — 게이트웨이가 응답 말미를 자르면 pi 는 stopReason=error
+    /// ("Response incomplete without a provider reason")를 내지만, 이미 받은
+    /// 수천 자 리포트는 발행해야 한다. 짧은 텍스트·사용자 중지는 살리지 않는다.
+    #[test]
+    fn usable_text_salvages_truncated_report() {
+        let mut o = PumpOutcome { failed: true, ..Default::default() };
+        o.text = "x".repeat(600);
+        assert!(has_usable_text(&o), "말미 절단 + 충분한 텍스트 = 발행");
+        o.text = "짧음".to_string();
+        assert!(!has_usable_text(&o), "짧은 텍스트는 살리지 않는다");
+        o.text = "x".repeat(600);
+        o.aborted = true;
+        assert!(!has_usable_text(&o), "사용자 중지는 살리지 않는다");
+    }
+
     #[test]
     fn followup_instruction_shape() {
         let def = &DEEP_WORKERS[2];

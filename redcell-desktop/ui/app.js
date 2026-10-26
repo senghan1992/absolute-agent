@@ -546,6 +546,9 @@ function noteActivity(t) {
   if (/수렴 — 추가 발견 없음/.test(t)) return "수렴 — 최종 병합 준비 중…";
   if (/collector 가 최종/.test(t)) return "최종 리포트 병합 중…";
   if (/리포트 병합 완료/.test(t)) return "리포트 병합 완료 — 결과 탭에서 확인하세요";
+  if (/1라운드 완료.*조기 리포트를 발행/.test(t)) return "1차 리포트 발행 중…";
+  if (/1차 리포트 발행 — 결과 탭/.test(t)) return "1차 리포트 발행 완료 — 추적 계속…";
+  if (/백그라운드 추적 취소 — 1차 리포트/.test(t)) return "추적 취소 — 1차 리포트 유지";
   if (/^\[(오류|완료|중지|차단|경고)\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 100);
   // 툴 호출 시작: [W3·인증] [pi-툴] web_fetch {"url":"…"} → 접근 시도 중
   let m = t.match(/^\[([^\]]+)\] \[(?:pi|prime)-툴\] (\S+)/);
@@ -661,6 +664,10 @@ function onLiveEvent(event) {
   // pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
   if (s) renderPiConsole(s);
   if (resultsTabActive()) renderResults();
+  else { // 라이브 탭 시청 중에도 1차 리포트 도착을 뱃지로 알린다.
+    const c = $("resultsCount");
+    if (c && s) { const n = resultDocs(s).length; c.textContent = String(n); c.style.display = n ? "inline-flex" : "none"; }
+  }
 
   renderStepper(s);
   renderMetrics(s);
@@ -1182,6 +1189,15 @@ function switchView(name) {
 
 // ── 결과 탭: 에이전트가 만들어낸 마크다운을 렌더링해 보여준다 ──────────────────
 // pi stdout 의 text_end 가 note 이벤트로 들어온다. [sys]/[pi-툴]/[오류]/[완료] 같은
+// 진단 리포트 H1 정규화 — "{세션명} 진단 리포트"로 통일. 리포트형 H1이 없으면 그대로 둔다.
+function normalizeReportTitle(text, name, isEarly) {
+  const re = /^#\s+.*리포트.*$/m;
+  const m = text.match(re);
+  if (!m) return text;
+  const suffix = isEarly ? " (1차)" : "";
+  return text.replace(re, `# ${name} 진단 리포트${suffix}`);
+}
+
 // 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
 function resultDocs(s) {
   const out = [];
@@ -1198,12 +1214,18 @@ function resultDocs(s) {
     seen.add(key);
     if (t === prevText) continue; // 같은 결과가 연속 2번 저장된 경우
     prevText = t;
-    const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t };
+    const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null };
     // 심층 진단 워커 중간 발견([Wn·…] 태그)은 최종 리포트가 아니면 결과에서 제외.
     if (e.worker) { workerFallback.push(doc); continue; }
+    // 진단 리포트 제목은 "{세션명} 진단 리포트"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
+    if (s && s.diag && s.name && s.name.trim()) doc.text = normalizeReportTitle(t, s.name.trim(), doc.report === "early");
     out.push(doc);
   }
-  return out.length ? out : workerFallback;
+  // 최종 리포트가 있으면 그 이전 1차 리포트는 결과에서 제외 (통계·내보내기 일관).
+  // 단, 최종 이후에 발행된 1차(재실행분)는 새 런의 리포트이므로 보여준다.
+  const lastFinal = out.map((d) => d.report).lastIndexOf("final");
+  const main = lastFinal >= 0 ? out.filter((d, i) => d.report !== "early" || i > lastFinal) : out;
+  return main.length ? main : workerFallback;
 }
 
 function resultsTabActive() {
