@@ -127,6 +127,9 @@ export function validateSpec(raw: ProviderSpec | CustomProviderSpec): ProviderSp
   if (raw.apiKey !== undefined && typeof raw.apiKey !== "string") {
     throw new Error(`apiKey 는 문자열이어야 합니다.`);
   }
+  if (raw.authType !== undefined && raw.authType !== "api_key" && raw.authType !== "oauth") {
+    throw new Error(`authType 은 'api_key' 또는 'oauth' 이어야 합니다: '${raw.authType as string}'`);
+  }
   const { headers, ...rest } = raw;
   const spec = toMemorySpec({ ...rest });
   if (headers !== undefined) {

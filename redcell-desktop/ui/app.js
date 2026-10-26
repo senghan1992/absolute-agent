@@ -761,7 +761,16 @@ async function stopEngagement() {
   try {
     await invoke("stop_engagement", { id: s.id });
   } catch (e) {
-    // 이미 종료됐거나 지원되지 않으면 무시
+    // 이미 종료된 경우 등 — 실제 상태를 다시 읽어 버튼 표시를 맞춘다.
+    try {
+      const fresh = await invoke("get_session", { id: s.id });
+      if (fresh) {
+        const i = sessions.findIndex((x) => x.id === s.id);
+        if (i >= 0) sessions[i] = fresh;
+        if (fresh.id === activeId) setBadge(fresh.status);
+        renderTabs();
+      }
+    } catch { /* 무시 */ }
   }
 }
 
@@ -887,7 +896,7 @@ const PROVIDER_CATALOG = [
   { name: "moonshotai", kind: "openai-compat", note: "Moonshot Kimi", default_model: "kimi-k2.6", envKeys: ["MOONSHOT_API_KEY"], baseUrl: "https://api.moonshot.ai/v1", needsBase: false },
   { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", envKeys: ["ZAI_API_KEY"], baseUrl: "https://api.z.ai/api/coding/paas/v4", needsBase: false },
   { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", envKeys: [], baseUrl: "http://localhost:11434/v1", needsBase: true },
-  { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
+  { name: "custom", kind: "openai-compat", note: "임의 엔드포인트 — vLLM·LM Studio·원격 ollama·Databricks AI Gateway(Anthropic 방식)", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
 ];
 let envReadyMap = {}; // get_providers 의 ready_env (시스템 환경변수 감지)
 let expandedProvider = null;
@@ -918,6 +927,7 @@ function providerConnState(p) {
     api_key: c.api_key || "",
     base_url: c.base_url || "",
     model: c.model || "",
+    api: c.api || "",
     connected: providerConnected(p),
     viaEnv: !!envReadyMap[p.name],
   };
@@ -945,13 +955,20 @@ function renderProviderCards() {
         <svg class="ic pcard-chev"><use href="#i-chev"/></svg>
       </div>
       <div class="pcard-body">
+        ${p.name === "custom" ? `<label class="fld"><span>API 방식</span>
+          <select class="sh-input mono" data-f="api" style="width:100%">
+            <option value=""${!st.api ? " selected" : ""}>OpenAI 호환 (/chat/completions)</option>
+            <option value="anthropic-messages"${st.api === "anthropic-messages" ? " selected" : ""}>Anthropic Messages (Databricks AI Gateway 등)</option>
+          </select>
+        </label>` : ""}
         ${p.needsBase ? `<label class="fld"><span>Base URL</span><input class="sh-input mono" data-f="base" value="${esc(st.base_url || p.baseUrl)}" placeholder="${basePlaceholder}" spellcheck="false" /></label>` : ""}
         ${p.envKeys.length ? `<label class="fld"><span>API 키 <span class="lbl-dim">(${keyLabel})</span></span>
           <span class="pcard-keyrow">
-            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="sk-…" spellcheck="false" autocomplete="off" />
+            <input class="sh-input mono" data-f="key" type="password" value="${esc(st.api_key)}" placeholder="${p.name === "custom" ? "sk-… 또는 !ug auth-token …" : "sk-…"}" spellcheck="false" autocomplete="off" />
             <button class="btn btn-icon" data-act="eye" title="표시/숨김" aria-label="키 표시/숨김"><svg class="ic"><use href="#i-eye"/></svg></button>
           </span>
         </label>` : ""}
+        ${p.name === "custom" ? `<div class="pcard-howto"><b>ug claude 와 같은 연결(Databricks)</b> — API 방식 <b>Anthropic Messages</b>, Base URL <code>https://&lt;workspace&gt;/ai-gateway/anthropic</code>, 모델 <code>system.ai.claude-sonnet-5-5</code>, 키 <code>!ug auth-token --host &lt;workspace&gt; --profile &lt;프로필&gt;</code> (<code>!</code>로 시작하면 요청마다 토큰 자동 발급). Anthropic 테스트는 최소 1토큰을 사용합니다.</div>` : ""}
         <label class="fld"><span>모델 <span class="lbl-dim">(선택 — 비우면 기본 ${p.default_model || "엔드포인트 기본"})</span></span><input class="sh-input mono" data-f="model" value="${esc(st.model)}" placeholder="${modelPh}" spellcheck="false" /></label>
         <div class="pcard-actions">
           <span class="pcard-test" data-r></span>
@@ -965,7 +982,7 @@ function renderProviderCards() {
 
 function cardValues(card) {
   const q = (sel) => { const i = card.querySelector(sel); return i ? i.value.trim() : ""; };
-  return { api_key: q('[data-f="key"]'), base_url: q('[data-f="base"]'), model: q('[data-f="model"]') };
+  return { api_key: q('[data-f="key"]'), base_url: q('[data-f="base"]'), model: q('[data-f="model"]'), api: q('[data-f="api"]') };
 }
 
 function collectSettings(providers) {
@@ -1001,7 +1018,7 @@ async function testProviderConn(card, p) {
   out.textContent = "확인 중…";
   out.className = "pcard-test";
   try {
-    const res = await invoke("test_provider", { provider: p.name, apiKey: v.api_key, baseUrl: v.base_url || p.baseUrl });
+    const res = await invoke("test_provider", { provider: p.name, apiKey: v.api_key, baseUrl: v.base_url || p.baseUrl, api: v.api || null, model: v.model || null });
     out.textContent = "✅ " + res;
     out.className = "pcard-test ok";
   } catch (e) {
@@ -1039,7 +1056,7 @@ function wireProviderCards() {
     } else if (act === "save") {
       const providers = Object.assign({}, settings.providers || {});
       const v = cardValues(card);
-      if (v.api_key || v.base_url || v.model) providers[name] = v;
+      if (v.api_key || v.base_url || v.model || v.api) providers[name] = v;
       else delete providers[name];
       await saveSettingsNow(providers);
       const out2 = card.querySelector("[data-r]");

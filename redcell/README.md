@@ -96,7 +96,9 @@ npm run mcts               # MCTS 트리검색: 깊은 미로에서 목표 경�
 설치 후에는 `redcell <cmd>` (`npm link` 또는 `bin/redcell`).
 
 ```bash
+redcell setup              # 첫 실행 마법사 — LLM 연결 + 인가 상태 점검
 redcell providers          # 연결 가능한 프로바이더 + 자격증명 상태(✅/—)
+redcell providers login    # API 키/OAuth 토큰 등록 (pi-agent 스타일 연결)
 redcell models             # 프로바이더별 기본 모델
 redcell scope              # 인가(scope) 상태
 redcell run --host 127.0.0.1 --port 8080 --goal "웹 취약점 정찰"
@@ -105,6 +107,25 @@ redcell config set defaultProvider anthropic
 redcell explore  |  redcell mcts     # 자기발전/트리검색 데모
 redcell help
 ```
+
+### 첫 실행 설정 (`setup` / `providers login`)
+
+LLM이 연결되어 있지 않으면 TUI는 시작 시 설정 마법사 모달을 먼저 띄운다.
+CLI에서도 동일하게 연결할 수 있다 — pi-agent·코딩 에이전트처럼 프로바이더를
+고르고 API 키 또는 OAuth 토큰을 등록한다:
+
+```bash
+redcell setup                    # 상태 점검 + 미설정 시 연결 마법사로 진입
+redcell setup --check            # 점검만 (0=정상, 2=미설정)
+redcell providers login          # 대화형: 목록 선택 → API 키/OAuth 선택 → 붙여넣기
+redcell providers login anthropic --auth-type oauth     # 비대화형(키는 별도 입력)
+redcell providers login groq --api-key <키> --no-default
+redcell providers login my-llm --from-pi                # pi-agent 자격증명 가져오기
+```
+
+키는 `~/.redcell/providers.json`에 소유자 전용(600)으로 저장되며, env 키가
+있으면 저장값보다 우선한다. OAuth 토큰으로 등록한 anthropic은 SDK의
+`authToken`(Bearer) 경로로 호출된다.
 
 ### assault — URL 한 줄 → 자동 공격 캠페인 (`assault`)
 
@@ -178,7 +199,9 @@ redcell config set defaultProvider my-llm        # 기본 프로바이더로 지
 
 저장 위치는 `~/.redcell/providers.json`(`REDCELL_HOME` 변경 시 함께 이동, 소유자 전용 600 권한).
 빌트인과 같은 이름으로 등록하면 사용자 정의 정의가 우선한다. `--kind anthropic` 프로바이더는
-`baseUrl`은 선택이며, `--api-key-env`/`--api-key` 인증을 그대로 쓴다(oauth 토큰은 미지원).
+`baseUrl`은 선택이며, `--api-key-env`/`--api-key` 인증을 그대로 쓴다.
+`--api-key`와 함께 `--auth-type oauth`를 주면 OAuth 토큰으로 저장된다
+(anthropic은 SDK `authToken` 경로로 호출, openai-compat은 Bearer 헤더).
 
 ### 간단 인가: 내가 입력한 IP = 인가 (ip-list)
 

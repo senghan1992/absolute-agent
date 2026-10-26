@@ -247,7 +247,10 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .btn-danger.armed { background: linear-gradient(180deg, color-mix(in srgb, var(--sev-critical) 78%, #fff 22%), var(--sev-critical)); border-color: transparent; color: #fff; font-weight: 700; box-shadow: inset 0 1px 0 rgba(255,255,255,0.25), 0 4px 14px color-mix(in srgb, var(--sev-critical) 32%, transparent); }
 .btn-danger.armed .ic { stroke: #fff; }
 .btn-danger-solid { background: linear-gradient(180deg, color-mix(in srgb, var(--sev-critical) 80%, #fff 20%), var(--sev-critical)); border-color: transparent; color: #fff; font-weight: 700; }
-.btn-danger-solid:hover { filter: brightness(1.07); }
+/* hover 에서도 채운 배경을 유지한다 — background 를 생략하면 상위 .btn:hover 의
+   표면색이 이겨 라이트 테마에서 흰 글씨가 흰 배경에 묻힌다. */
+.btn-danger-solid:hover { background: linear-gradient(180deg, color-mix(in srgb, var(--sev-critical) 80%, #fff 20%), var(--sev-critical)); border-color: transparent; color: #fff; filter: brightness(1.07); }
+.btn-danger-solid:disabled:hover { background: linear-gradient(180deg, color-mix(in srgb, var(--sev-critical) 80%, #fff 20%), var(--sev-critical)); border-color: transparent; color: #fff; filter: none; }
 .danger-card { width: min(560px, 94vw); }
 .danger-target { font-size: 12.5px; color: var(--muted); margin: 0 0 10px; }
 .danger-target code { font-family: var(--mono); color: var(--text); background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 6px; padding: 1px 7px; }
@@ -853,6 +856,9 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .pcard-test { flex: 1; font-size: 11px; color: var(--muted); min-height: 16px; }
 .pcard-test.ok { color: #34d399; }
 .pcard-test.err { color: #fb7185; }
+.pcard-howto { font-size: 11px; line-height: 1.65; color: var(--muted); background: var(--surface-3); border: 1px solid var(--line-2); border-radius: 8px; padding: 8px 10px; }
+.pcard-howto code { font-size: 10.5px; }
+.pcard-howto b { color: var(--text); }
 
 /* 설정 카드 셸 — 고정 헤더/푸터 + 가운데 스크롤 */
 .modal-card.settings-card { width: 640px; max-width: 94vw; max-height: min(760px, calc(100dvh - 40px)); padding: 0; display: flex; flex-direction: column; overflow: hidden; }

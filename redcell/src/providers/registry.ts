@@ -28,10 +28,22 @@ export interface ProviderSpec {
   /** 설명(도움말 표시용) */
   note?: string;
   /**
-   * 파일에 저장된 리터럴 API 키(사용자 정의 프로바이더용).
+   * 파일에 저장된 리터럴 자격증명(사용자 정의 프로바이더용).
    * envKeys 보다 우선순위가 낮다 — env 에 키가 있으면 env 를 쓴다.
    */
   apiKey?: string;
+  /**
+   * 저장된 자격증명의 종류 — pi-agent/코딩 에이전트처럼 OAuth 와 API 키를 구분한다.
+   *  - "api_key" (기본): 그대로 API 키로 사용.
+   *  - "oauth": OAuth 액세스 토큰으로 취급. anthropic kind 는 SDK authToken(Bearer)으로
+   *    전달하고, openai-compat 은 Bearer 헤더로 전달한다(대부분의 게이트웨이가 허용).
+   */
+  authType?: "api_key" | "oauth";
+}
+
+/** 저장된 자격증명의 인증 방식 라벨 — TUI/CLI 표시용. */
+export function authTypeLabel(t: ProviderSpec["authType"]): string {
+  return t === "oauth" ? "OAuth" : "API 키";
 }
 
 // base URL / env / 기본모델은 prime-agent(packages/ai) 참고.
@@ -86,7 +98,11 @@ export class ProviderRegistry {
     for (const k of spec.envKeys) {
       if (env[k]) return { source: k, value: env[k] };
     }
-    if (spec.apiKey) return { source: "config(apiKey)", value: spec.apiKey };
+    if (spec.apiKey) {
+      return spec.authType === "oauth"
+        ? { source: "config(oauth)", value: spec.apiKey }
+        : { source: "config(apiKey)", value: spec.apiKey };
+    }
     return null;
   }
 
@@ -108,14 +124,15 @@ export class ProviderRegistry {
 
     const cred = this.credential(spec, env);
     if (cred === null) {
-      throw new Error(`프로바이더 '${name}' 자격증명 없음. 필요한 env: ${spec.envKeys.join(" 또는 ")}`);
+      const need = spec.envKeys.length ? `필요한 env: ${spec.envKeys.join(" 또는 ")}. ` : "";
+      throw new Error(`프로바이더 '${name}' 자격증명 없음. ${need}\`redcell providers login ${name}\` 으로 API 키/OAuth 토큰을 등록하세요.`);
     }
 
     const modelId = opts.model ?? env.REDCELL_MODEL ?? spec.defaultModel;
     if (!modelId) throw new Error(`프로바이더 '${name}' 는 기본 모델이 없습니다. --model 로 모델을 지정하세요.`);
 
     if (spec.kind === "anthropic") {
-      const isOauth = cred.source === "ANTHROPIC_OAUTH_TOKEN";
+      const isOauth = cred.source === "ANTHROPIC_OAUTH_TOKEN" || cred.source === "config(oauth)";
       return {
         model: new AnthropicModel({
           model: modelId,

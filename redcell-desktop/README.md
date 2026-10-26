@@ -217,6 +217,20 @@ cargo build
 
 ## 검증
 
+## CLI 단독 실행 (P0 스윕)
+
+데스크톱 없이 터미널에서 바로 실측할 수 있다 (인가된 대상에만 사용):
+
+```bash
+cd redcell-desktop/src-tauri
+cargo run --bin sweep -- <host|URL> [--port N] [--cookie "a=b"] [--danger] [--json] [--timeout S]
+# 예: cargo run --bin sweep -- 127.0.0.1 --port 8080 --danger
+```
+
+`--danger` 는 파괴적 동의 모달과 동일 (기본자격·IDOR 인접·쓰기검증).
+
+## 검증
+
 ```bash
 cd redcell-desktop/src-tauri
 cargo test --workspace      # 백엔드 + netfilter (단위·스텁 실측·LD_PRELOAD 통합)

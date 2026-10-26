@@ -78,6 +78,15 @@ describe("custom provider 저장소 (providers.json)", () => {
     expect(() => validateSpec({ ...base, name: "x", baseUrl: "ftp://bad" })).toThrow(/http/);
     expect(() => validateSpec({ ...base as never, name: "x", baseUrl: "http://ok", envKeys: ["1BAD"] })).toThrow(/envKeys/);
     expect(() => validateSpec({ ...base, name: "x", headers: { "A": 1 as never } })).toThrow(/헤더/);
+    expect(() => validateSpec({ ...base, name: "x", authType: "sso" as never })).toThrow(/authType/);
+  });
+
+  it("authType(oauth)은 파일에 그대로 왕복한다", async () => {
+    await upsertCustomProvider({ ...base, apiKey: "tok-oauth", authType: "oauth" }, env);
+    const loaded = await loadCustomProviders(env);
+    expect(loaded).toHaveLength(1);
+    expect(loaded[0].authType).toBe("oauth");
+    expect(loaded[0].apiKey).toBe("tok-oauth");
   });
 });
 

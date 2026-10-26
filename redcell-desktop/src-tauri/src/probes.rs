@@ -151,6 +151,39 @@ pub struct SweepConfig {
     /// 파괴적 진단 동의 — 모달 명시 동의 시에만 true. 기본 false (fail-closed).
     /// true 일 때만 기본자격·IDOR 인접·쓰기검증 프로브가 동작한다.
     pub danger: bool,
+    /// 진행 피드백 — TUI 폴링용 (None 이면 미사용).
+    pub feedback: Option<std::sync::Arc<SweepFeedback>>,
+}
+
+/// 스윕 피드백 — 중단 요청 + 진행률 + 현재 단계.
+#[derive(Debug, Default)]
+pub struct SweepFeedback {
+    pub cancel: AtomicBool,
+    pub done: AtomicUsize,
+    pub total: AtomicUsize,
+    pub phase: Mutex<String>,
+}
+
+impl SweepFeedback {
+    pub fn phase_label(&self) -> String {
+        self.phase.lock().map(|p| p.clone()).unwrap_or_default()
+    }
+}
+
+fn cancelled(cfg: &SweepConfig) -> bool {
+    cfg.feedback.as_ref().map(|f| f.cancel.load(Ordering::Relaxed)).unwrap_or(false)
+}
+
+fn set_phase(cfg: &SweepConfig, phase: &str) {
+    if let Some(f) = &cfg.feedback {
+        *f.phase.lock().unwrap() = phase.to_string();
+    }
+}
+
+fn bump_done(cfg: &SweepConfig, counter: &AtomicUsize) {
+    if let Some(f) = &cfg.feedback {
+        f.done.store(counter.load(Ordering::Relaxed), Ordering::Relaxed);
+    }
 }
 
 impl SweepConfig {
@@ -162,6 +195,7 @@ impl SweepConfig {
             sweep_timeout: SWEEP_TIMEOUT,
             cookie: None,
             danger: false,
+            feedback: None,
         }
     }
     fn cookie_headers(&self) -> Vec<(&str, &str)> {
@@ -915,6 +949,11 @@ fn run_jobs(
     deadline: Instant,
     counter: &AtomicUsize,
 ) -> Vec<ProbeHit> {
+    if let Some(f) = &cfg.feedback {
+        // 병렬 잡 + 후속 순차 구간 추정치 (표시용, 초과분은 clamp).
+        f.total.store(jobs.len() + 64, Ordering::Relaxed);
+    }
+    set_phase(cfg, "병렬 프로브");
     let queue = Arc::new(Mutex::new(VecDeque::from(jobs)));
     let gate = Arc::new(Gate { rps: cfg.rps, next: Mutex::new(Instant::now()) });
     let stop = Arc::new(AtomicBool::new(false));
@@ -949,6 +988,14 @@ fn run_jobs(
                         return;
                     }
                     counter.fetch_add(1, Ordering::Relaxed);
+                    // 취소는 게이트 통과 후에도 확인 (RPS 대기 중 요청 반영).
+                    if cancelled(cfg) {
+                        stop.store(true, Ordering::Relaxed);
+                        return;
+                    }
+                    if let Some(f) = &cfg.feedback {
+                        f.done.store(counter.load(Ordering::Relaxed), Ordering::Relaxed);
+                    }
                     let mut hs: Vec<(&str, &str)> = job.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
                     if let Some(c) = cookie.as_ref() {
                         if !c.trim().is_empty() {
@@ -1378,6 +1425,9 @@ pub fn probe_login(
     }
     // 2) SQLi 우회 페이로드 2종.
     for (i, (u, p)) in [("rc7x' OR '1'='1", "rc7x' OR '1'='1"), ("rc7x' OR 1=1-- -", "anything")].iter().enumerate() {
+        if cancelled(cfg) {
+            return out;
+        }
         std::thread::sleep(Duration::from_millis(150));
         let Ok(r) = submit_login(agent, cfg, form, u, p, counter) else { continue };
         let masked_u = u.to_string();
@@ -1416,6 +1466,9 @@ pub fn probe_login(
     // 3) 레이트리밋 신호 — 오답 6연타 (존재하지 않는 계정).
     let mut limited = false;
     for i in 0..6 {
+        if cancelled(cfg) {
+            return out;
+        }
         std::thread::sleep(Duration::from_millis(120));
         let Ok(r) = submit_login(agent, cfg, form, &format!("rc7xrl{i}"), "rc7xw0ng!", counter) else { continue };
         let l = r.body.to_lowercase();
@@ -1642,6 +1695,9 @@ pub fn probe_jwt_confusion(
         (format!("{}.{}." , jwt.header_b64, jwt.payload_b64), "서명 제거(원본 헤더)"),
     ];
     for (forged, label) in variants {
+        if cancelled(cfg) {
+            return out;
+        }
         std::thread::sleep(Duration::from_millis(150));
         // 해당 쿠키 값만 교체 (나머지 쿠키는 유지).
         let mut pairs: Vec<String> = cookie.split(';').map(|s| s.to_string()).collect();
@@ -1685,6 +1741,9 @@ pub fn probe_auth_differential(
     let cookie = cfg.cookie.as_deref().map(str::trim).filter(|c| !c.is_empty());
     let root = get_with_cookie(agent, &format!("{base_url}/"), cookie, counter).map(|(_, b)| b).unwrap_or_default();
     for path in CANDS {
+        if cancelled(cfg) {
+            return out;
+        }
         std::thread::sleep(Duration::from_millis(80));
         let url = format!("{base_url}{path}");
         let authed = get_with_cookie(agent, &url, cookie, counter);
@@ -1881,6 +1940,9 @@ pub fn probe_default_creds(
         &[("admin", "admin"), ("admin", "password"), ("admin", "admin1234"), ("root", "root"), ("test", "test")];
     let target = form.action.clone();
     for (u, _p) in CREDS {
+        if cancelled(cfg) {
+            return out;
+        }
         std::thread::sleep(Duration::from_millis(200));
         let r = match submit_login(agent, cfg, form, u, _p, counter) {
             Ok(r) => r,
@@ -2004,6 +2066,9 @@ pub fn probe_idor_adjacency(
     }
     let mut tested = 0;
     for (prefix, id) in endpoints {
+        if cancelled(cfg) {
+            return out;
+        }
         let base_u = format!("{base_url}{prefix}/{id}");
         let (_, b0) = match get_with_cookie(agent, &base_u, Some(cookie), counter) {
             Some((200, b)) if b.contains("\"id\"") || b.contains("'id'") => (200, b),
@@ -2012,6 +2077,9 @@ pub fn probe_idor_adjacency(
         tested += 1;
         let norm0: String = b0.chars().filter(|c| !c.is_whitespace()).collect();
         for delta in [-2i64, -1, 1, 2] {
+            if cancelled(cfg) {
+                return out;
+            }
             let adj = id as i64 + delta;
             if adj <= 0 {
                 continue;
@@ -2146,7 +2214,7 @@ pub fn verify_pass(
     let ch = cfg.cookie_headers();
     let mut budget = 24;
     let take = |n: &mut usize| {
-        if *n == 0 || Instant::now() > deadline {
+        if *n == 0 || Instant::now() > deadline || cancelled(cfg) {
             return false;
         }
         *n -= 1;
@@ -2266,6 +2334,7 @@ pub fn run_sweep_with_config(host: &str, port: Option<u16>, cfg: SweepConfig) ->
 
     let agent = agent_for(&cfg);
     let mut hits = Vec::new();
+    set_phase(&cfg, "대상 확인");
     let base = match fetch_base(&agent, &cfg, &primary, &alt, &counter) {
         Ok(b) => b,
         Err(e) => {
@@ -2284,13 +2353,15 @@ pub fn run_sweep_with_config(host: &str, port: Option<u16>, cfg: SweepConfig) ->
         }
     };
     hits.extend(base_hits(&base));
+    bump_done(&cfg, &counter);
     let base_url = primary.trim_end_matches('/').to_string();
 
     // SPA 렌더 DOM (브라우저가 있을 때만) — 파라미터·스크립트·폼 추가 수집.
     let mut params = extract_params(&base.root_body);
     let mut scripts = extract_scripts(&base.root_body, host);
     let mut rendered: Option<String> = None;
-    if Instant::now() < deadline {
+    if Instant::now() < deadline && !cancelled(&cfg) {
+        set_phase(&cfg, "렌더 DOM");
         match find_browser() {
             None => hits.push(hit("render", Severity::Info, primary.clone(),
                 "렌더러 없음 — 정적 파싱만".into(), "헤드리스 브라우저 미설치 (SPA 커버리지 제한)".into(),
@@ -2389,34 +2460,48 @@ pub fn run_sweep_with_config(host: &str, port: Option<u16>, cfg: SweepConfig) ->
     }
 
     hits.extend(run_jobs(jobs, &cfg, deadline, &counter));
+    bump_done(&cfg, &counter);
     // 로그인 폼 injection 시도 + P1 검증 루프.
-    if Instant::now() < deadline {
+    if Instant::now() < deadline && !cancelled(&cfg) {
+        set_phase(&cfg, "로그인 시도");
         let login_form = parse_login_form(dom_ref, &base_url);
         if let Some(form) = &login_form {
             hits.extend(probe_login(&agent, &cfg, form, &counter));
         }
+        bump_done(&cfg, &counter);
         // 인증우회 퍼징 — JWT confusion + 인증 차분 + JWT 노출 스캔 (읽기 전용).
-        if Instant::now() < deadline {
+        if Instant::now() < deadline && !cancelled(&cfg) {
+            set_phase(&cfg, "인증 분석");
             hits.extend(probe_jwt_confusion(&agent, &cfg, &base_url, &counter));
+            bump_done(&cfg, &counter);
         }
-        if Instant::now() < deadline {
+        if Instant::now() < deadline && !cancelled(&cfg) {
             hits.extend(probe_auth_differential(&agent, &cfg, &base_url, &counter));
+            bump_done(&cfg, &counter);
         }
         // 파괴적 프로브 — 동의 게이트 (미동의 시 각 함수 선두에서 빈 반환).
-        if cfg.danger && Instant::now() < deadline {
+        if cfg.danger && Instant::now() < deadline && !cancelled(&cfg) {
+            set_phase(&cfg, "파괴적 프로브");
             if let Some(form) = &login_form {
                 hits.extend(probe_default_creds(&agent, &cfg, form, &counter));
             }
             hits.extend(probe_idor_adjacency(&agent, &cfg, &base_url, dom_ref, &counter));
-            if Instant::now() < deadline {
+            if Instant::now() < deadline && !cancelled(&cfg) {
                 hits.extend(probe_write_verify(&agent, &cfg, &base_url, &counter));
             }
+            bump_done(&cfg, &counter);
         }
         hits.extend(scan_jwt_leak(dom_ref, &primary));
         hits.extend(scan_write_surface(dom_ref, &base_url));
+        if !cancelled(&cfg) {
+            set_phase(&cfg, "P1 검증");
+        }
         hits.extend(verify_pass(&agent, &cfg, &base_url, &hits, &counter, deadline));
+        bump_done(&cfg, &counter);
     }
     let authenticated = cfg.cookie.as_ref().map(|c| !c.trim().is_empty()).unwrap_or(false);
+    bump_done(&cfg, &counter);
+    set_phase(&cfg, if cancelled(&cfg) { "중단됨" } else { "완료" });
     finish_report(target, started_at, started, counter.load(Ordering::Relaxed), authenticated, cfg.danger, hits)
 }
 
@@ -3075,6 +3160,7 @@ mod tests {
             threads: 8, rps: 500, req_timeout: Duration::from_secs(5),
             sweep_timeout: Duration::from_secs(60), cookie: Some(format!("TOK={}", test_jwt())),
             danger: false,
+            feedback: None,
         };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         assert!(
@@ -3092,6 +3178,7 @@ mod tests {
             sweep_timeout: Duration::from_secs(60),
             cookie: Some(format!("FIXMODE=1; TOK={}", test_jwt())),
             danger: false,
+            feedback: None,
         };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         assert!(
@@ -3110,6 +3197,7 @@ mod tests {
             threads: 8, rps: 500, req_timeout: Duration::from_secs(5),
             sweep_timeout: Duration::from_secs(60), cookie: Some(format!("TOK={}", test_jwt())),
             danger: false,
+            feedback: None,
         };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         assert!(rep.hits.iter().any(|h| h.category == "auth-bypass" && h.severity == "high" && h.target.contains("/api/orders")),
@@ -3120,6 +3208,7 @@ mod tests {
             threads: 8, rps: 500, req_timeout: Duration::from_secs(5),
             sweep_timeout: Duration::from_secs(60), cookie: None,
             danger: false,
+            feedback: None,
         };
         let rep2 = run_sweep_with_config("127.0.0.1", Some(port), cfg2);
         assert!(rep2.hits.iter().any(|h| h.category == "auth-bypass" && h.severity == "medium" && h.target.contains("/api/orders")),
@@ -3260,6 +3349,7 @@ mod tests {
             sweep_timeout: Duration::from_secs(60),
             cookie: cookie.map(|c| c.to_string()),
             danger: true,
+            feedback: None,
         }
     }
 
@@ -3308,6 +3398,7 @@ mod tests {
         let cfg = SweepConfig {
             threads: 8, rps: 500, req_timeout: Duration::from_secs(5),
             sweep_timeout: Duration::from_secs(60), cookie: Some("SESS=x".into()), danger: false,
+            feedback: None,
         };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         assert!(!rep.danger);
@@ -3354,15 +3445,55 @@ mod tests {
     }
 
     #[test]
+    fn feedback_reports_progress_and_phase() {
+        use std::sync::Arc;
+        let port = start_stub();
+        let fb = Arc::new(SweepFeedback::default());
+        let mut cfg = SweepConfig::with_defaults();
+        cfg.cookie = None;
+        cfg.feedback = Some(fb.clone());
+        let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
+        assert!(fb.total.load(Ordering::Relaxed) > 0, "total 미설정");
+        assert_eq!(fb.done.load(Ordering::Relaxed), rep.probes_run, "done 불일치");
+        assert_eq!(fb.phase_label(), "완료");
+    }
+
+    #[test]
+    fn feedback_cancel_aborts_early() {
+        use std::sync::Arc;
+        let port = start_stub();
+        // 시작 전 취소 — base 정찰 후 즉시 중단돼야 함.
+        let fb = Arc::new(SweepFeedback::default());
+        fb.cancel.store(true, Ordering::Relaxed);
+        let mut cfg = SweepConfig::with_defaults();
+        cfg.feedback = Some(fb.clone());
+        let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
+        // base 정찰 + 워커당 1개씩 빠져나간 것만 허용 (정상 수백 대비 1/10 이하).
+        assert!(rep.probes_run < 40, "중단 안 됨: {} 프로브", rep.probes_run);
+        assert_eq!(fb.phase_label(), "중단됨");
+        // 중간 취소 — 별도 스레드에서 0.5초 후 중단.
+        let fb2 = Arc::new(SweepFeedback::default());
+        let fb2c = fb2.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(500));
+            fb2c.cancel.store(true, Ordering::Relaxed);
+        });
+        let mut cfg2 = SweepConfig::with_defaults();
+        cfg2.feedback = Some(fb2.clone());
+        let rep2 = run_sweep_with_config("127.0.0.1", Some(port), cfg2);
+        assert!(rep2.probes_run < 150, "중간 중단 안 됨: {} 프로브", rep2.probes_run);
+    }
+
+    #[test]
     fn live_sweep_with_cookie_unlocks() {
         let port = start_stub();
         // 쿠키 없이: /.env 는 403 → high 발견 없음.
-        let cfg = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: None, danger: false };
+        let cfg = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: None, danger: false, feedback: None };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         assert!(!rep.authenticated);
         assert!(!rep.hits.iter().any(|h| h.category == "paths" && h.severity == "high" && h.target.contains("/.env")), "쿠키 없이 .env high 면 안 됨");
         // 쿠키 첨부: 200 → high 발견 + authenticated.
-        let cfg2 = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: Some("SESS=ok".into()), danger: false };
+        let cfg2 = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: Some("SESS=ok".into()), danger: false, feedback: None };
         let rep2 = run_sweep_with_config("127.0.0.1", Some(port), cfg2);
         assert!(rep2.authenticated);
         assert!(rep2.hits.iter().any(|h| h.category == "paths" && h.severity == "high" && h.target.contains("/.env")), "쿠키로 .env high 검출 필요");
@@ -3371,7 +3502,7 @@ mod tests {
     #[test]
     fn live_sweep_against_stub() {
         let port = start_stub();
-        let cfg = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: None, danger: false };
+        let cfg = SweepConfig { threads: 16, rps: 500, req_timeout: Duration::from_secs(5), sweep_timeout: Duration::from_secs(60), cookie: None, danger: false, feedback: None };
         let rep = run_sweep_with_config("127.0.0.1", Some(port), cfg);
         // 수백 프로브 실행 (초인적 탐색량).
         assert!(rep.probes_run >= 100, "프로브 부족: {}", rep.probes_run);

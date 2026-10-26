@@ -3,7 +3,9 @@
  * RedCell CLI — prime-agent 처럼 서브커맨드로 동작한다.
  *
  *   redcell run --host 127.0.0.1 --port 8080 [--provider anthropic] [--model ...]
+ *   redcell setup                     첫 실행 마법사 — LLM 연결 + 인가 상태 점검
  *   redcell providers                 연결 가능한 프로바이더 + 자격증명 상태
+ *   redcell providers login [name]    API 키/OAuth 토큰 등록 (pi-agent 스타일 연결)
  *   redcell models                    프로바이더별 기본 모델
  *   redcell scope [--auth <path>]     인가(scope) 상태
  *   redcell auth add|rm|list <대상>   간단 인가 목록 관리 — 내가 입력한 IP = 인가
@@ -14,7 +16,10 @@
  */
 
 import { promises as fs } from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import readline from "node:readline/promises";
+import { stdin as nodeStdin, stdout as nodeStdout } from "node:process";
 import { fileURLToPath } from "node:url";
 import { loadAuthorization } from "./scope/load-auth.js";
 import { parseIpList, classifyTarget, DEFAULT_LIST_FILE, DEFAULT_VALIDITY_DAYS } from "./scope/ip-list.js";
@@ -49,7 +54,8 @@ import { ProviderRegistry, type ProviderSpec } from "./providers/registry.js";
 import { loadCustomProviders, upsertCustomProvider, removeCustomProvider, applyCustomProviders, validateSpec, customProvidersPath } from "./providers/custom-store.js";
 import { loadConfig, saveConfig, resolveModel, redcellHome, type RedcellConfig } from "./config.js";
 import type { ModelAdapter, EngagementFinding, Coverage, GateVerdict } from "./core/types.js";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
 import type { ScopeGuard } from "./scope/scope-guard.js";
 import { AuditLog, verifyAuditFile } from "./audit/audit-log.js";
 import { runLesson, listLessons, loadProgress, progressPath } from "./learn/runner.js";
@@ -106,8 +112,9 @@ async function cmdProviders(args: Args): Promise<void> {
   const sub = args._.shift();
   if (sub === "add") return void (await cmdProviderAdd(args));
   if (sub === "rm" || sub === "remove") return void (await cmdProviderRm(args));
+  if (sub === "login") return void (await cmdProviderLogin(args));
   if (sub !== undefined) {
-    console.error(`알 수 없는 providers 서브커맨드: '${sub}' (add | rm <name>)`);
+    console.error(`알 수 없는 providers 서브커맨드: '${sub}' (login [name] | add | rm <name>)`);
     process.exitCode = 1;
     return;
   }
@@ -125,15 +132,16 @@ async function cmdProviders(args: Args): Promise<void> {
   }
   console.log(
     `\n* = config 기본 프로바이더. 변경: redcell config set defaultProvider <name>\n` +
+      `연결: redcell providers login [name]  (API 키/OAuth 토큰 등록 — 미설정 시 redcell setup)\n` +
       `사용자 정의: redcell providers add <name> --base-url <url> [--api-key-env <ENV>] [--default-model <id>]  (${customProvidersPath()})`,
   );
 }
 
-/** redcell providers add <name> --base-url <url> [--kind openai-compat|anthropic] [--api-key-env ENV[,ENV]] [--api-key <키>] [--default-model <id>] [--header "K: V"[,K: V]] [--note "..."] */
+/** redcell providers add <name> --base-url <url> [--kind openai-compat|anthropic] [--api-key-env ENV[,ENV]] [--api-key <키>] [--auth-type api-key|oauth] [--default-model <id>] [--header "K: V"[,K: V]] [--note "..."] */
 async function cmdProviderAdd(args: Args): Promise<void> {
   const name = args._.shift();
   if (!name) {
-    console.error("사용법: redcell providers add <name> --base-url <url> [--api-key-env <ENV>] [--default-model <id>] [--header \"K: V\"]");
+    console.error("사용법: redcell providers add <name> --base-url <url> [--api-key-env <ENV>] [--api-key <키>] [--auth-type api-key|oauth] [--default-model <id>] [--header \"K: V\"]");
     process.exitCode = 1;
     return;
   }
@@ -141,8 +149,18 @@ async function cmdProviderAdd(args: Args): Promise<void> {
   const baseUrl = str(args.flags["base-url"]);
   const envKeys = (str(args.flags["api-key-env"]) ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const apiKey = str(args.flags["api-key"]);
+  const authTypeFlag = str(args.flags["auth-type"]);
   const defaultModel = str(args.flags["default-model"]);
   const note = str(args.flags.note);
+  let authType: ProviderSpec["authType"];
+  if (authTypeFlag) {
+    if (authTypeFlag !== "api-key" && authTypeFlag !== "oauth") {
+      console.error(`--auth-type 은 'api-key' 또는 'oauth' 여야 합니다: '${authTypeFlag}'`);
+      process.exitCode = 1;
+      return;
+    }
+    authType = authTypeFlag === "oauth" ? "oauth" : "api_key";
+  }
   const headers: Record<string, string> = {};
   for (const pair of (str(args.flags.header) ?? "").split(",").map((s) => s.trim()).filter(Boolean)) {
     const m = /^([^:]+):\s*(.+)$/.exec(pair);
@@ -160,6 +178,7 @@ async function cmdProviderAdd(args: Args): Promise<void> {
     baseUrl,
     envKeys,
     ...(apiKey ? { apiKey } : {}),
+    ...(authType ? { authType } : {}),
     ...(defaultModel ? { defaultModel } : {}),
     ...(Object.keys(headers).length ? { headers: () => headers } : {}),
     ...(note ? { note } : {}),
@@ -201,6 +220,225 @@ async function cmdProviderRm(args: Args): Promise<void> {
     return;
   }
   console.error(`[providers] 사용자 정의 프로바이더 '${name}' 삭제됨.`);
+}
+
+// ── 대화형 로그인/셋업 (pi-agent·코딩 에이전트 스타일 연결) ─────────────────────
+
+function promptLine(query: string): Promise<string> {
+  const rl = readline.createInterface({ input: nodeStdin, output: nodeStdout });
+  return rl.question(query).finally(() => rl.close());
+}
+
+/** 비밀 입력 — TTY 면 화면에 표시하지 않고 읽는다(파이프면 그대로 읽는다). */
+function promptSecret(query: string): Promise<string> {
+  if (!nodeStdin.isTTY) return promptLine(query);
+  return new Promise((resolve) => {
+    nodeStdout.write(query);
+    const buf: string[] = [];
+    const onData = (chunk: Buffer): void => {
+      const s = chunk.toString("utf8");
+      for (const ch of s) {
+        if (ch === "\n" || ch === "\r") {
+          nodeStdin.off("data", onData);
+          nodeStdin.setRawMode?.(false);
+          nodeStdin.pause();
+          nodeStdout.write("\n");
+          resolve(buf.join(""));
+          return;
+        }
+        if (ch === "\u0003") { // Ctrl+C
+          nodeStdout.write("\n");
+          process.exit(130);
+        }
+        if (ch === "\u007f" || ch === "\b") { // Backspace
+          if (buf.pop() !== undefined) nodeStdout.write("\b \b");
+          continue;
+        }
+        buf.push(ch);
+        nodeStdout.write("*");
+      }
+    };
+    nodeStdin.resume();
+    nodeStdin.setRawMode?.(true);
+    nodeStdin.on("data", onData);
+  });
+}
+
+/** pi-agent(~/.pi/agent/auth.json)에 저장된 같은 이름 프로바이더 자격증명. */
+async function readPiAuth(name: string): Promise<{ key: string; authType: "api_key" | "oauth" } | null> {
+  try {
+    const raw = await fs.readFile(path.join(os.homedir(), ".pi", "agent", "auth.json"), "utf8");
+    const entries = JSON.parse(raw) as Record<string, Record<string, unknown>>;
+    const e = entries[name];
+    if (!e || typeof e !== "object") return null;
+    if (e.type === "api_key" && typeof e.key === "string" && e.key.trim()) {
+      return { key: e.key.trim(), authType: "api_key" };
+    }
+    // oauth 형 — 알려진 토큰 필드를 순서대로 시도한다.
+    for (const f of ["accessToken", "access_token", "token", "apiKey"]) {
+      if (typeof e[f] === "string" && (e[f] as string).trim()) {
+        return { key: (e[f] as string).trim(), authType: "oauth" };
+      }
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+/** 키 유효성 best-effort 확인 — GET {base}/models (실패해도 저장은 진행, 경고만). */
+async function verifyKey(spec: ProviderSpec, key: string, authType: "api_key" | "oauth"): Promise<string | null> {
+  const base = spec.kind === "anthropic" ? "https://api.anthropic.com" : spec.baseUrl;
+  if (!base) return "base URL 없음 — 검증 생략";
+  if (spec.kind === "anthropic" && authType === "oauth") return null; // OAuth 는 실행 시 검증
+  try {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), 8000);
+    const headers: Record<string, string> =
+      spec.kind === "anthropic"
+        ? { "x-api-key": key, "anthropic-version": "2023-06-01" }
+        : { authorization: `Bearer ${key}` };
+    const res = await fetch(`${base.replace(/\/$/, "")}${spec.kind === "anthropic" ? "/v1/models" : "/models"}`, {
+      headers,
+      signal: ctl.signal,
+    });
+    clearTimeout(timer);
+    if (res.status === 401 || res.status === 403) return `인증 거부됨(HTTP ${res.status}) — 키를 확인하세요`;
+    if (!res.ok) return `서버 응답 HTTP ${res.status} — 키는 저장됩니다`;
+    return null;
+  } catch (e) {
+    return `연결 실패(${(e as Error).name === "AbortError" ? "시간초과" : "네트워크"}) — 키는 저장됩니다`;
+  }
+}
+
+function maskTail(key: string): string {
+  const t = key.trim();
+  return t.length <= 8 ? "•".repeat(t.length) : `…${t.slice(-4)}`;
+}
+
+/**
+ * redcell providers login [name] [--auth-type api-key|oauth] [--api-key <키>] [--model <id>] [--from-pi] [--no-default]
+ * pi-agent/코딩 에이전트처럼 provider 를 고르고 API 키나 OAuth 토큰을 등록한다.
+ */
+async function cmdProviderLogin(args: Args): Promise<void> {
+  if (args.flags.help || args.flags.h) {
+    console.log(`redcell providers login — LLM 연결 (API 키 / OAuth 토큰 등록)
+
+사용법: redcell providers login [name] [옵션]
+
+  [name]                 프로바이더 이름 (생략 시 목록에서 선택)
+  --auth-type <t>        api-key | oauth (생략 시 대화형 선택)
+  --api-key <키>         비대화형 등록용 (히스토리에 남으니 대화형을 권장)
+  --model <id>           기본 모델 지정 (생략 시 프로바이더 기본값)
+  --from-pi              pi-agent(~/.pi/agent/auth.json)의 같은 이름 자격증명 가져오기
+  --no-default           기본 프로바이더로 지정하지 않음
+
+저장: ${customProvidersPath()} (소유자 전용 600 권한)`);
+    return;
+  }
+  const interactive = !!nodeStdin.isTTY;
+  let name = args._.shift();
+  if (!name) {
+    if (!interactive) {
+      console.error("사용법: redcell providers login <name> [--api-key <키>]  (비대화형에서는 이름과 키가 필수)");
+      process.exitCode = 2;
+      return;
+    }
+    const list = registry.list();
+    console.log("프로바이더 선택:\n");
+    list.forEach((s, i) => {
+      const cred = registry.credential(s, process.env);
+      console.log(`  ${String(i + 1).padStart(2)}. ${s.name.padEnd(16)} ${(cred ? "✅" : "—").padEnd(2)} ${(s.defaultModel ?? "(모델 지정 필요)").padEnd(28)} ${s.note ?? ""}`);
+    });
+    const picked = (await promptLine("\n번호 또는 이름 (기본 1): ")).trim() || "1";
+    const byNum = /^\d+$/.test(picked) ? list[Number(picked) - 1] : undefined;
+    name = byNum?.name ?? picked;
+  }
+  const spec = registry.get(name);
+  if (!spec) {
+    console.error(`알 수 없는 프로바이더: '${name}' — 먼저 redcell providers add ${name} --base-url <url> 로 등록하세요.`);
+    process.exitCode = 1;
+    return;
+  }
+  if (spec.kind === "openai-compat" && !spec.baseUrl) {
+    console.error(`'${name}' 에는 base URL 이 없습니다 — 먼저 redcell providers add ${name} --base-url <url> 로 등록하세요.`);
+    process.exitCode = 1;
+    return;
+  }
+  let authType: "api_key" | "oauth" = "api_key";
+  const authFlag = str(args.flags["auth-type"]);
+  if (authFlag) {
+    if (authFlag !== "api-key" && authFlag !== "oauth") {
+      console.error(`--auth-type 은 'api-key' 또는 'oauth' 여야 합니다: '${authFlag}'`);
+      process.exitCode = 1;
+      return;
+    }
+    authType = authFlag === "oauth" ? "oauth" : "api_key";
+  } else if (interactive && !str(args.flags["api-key"]) && !args.flags["from-pi"]) {
+    const m = (await promptLine(`인증 방식 [1] API 키 (기본)  [2] OAuth 토큰${spec.kind === "anthropic" ? " (Muse/ant 로그인 토큰)" : ""}: `)).trim();
+    if (m === "2" || m.toLowerCase() === "oauth") authType = "oauth";
+  }
+
+  let key = str(args.flags["api-key"])?.trim() ?? "";
+  if (!key && args.flags["from-pi"]) {
+    const pi = await readPiAuth(spec.name);
+    if (!pi) {
+      console.error(`[login] pi-agent 에 '${spec.name}' 자격증명이 없습니다(~/.pi/agent/auth.json). 직접 입력하세요.`);
+      if (!interactive) { process.exitCode = 2; return; }
+    } else {
+      key = pi.key;
+      authType = pi.authType;
+      console.error(`[login] pi-agent 에서 가져옴 (${authType === "oauth" ? "OAuth" : "API 키"} ${maskTail(key)})`);
+    }
+  }
+  if (!key) {
+    if (!interactive) {
+      console.error(`사용법: redcell providers login ${spec.name} --api-key <키>  (비대화형에서는 키가 필수)`);
+      process.exitCode = 2;
+      return;
+    }
+    console.error(authType === "oauth"
+      ? `[login] OAuth 토큰 붙여넣기 — 예: 다른 코딩 에이전트 로그인 토큰 (입력은 화면에 표시되지 않음)`
+      : `[login] API 키 붙여넣기${spec.envKeys.length ? ` (또는 env ${spec.envKeys.join("/")} 사용 시 비워두세요)` : ""} (입력은 화면에 표시되지 않음)`);
+    key = (await promptSecret("키: ")).trim();
+  }
+  if (!key) {
+    console.error("[login] 키가 비어 있습니다 — env 변수로 연결하거나 다시 시도하세요.");
+    process.exitCode = 2;
+    return;
+  }
+
+  let model = str(args.flags.model)?.trim();
+  if (!model && interactive && !args.flags["from-pi"]) {
+    const dflt = spec.defaultModel ?? "";
+    const m = (await promptLine(`모델 [${dflt || "지정 필요"}]: `)).trim();
+    model = m || undefined;
+  }
+
+  const warn = await verifyKey(spec, key, authType);
+  if (warn) console.error(`[login] ⚠️ ${warn}`);
+
+  await upsertCustomProvider(
+    validateSpec({
+      ...spec,
+      // 빌트인 함수 헤더(openrouter 등)는 값으로 평가해 함께 저장 — 교체 후에도 유지된다.
+      ...(spec.headers ? { headers: spec.headers() } : { headers: undefined }),
+      apiKey: key,
+      authType,
+      ...(model ? { defaultModel: model } : {}),
+    }),
+    process.env,
+  );
+  if (!args.flags["no-default"]) {
+    const cfg = await loadConfig();
+    cfg.defaultProvider = spec.name;
+    if (model) cfg.defaultModel = model;
+    await saveConfig(cfg);
+  }
+  if (!model && !spec.defaultModel) {
+    console.error(`[login] ⚠️ '${spec.name}' 에는 기본 모델이 없습니다 — redcell providers login ${spec.name} --model <id> 로 모델을 지정하세요.`);
+  }
+  console.log(`✅ '${spec.name}' 연결됨 (${authType === "oauth" ? "OAuth" : "API 키"} ${maskTail(key)}${model ? ` · ${model}` : spec.defaultModel ? ` · ${spec.defaultModel}` : ""})${args.flags["no-default"] ? "" : " — 기본값으로 지정"}.`);
 }
 
 async function cmdModels(): Promise<void> {
@@ -1091,6 +1329,68 @@ async function cmdLearn(args: Args): Promise<void> {
   process.exitCode = 1;
 }
 
+/**
+ * redcell setup [--check] — 첫 실행 마법사.
+ * LLM 연결 + 인가(scope) 상태를 점검하고, 미설정이면 login 흐름으로 안내한다.
+ * --check: 비대화형 점검만 (0=정상, 2=미설정).
+ */
+async function cmdSetup(args: Args): Promise<void> {
+  const cfg = await loadConfig();
+  const modelFallback = cfg.defaultModel ?? process.env.REDCELL_MODEL;
+  const avail = new Set(registry.available(process.env).map((s) => s.name));
+  const rows = registry.list().map((s) => {
+    const cred = registry.credential(s, process.env);
+    const usable = avail.has(s.name) && !!(s.defaultModel || modelFallback);
+    return { spec: s, cred, usable };
+  });
+  const usableRows = rows.filter((r) => r.usable);
+  let authPath: string | null = null;
+  try {
+    authPath = await findAuthPath(undefined, cfg);
+  } catch {
+    authPath = null;
+  }
+
+  console.log("RedCell 설정 점검:\n");
+  console.log(`  LLM 연결: ${usableRows.length ? `✅ ${usableRows.map((r) => r.spec.name).join(", ")}` : "— 미설정"}`);
+  if (cfg.defaultProvider) {
+    const dflt = rows.find((r) => r.spec.name === cfg.defaultProvider);
+    console.log(`  기본값: ${cfg.defaultProvider}${cfg.defaultModel ? ` / ${cfg.defaultModel}` : ""}${dflt?.usable ? "" : "  ⚠️ 연결 안 됨"}`);
+  } else {
+    console.log("  기본값: (미지정 — 사용 가능한 첫 프로바이더 자동 선택)");
+  }
+  console.log(`  인가(scope): ${authPath ? `✅ ${authPath}` : "— 없음"}`);
+
+  const ok = usableRows.length > 0 && !!authPath;
+  if (args.flags.check) {
+    if (!ok) {
+      if (!usableRows.length) console.error("\n미설정: LLM — `redcell setup` 또는 `redcell providers login` 으로 연결하세요.");
+      if (!authPath) console.error("미설정: 인가 — `redcell auth add <ip|도메인>` 으로 대상을 인가하세요.");
+      process.exitCode = 2;
+    } else {
+      console.log("\n✅ 준비 완료.");
+    }
+    return;
+  }
+
+  if (!usableRows.length) {
+    console.log("\nLLM이 연결되어 있지 않습니다 — 연결 마법사를 시작합니다.\n");
+    if (!nodeStdin.isTTY) {
+      console.error("비대화형 셸입니다: `redcell providers login <name> --api-key <키>` 로 연결하세요.");
+      process.exitCode = 2;
+      return;
+    }
+    await cmdProviderLogin({ _: [], flags: {} });
+    return;
+  }
+  if (!authPath) {
+    console.log("\n다음: 인가 대상을 등록하세요 — 예: redcell auth add 10.13.37.5");
+    console.log("      (직접 입력한 대상만 인가됩니다. 목록 확인: redcell auth list)");
+  } else {
+    console.log("\n✅ 준비 완료 — redcell tui (또는 인자 없이 redcell) 로 시작하세요.");
+  }
+}
+
 async function cmdConfig(args: Args): Promise<void> {
   const [op, key, value] = args._;
   const cfg = await loadConfig();
@@ -1443,12 +1743,51 @@ async function cmdRlm(args: Args): Promise<void> {
   auditFinishRun(audit, activeFindings, { command: "rlm", isolation });
 }
 
+/** redcell TUI 바이너리 탐색 — REDCELL_TUI_BIN → 형제 redcell-tui 빌드 산출물 → PATH. */
+export function findTuiBinary(): string | null {
+  const env = process.env.REDCELL_TUI_BIN;
+  if (env) {
+    try {
+      if (statSync(env).isFile()) return env;
+    } catch { /* 아래로 */ }
+  }
+  const here = path.dirname(fileURLToPath(import.meta.url)); // redcell/src
+  for (const c of [
+    path.join(here, "..", "..", "redcell-tui", "target", "release", "redcell-tui"),
+    path.join(here, "..", "..", "redcell-tui", "target", "debug", "redcell-tui"),
+  ]) {
+    try {
+      if (statSync(c).isFile()) return c;
+    } catch { /* 다음 */ }
+  }
+  try {
+    const found = execFileSync("sh", ["-c", "command -v redcell-tui"], { encoding: "utf8" }).trim();
+    if (found) return found;
+  } catch { /* 없음 */ }
+  return null;
+}
+
+async function cmdTui(): Promise<void> {
+  const bin = findTuiBinary();
+  if (!bin) {
+    console.error("redcell TUI 바이너리를 찾지 못했습니다.");
+    console.error("빌드:  cd ../redcell-tui && cargo build --release");
+    console.error("또는 REDCELL_TUI_BIN 환경변수로 경로를 지정하세요.\n");
+    help();
+    process.exit(2);
+  }
+  const r = spawnSync(bin, [], { stdio: "inherit" });
+  process.exit(r.status ?? 0);
+}
+
 function help(): void {
   console.log(`RedCell — 자기발전형 화이트해커 에이전트 (prime-agent 기반)
 
-사용법: redcell <command> [options]
+사용법: redcell [command] [options]   (인자 없이 실행하면 TUI)
 
 Commands:
+  tui          터미널 UI — 코딩-에이전트형 대화 셸 (무인자 실행과 동일)
+  setup        첫 실행 마법사 — LLM 연결 + 인가 상태 점검 [--check]
   learn        해킹 학습 투어 — 인가된 로컬 랩에서 취약점을 안내받으며 직접 뚫어본다
                  redcell learn                  강의 목록(진행도 표시)
                  redcell learn start <id>       강의 시작 (예: learn start sql-injection)
@@ -1512,6 +1851,10 @@ Commands:
                  [--panel-port <n>]  패널 포트(기본 5173, 0=임의)
                  REPL 변수 ctx(prompt-as-variable) 지속 · rlm('지시') 함수처럼 재귀 위임
   providers    연결 가능한 프로바이더와 자격증명 상태 표시
+                 login [name]   API 키/OAuth 토큰 등록 [--auth-type api-key|oauth]
+                                [--api-key <키>] [--model <id>] [--from-pi] [--no-default]
+                 add <name>     사용자 정의 프로바이더 등록 (base URL 등)
+                 rm <name>      사용자 정의 프로바이더 삭제
   models       프로바이더별 기본 모델 표시
   scope        인가(scope) 상태 확인   [--auth <path>]
   auth         간단 인가 목록 관리 — 내가 입력한 IP 가 곧 인가
@@ -1571,7 +1914,9 @@ async function main(): Promise<void> {
     case "mcts": return void (await cmdMcts(args));
     case "learn": return void (await cmdLearn(args));
     case "config": return void (await cmdConfig(args));
-    case undefined:
+    case "setup": return void (await cmdSetup(args));
+    case "tui": return void (await cmdTui());
+    case undefined: return void (await cmdTui());
     case "help": return help();
     default:
       console.error(`알 수 없는 명령: ${cmd}\n`);

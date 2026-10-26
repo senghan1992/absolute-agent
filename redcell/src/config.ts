@@ -64,7 +64,7 @@ export function resolveModel(registry: ProviderRegistry, cfg: RedcellConfig, opt
   const available = registry.available(env).filter((s) => s.defaultModel || model || env.REDCELL_MODEL);
   if (available.length === 0) {
     throw new Error(
-      "연결된 프로바이더가 없습니다. 예: export ANTHROPIC_API_KEY=... 또는 `redcell config set defaultProvider <name>`.\n" +
+      "연결된 프로바이더가 없습니다. `redcell setup` 마법사로 연결하거나, 예: export ANTHROPIC_API_KEY=... 또는 `redcell providers login`.\n" +
         "`redcell providers` 로 사용 가능한 프로바이더를 확인하세요.",
     );
   }

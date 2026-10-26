@@ -99,6 +99,10 @@ struct ProviderConn {
     base_url: String,
     #[serde(default)]
     model: String,
+    /// pi models.json 의 API 방언 — ""(기본)=openai-completions, "anthropic-messages".
+    /// custom 카드에서 선택한다 (Databricks AI Gateway 같은 Anthropic 경로용).
+    #[serde(default)]
+    api: String,
 }
 
 #[derive(Serialize, Deserialize, Clone, Default)]
@@ -789,7 +793,8 @@ fn get_providers() -> Value {
 /// 그래서 키는 (a) 표준 env 주입 + (b) --api-key CLI 인자 두 경로로 넘긴다.
 fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
     if let Some(p) = PROVIDER_CATALOG.iter().find(|p| p.name == provider) {
-        if !conn.api_key.trim().is_empty() {
+        // `!명령` 키는 주입하지 않는다 — 명령 문자열 자체를 키로 쓰는 셈이 된다.
+        if !conn.api_key.trim().is_empty() && !conn.api_key.trim_start().starts_with('!') {
             if let Some(k) = p.env_keys.last() {
                 // 마지막 env 슬롯에 주입(앞쪽 OAUTH 등 실제 설정 env 가 있으면 그게 우선)
                 cmd.env(k, conn.api_key.trim());
@@ -799,10 +804,15 @@ fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
 }
 
 /// pi 의 커스텀 프로바이더(baseUrl 기반)는 `~/.pi/agent/models.json` 에만 선언할 수 있다.
-/// (docs/models.md: custom providers) 프로바이더 "custom"/"ollama" 는 baseUrl·apiKey·models 를
-/// 여기에 기록해야 pi 가 프로바이더로 인식하고 키 없음 오류가 나지 않는다.
-/// 사용자의 기존 파일(다른 프로바이더·이름·compat 등)은 보존하고 같은 이름만 병합(upsert)한다.
-fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: &str, model: &str) -> Result<(), String> {
+/// (docs/models-configuration.md: custom providers) 프로바이더 "custom"/"ollama" 는
+/// baseUrl·apiKey·models 를 여기에 기록해야 pi 가 프로바이더로 인식하고 키 없음 오류가 나지 않는다.
+/// 사용자의 기존 파일(다른 프로바이더·이름 등)은 보존하고 같은 이름만 병합(upsert)한다.
+/// `api` 가 비어 있으면 기존 api 를 유지(없으면 openai-completions)하고, 지정됐으면
+/// 그 방언으로 덮어쓴다. anthropic-messages (Databricks AI Gateway 등) 일 때는 게이트웨이가
+/// 요구하는 authHeader·compat 를 함께 기록하고, OpenAI 방언으로 돌아오면 제거한다.
+/// apiKey 가 `!명령` 형태(pi 의 !command)면 그대로 기록한다 — pi 가 요청마다 실행해
+/// 토큰을 받아오므로 만료되는 키를 파일에 박지 않아도 된다 (`ug auth-token ...` 용).
+fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: &str, model: &str, api: &str) -> Result<(), String> {
     let mut root: Value = fs::read_to_string(path)
         .ok()
         .and_then(|s| serde_json::from_str(&s).ok())
@@ -815,8 +825,22 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
     if !base_url.trim().is_empty() {
         prov.insert("baseUrl".into(), Value::String(base_url.trim().to_string()));
     }
-    if prov.get("api").is_none() {
+    if !api.trim().is_empty() {
+        prov.insert("api".into(), Value::String(api.trim().to_string()));
+    } else if prov.get("api").is_none() {
         prov.insert("api".into(), Value::String("openai-completions".into()));
+    }
+    let anthropic = prov.get("api").and_then(|v| v.as_str()) == Some("anthropic-messages");
+    if anthropic {
+        // Databricks AI Gateway 의 Anthropic 경로: Bearer 인증 + per-tool
+        // eager_input_streaming 미지원이므로 레거시 beta 헤더 경로를 쓴다 (ug 와 동일).
+        prov.insert("authHeader".into(), Value::Bool(true));
+        let mut compat = prov.get("compat").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+        compat.insert("supportsEagerToolInputStreaming".into(), Value::Bool(false));
+        prov.insert("compat".into(), Value::Object(compat));
+    } else {
+        prov.remove("authHeader");
+        prov.remove("compat");
     }
     // apiKey 는 반드시 비어있지 않은 문자열로 남긴다 — pi 는 빈 apiKey 가 있으면
     // 프로바이더 자체를 목록에서 내려버리므로, 미설정이면 placeholder 를 쓴다
@@ -870,10 +894,65 @@ fn pi_models_json_path() -> Result<PathBuf, String> {
         .ok_or_else(|| "홈 디렉터리(HOME/USERPROFILE)를 찾을 수 없습니다.".to_string())
 }
 
+/// `!명령` 키(pi !command) 해석 — 연결 테스트용으로 한 번만 실행해 토큰을 받아온다.
+/// (`ug auth-token ...` 처럼 요청마다 새 토큰을 만드는 명령을 카드에 넣었을 때,
+/// 테스트에서도 같은 경로로 토큰을 구한다. 최대 10초.)
+fn resolve_bang_key(key: &str) -> Result<String, String> {
+    let cmdline = key.trim_start().strip_prefix('!').unwrap_or("").trim();
+    if cmdline.is_empty() {
+        return Err("`!` 뒤에 실행할 명령이 없습니다.".into());
+    }
+    let mut cmd = if cfg!(windows) {
+        let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        let mut c = Command::new(comspec);
+        c.arg("/C").arg(cmdline);
+        c
+    } else {
+        let mut c = Command::new("sh");
+        c.arg("-c").arg(cmdline);
+        c
+    };
+    hide_window(&mut cmd);
+    let mut child = cmd
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("키 명령 실행 실패: {e}"))?;
+    use std::io::Read;
+    let mut waited = 0;
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            let mut out = String::new();
+            if let Some(mut o) = child.stdout.take() {
+                let _ = o.read_to_string(&mut out);
+            }
+            let tok = out.trim().to_string();
+            if st.success() && !tok.is_empty() {
+                // pi 와 동일하게 stdout 전체(trim)를 토큰으로 쓴다.
+                return Ok(tok);
+            }
+            let mut err = String::new();
+            if let Some(mut o) = child.stderr.take() {
+                let _ = o.read_to_string(&mut err);
+            }
+            let detail = if tok.is_empty() { err.trim().to_string() } else { tok };
+            return Err(format!("키 명령이 토큰을 내놓지 않았습니다{}.", if detail.is_empty() { String::new() } else { format!(": {detail}") }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(150));
+        waited += 150;
+        if waited > 10000 {
+            let _ = child.kill();
+            return Err("키 명령 시간 초과 (10초) — `ug auth-token ...` 인증 상태를 확인하세요.".into());
+        }
+    }
+}
+
 /// 연결 테스트 — node fetch 로 대상 엔드포인트 도달성/키 인증을 확인한다.
 /// (reqwest 의존성 추가 없이 이미 있는 node 를 재사용)
+/// `api` 가 "anthropic-messages" 면 Anthropic 경로에는 /models 가 없으므로
+/// POST {base}/v1/messages (max_tokens 1 — 최소 1토큰 사용)로 키·모델을 함께 검증한다.
 #[tauri::command]
-fn test_provider(provider: String, api_key: String, base_url: String) -> Result<String, String> {
+fn test_provider(provider: String, api_key: String, base_url: String, api: Option<String>, model: Option<String>) -> Result<String, String> {
     let meta = PROVIDER_CATALOG
         .iter()
         .find(|p| p.name == provider)
@@ -886,17 +965,46 @@ fn test_provider(provider: String, api_key: String, base_url: String) -> Result<
     if base.is_empty() {
         return Err("base URL 을 입력하세요 (custom/ollama 는 필수).".into());
     }
-    let path = if provider == "ollama" { "/tags" } else { "/models" };
-    let url = format!("{}{}", base.trim_end_matches('/'), path);
-    let script = r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"";try{const r=await fetch(u,{headers:k?{Authorization:"Bearer "+k,"x-api-key":k,"anthropic-version":"2023-06-01"}:{}});console.log("OK "+r.status+" "+r.statusText)}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#;
+    let key = if api_key.trim_start().starts_with('!') {
+        resolve_bang_key(&api_key)?
+    } else {
+        api_key.trim().to_string()
+    };
+    let anthropic = api.as_deref().unwrap_or("") == "anthropic-messages";
+    let (url, body) = if anthropic {
+        let m = model.as_deref().unwrap_or("").trim();
+        if m.is_empty() {
+            return Err("Anthropic 방식 테스트는 모델명이 필요합니다 — 모델란에 입력하세요.".into());
+        }
+        let payload = serde_json::to_string(&json!({
+            "model": m,
+            "max_tokens": 1,
+            "messages": [{ "role": "user", "content": "ok" }],
+        }))
+        .unwrap_or_default();
+        (format!("{}/v1/messages", base.trim_end_matches('/')), Some(payload))
+    } else {
+        let path = if provider == "ollama" { "/tags" } else { "/models" };
+        (format!("{}{}", base.trim_end_matches('/'), path), None)
+    };
+    // GET 은 도달성 프로브(응답만 오면 OK — /models 없는 서버도 있음),
+    // Anthropic POST 는 키·모델 실검증(2xx 일 때만 OK)이다.
+    let script = if body.is_some() {
+        r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"",b=JSON.parse(process.env.RC_TEST_BODY||"null");try{const r=await fetch(u,{method:"POST",headers:Object.assign({"content-type":"application/json","anthropic-version":"2023-06-01"},k?{Authorization:"Bearer "+k,"x-api-key":k}:{}),body:JSON.stringify(b)});const t=await r.text();console.log((r.ok?"OK ":"ERR ")+r.status+" "+r.statusText+" "+t.slice(0,300))}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#
+    } else {
+        r#"(async()=>{const u=process.env.RC_TEST_URL,k=process.env.RC_TEST_KEY||"";try{const r=await fetch(u,{headers:k?{Authorization:"Bearer "+k,"x-api-key":k,"anthropic-version":"2023-06-01"}:{}});console.log("OK "+r.status+" "+r.statusText)}catch(e){console.log("ERR "+String(e&&e.message||e))}})()"#
+    };
     let mut probe = Command::new("node");
     probe
         .arg("-e")
         .arg(script)
         .env("RC_TEST_URL", url)
-        .env("RC_TEST_KEY", api_key.trim())
+        .env("RC_TEST_KEY", &key)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    if let Some(b) = body {
+        probe.env("RC_TEST_BODY", b);
+    }
     hide_window(&mut probe);
     let mut child = probe
         .spawn()
@@ -1488,7 +1596,7 @@ fn prime_run_args(
     let conn = settings.providers.get(provider).cloned().unwrap_or_default();
     if provider == "custom" || provider == "ollama" {
         let mpath = prime_models_json_path()?;
-        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model)?;
+        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model, &conn.api)?;
     }
     {
         let m = conn.model.trim().to_string();
@@ -1505,7 +1613,9 @@ fn prime_run_args(
             }
         }
     }
-    if !conn.api_key.trim().is_empty() {
+    // `!명령` 키(pi !command)는 models.json 에만 살고 CLI 로 넘기지 않는다 — argv 리터럴은
+    // 명령으로 해석되지 않아 인증이 깨진다.
+    if !conn.api_key.trim().is_empty() && !conn.api_key.trim_start().starts_with('!') {
         args.push("--api-key".into());
         args.push(conn.api_key.trim().to_string());
     }
@@ -1956,7 +2066,7 @@ fn pi_cli_args(
     // 앱 설정(base URL·키·모델)을 ~/.pi/agent/models.json 에 병합해 항상 동기화한다.
     if provider == "custom" || provider == "ollama" {
         let mpath = pi_models_json_path()?;
-        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model)?;
+        sync_pi_models_json_at(&mpath, provider, &conn.base_url, &conn.api_key, &conn.model, &conn.api)?;
     }
     // 모델 지정: custom/ollama 도 --model 로 명시( pi 모델 패턴 "provider/id" 또는 순수 id ).
     {
@@ -1975,7 +2085,8 @@ fn pi_cli_args(
         }
     }
     // 키: CLI --api-key 가 pi 해석 1순위(GUI 환경에선 env 가 안 보일 수 있어 가장 확실).
-    if !conn.api_key.trim().is_empty() {
+    // 단 `!명령` 키(pi !command)는 models.json 에만 살고 CLI 로 넘기지 않는다.
+    if !conn.api_key.trim().is_empty() && !conn.api_key.trim_start().starts_with('!') {
         args.push("--api-key".into());
         args.push(conn.api_key.trim().to_string());
     }
@@ -2432,6 +2543,10 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     thread::spawn(move || {
         // P0: 결정적 대량 스윕을 먼저 실행하고 증거를 워커·collector 에게 나눠준다.
         let sweep = run_p0_sweep(&app, &id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
+        // P0 도중 중지됐으면 워커를 띄우지 않고 마감한다 (stop_engagement 가 이미 stopped 처리).
+        if read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(true) {
+            return;
+        }
         let digest_w = p0_evidence_block(&sweep, 6000);
         let digest_c = p0_evidence_block(&sweep, 12000);
         // 워커 1라운드 실행 클로저 — round 0 = 초동, 1+ = 추적 (동일 세션 연속).
@@ -2685,6 +2800,9 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     };
 }
 /// 실행 중지 — 등록된 자식 프로세스(심층 워커 `{id}#w{n}` 포함)를 kill 하고 stopped 로 마감한다.
+/// P0 스윕 중·라운드 사이처럼 등록된 자식이 없는 구간에서도 status 가 running 이면
+/// stopped 로 전이한다 — 그래야 심층 진단 스레드가 다음 단계(워커/collector)를
+/// 시작하지 않고 바로 마감한다. (자식 없이 running 도 아닌 경우에만 Err.)
 #[tauri::command]
 fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let keys: Vec<String> = {
@@ -2696,7 +2814,11 @@ fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
             .collect()
     };
     if keys.is_empty() {
-        return Err("실행 중인 세션이 아닙니다".into());
+        let running = read_session(&app, &id).map(|s| s.status == "running").unwrap_or(false);
+        if !running {
+            return Err("실행 중인 세션이 아닙니다".into());
+        }
+        // 자식은 없지만 실행 상태(P0 스윕·라운드 사이) — 아래에서 stopped 로 마감한다.
     }
     for k in keys {
         let removed = app.state::<Procs>().0.lock().unwrap().remove(&k);
@@ -3180,7 +3302,7 @@ mod tests {
         )
         .unwrap();
         // 첫 호출: custom 신규 추가.
-        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model").unwrap();
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model", "").unwrap();
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let providers = root["providers"].as_object().unwrap();
         // 기존 프로바이더 보존.
@@ -3192,20 +3314,55 @@ mod tests {
         assert_eq!(providers["custom"]["api"], "openai-completions");
         assert_eq!(providers["custom"]["models"][0]["id"], "my-model");
         // 두 번째 호출: 같은 모델 중복 없음 + 새 모델 추가.
-        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model").unwrap();
-        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "second-model").unwrap();
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "my-model", "").unwrap();
+        sync_pi_models_json_at(&path, "custom", "http://llm.corp.lge:8080/v1", "sk-test", "second-model", "").unwrap();
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         let models = root["providers"]["custom"]["models"].as_array().unwrap();
         assert_eq!(models.len(), 2, "모델은 업서트(중복 없이 2개)여야 한다: {models:?}");
         assert_eq!(models[1]["id"], "second-model");
         // 모델 없는 새 프로바이더는 오류.
-        let err = sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "x", "").unwrap_err();
+        let err = sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "x", "", "").unwrap_err();
         assert!(err.contains("모델"), "모델 미지정 시 안내 오류: {err}");
         // 키 미설정이어도 placeholder 로 프로바이더가 살아남는다.
-        sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "", "llama3.1").unwrap();
+        sync_pi_models_json_at(&path, "ollama", "http://localhost:11434/v1", "", "llama3.1", "").unwrap();
         let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(root["providers"]["ollama"]["apiKey"], "redcell-placeholder");
         assert_eq!(root["providers"]["ollama"]["models"][0]["id"], "llama3.1");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// custom + Anthropic 방식(Databricks AI Gateway): api 방언·authHeader·compat 가
+    /// 기록되고 `!명령` 키가 그대로 통과해야 한다. OpenAI 방언으로 되돌리면 게이트웨이
+    /// 전용 필드는 제거된다.
+    #[test]
+    fn sync_pi_models_json_anthropic_dialect_and_bang_key() {
+        let dir = std::env::temp_dir().join(format!("rc-models-anthropic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        sync_pi_models_json_at(
+            &path,
+            "custom",
+            "https://ws.example.cloud.databricks.com/ai-gateway/anthropic",
+            "!ug auth-token --host https://ws.example --profile test",
+            "system.ai.claude-sonnet-5-5",
+            "anthropic-messages",
+        )
+        .unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let custom = &root["providers"]["custom"];
+        assert_eq!(custom["api"], "anthropic-messages");
+        assert_eq!(custom["authHeader"], true);
+        assert_eq!(custom["compat"]["supportsEagerToolInputStreaming"], false);
+        assert_eq!(custom["apiKey"], "!ug auth-token --host https://ws.example --profile test");
+        assert_eq!(custom["models"][0]["id"], "system.ai.claude-sonnet-5-5");
+        // OpenAI 방언으로 전환 — 게이트웨이 전용 필드 제거, 키·모델은 유지.
+        sync_pi_models_json_at(&path, "custom", "http://llm.local/v1", "sk-x", "local-model", "openai-completions").unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let custom = &root["providers"]["custom"];
+        assert_eq!(custom["api"], "openai-completions");
+        assert!(custom.get("authHeader").is_none(), "authHeader 잔재: {custom}");
+        assert!(custom.get("compat").is_none(), "compat 잔재: {custom}");
+        assert_eq!(custom["apiKey"], "sk-x");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -3438,7 +3595,7 @@ mod tests {
         let mut s2 = Settings::default();
         s2.providers.insert(
             "custom".into(),
-            ProviderConn { api_key: String::new(), base_url: "http://llm.local:8080/v1".into(), model: "x".into() },
+            ProviderConn { api_key: String::new(), base_url: "http://llm.local:8080/v1".into(), model: "x".into(), api: String::new() },
         );
         assert_eq!(provider_api_host("custom", &s2).as_deref(), Some("llm.local"));
     }

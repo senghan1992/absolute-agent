@@ -54,6 +54,36 @@ describe("ProviderRegistry", () => {
       reg.create("custom", { model: "m", env: { REDCELL_OPENAI_API_KEY: "k" } as NodeJS.ProcessEnv }),
     ).toThrow(/base URL/);
   });
+
+  it("저장된 oauth 자격증명은 config(oauth) 출처로 구분된다", () => {
+    const r = new ProviderRegistry();
+    r.register({ name: "t-oauth", kind: "openai-compat", envKeys: ["T_OAUTH_KEY"], baseUrl: "https://x.test/v1", defaultModel: "m", apiKey: "tok", authType: "oauth" });
+    const cred = r.credential(r.get("t-oauth")!, {} as NodeJS.ProcessEnv);
+    expect(cred?.source).toBe("config(oauth)");
+    const r2 = new ProviderRegistry();
+    r2.register({ name: "t-key", kind: "openai-compat", envKeys: ["T_KEY"], baseUrl: "https://x.test/v1", defaultModel: "m", apiKey: "k" });
+    expect(r2.credential(r2.get("t-key")!, {} as NodeJS.ProcessEnv)?.source).toBe("config(apiKey)");
+  });
+
+  it("anthropic + 저장된 oauth 는 SDK authToken(Bearer)으로 전달된다", () => {
+    const r = new ProviderRegistry();
+    r.register({ name: "t-anth", kind: "anthropic", envKeys: ["T_ANTH_KEY"], defaultModel: "m", apiKey: "sk-ant-oauth-x", authType: "oauth" });
+    const created = r.create("t-anth", { env: {} as NodeJS.ProcessEnv });
+    expect(created.credentialSource).toBe("config(oauth)");
+    const client = (created.model as unknown as { client: { apiKey: string | null; authToken: string | null } }).client;
+    expect(client.authToken).toBe("sk-ant-oauth-x");
+    expect(client.apiKey).toBeFalsy();
+  });
+
+  it("anthropic + 저장된 api_key 는 SDK apiKey 로 전달된다", () => {
+    const r = new ProviderRegistry();
+    r.register({ name: "t-anth2", kind: "anthropic", envKeys: ["T_ANTH2_KEY"], defaultModel: "m", apiKey: "sk-ant-key-x" });
+    const created = r.create("t-anth2", { env: {} as NodeJS.ProcessEnv });
+    expect(created.credentialSource).toBe("config(apiKey)");
+    const client = (created.model as unknown as { client: { apiKey: string | null; authToken: string | null } }).client;
+    expect(client.apiKey).toBe("sk-ant-key-x");
+    expect(client.authToken).toBeFalsy();
+  });
 });
 
 describe("resolveModel 우선순위", () => {
