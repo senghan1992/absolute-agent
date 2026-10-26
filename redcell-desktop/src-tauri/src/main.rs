@@ -1761,11 +1761,18 @@ fn prime_run_args(
     instruction: String,
 ) -> Result<(PathBuf, Vec<String>), String> {
     let bin = prime_agent_path()?;
+    // 긴 지시문은 @파일로 넘긴다 (pi 와 동일한 Windows 32K 회피). 태그는 세션 id+태그로
+    // 합쳐 동시 실행 세션끼리 파일이 겹치지 않게 한다.
+    let run_tag = match (session_dir.parent().and_then(|p| p.file_name()), session_dir.file_name()) {
+        (Some(sid), Some(tag)) => format!("{}-{}", sid.to_string_lossy(), tag.to_string_lossy()),
+        _ => "prime".to_string(),
+    };
+    let prompt_arg = spill_prompt_to_file(&run_tag, &instruction).unwrap_or(instruction);
     let mut args: Vec<String> = vec![
         "--mode".into(),
         "json".into(),
         "--print".into(),
-        instruction,
+        prompt_arg,
         "--skill".into(),
         skill.to_string_lossy().into_owned(),
         "--session-dir".into(),
@@ -2139,6 +2146,7 @@ fn preflight_llm_check(
     redcell: &str,
     piq: &str,
 ) -> Result<(), String> {
+    emit_note(app, id, format!("[sys] 모델 연결 확인 중… ({provider})"), None);
     let ping = "연결 확인 핑입니다. 어떤 도구도 사용하지 말고 'pong' 이라고만 답하세요.".to_string();
     // 본 대화 세션을 더럽히지 않게 버림 세션 id 로 실행한다.
     let run_tag = if engine == Engine::Prime { "ping".to_string() } else { format!("{piq}-ping") };
@@ -2481,6 +2489,28 @@ fn run_prime_agent(
     Ok(())
 }
 
+/// 긴 지시문의 argv 상한 — 이 바이트를 넘으면 temp 파일로 빼고 `@경로` 를 넘긴다.
+/// Windows CreateProcess 는 명령줄 전체가 32767자까지라, collector 지시문(워커 5개분+
+/// 스펙+P0 증거, 수만 자)을 `-p` 로 넘기면 os error 206 으로 스폰 자체가 실패한다.
+/// pi·prime-agent 모두 `@file` 을 첫 프롬프트로 읽는다(실측: `-p` 값·위치 인자 동일).
+const PROMPT_SPILL_BYTES: usize = 12_000;
+
+/// 상한 초과 시 지시문을 temp 파일에 쓰고 `@절대경로` 를 돌려준다. 미만이면 None
+/// (원문 argv 유지). 쓰기 실패 시도 None 으로 폴백한다 (기존 동작과 동일).
+/// 파일은 OS temp 정리에 맡긴다 — pi 가 시작 후 비동기로 읽으므로 스폰 직후 지우면 안 된다.
+fn spill_prompt_to_file(tag: &str, instruction: &str) -> Option<String> {
+    if instruction.len() <= PROMPT_SPILL_BYTES {
+        return None;
+    }
+    let safe: String = tag
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' })
+        .collect();
+    let path = std::env::temp_dir().join(format!("redcell-prompt-{safe}.md"));
+    fs::write(&path, instruction).ok()?;
+    Some(format!("@{}", path.to_string_lossy()))
+}
+
 /// pi print 인자 조립 — run_prime·deep 워커·collector 공용.
 /// (models.json 동기화 포함. pi 1.3.0 플래그: -e/--mode/--session-id/-p/--provider/--model/--api-key)
 fn pi_cli_args(
@@ -2492,6 +2522,9 @@ fn pi_cli_args(
 ) -> Result<(PathBuf, Vec<String>, PathBuf), String> {
     let cli = prime_cli_path(redcell)?;
     let ext_path = PathBuf::from(redcell).join("prime-agent").join("index.ts");
+    // 긴 지시문(collector 등)은 @파일로 넘긴다 — argv 로 넘기면 Windows 32K 상한(os error 206).
+    // run_tag 에는 세션 uuid 가 들어있어 동시 실행 세션끼리 파일이 겹치지 않는다.
+    let prompt_arg = spill_prompt_to_file(piq, &instruction).unwrap_or(instruction);
     let mut args: Vec<String> = vec![
         "-e".into(),
         ext_path.to_string_lossy().into_owned(),
@@ -2500,7 +2533,7 @@ fn pi_cli_args(
         "--session-id".into(),
         piq.to_string(),
         "-p".into(),
-        instruction,
+        prompt_arg,
     ];
     args.push("--provider".into());
     args.push(provider.to_string());
@@ -2881,6 +2914,7 @@ fn run_p0_sweep(app: &AppHandle, id: &str, host: &str, port: Option<u16>, cookie
     let ev = json!({ "type": "worker_status", "worker": "p0", "label": "P0·스윕", "title": "자동 스윕", "state": "running" });
     let stamped = append_event(app, id, &ev);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+    emit_note(app, id, "[sys] P0 자동 스윕 시작 — 대상 접근·기본 점검 중…".to_string(), None);
     if danger {
         let ev = json!({ "type": "note", "text": "[경고] P0 파괴적 프로브 실행 — 기본자격·IDOR 인접·쓰기 검증 (사용자 동의 기반)" });
         let stamped = append_event(app, id, &ev);
@@ -3943,6 +3977,32 @@ mod tests {
         assert!(other["maxTokens"].as_u64().unwrap_or(0) >= 8192, "빠진 상한은 채운다: {other}");
         assert!(other["contextWindow"].as_u64().unwrap_or(0) >= 8192, "빠진 컨텍스트는 채운다: {other}");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Windows CreateProcess 명령줄 상한(32767자) 회귀 — collector 지시문(수만 자)을
+    /// argv 로 넘기면 os error 206 으로 스폰 자체가 실패한다. 상한 초과분은 temp 파일로
+    /// 빼고 `@경로` 를 돌려준다 (pi·prime-agent 모두 첫 프롬프트로 읽음 — 실측).
+    #[test]
+    fn spill_prompt_threshold_and_roundtrip() {
+        assert!(spill_prompt_to_file("t", "short").is_none(), "짧은 지시문은 argv 유지");
+        let big = "가".repeat(20_000); // 60KB — collector 규모
+        let arg = spill_prompt_to_file("w1:컬렉터/merge", &big).expect("spill");
+        assert!(arg.starts_with('@'), "@파일 형식: {arg}");
+        let path = arg.trim_start_matches('@');
+        let name = std::path::Path::new(path).file_name().unwrap().to_string_lossy().into_owned();
+        assert!(name.starts_with("redcell-prompt-") && name.ends_with(".md"), "파일명: {name}");
+        assert!(!name.contains(':') && !name.contains('/'), "태그 살균: {name}");
+        assert_eq!(fs::read_to_string(path).unwrap(), big, "파일 내용 보존");
+        std::fs::remove_file(path).ok();
+    }
+
+    #[test]
+    fn spill_prompt_boundary() {
+        let at = "x".repeat(PROMPT_SPILL_BYTES);
+        assert!(spill_prompt_to_file("t", &at).is_none(), "경계값은 argv 유지");
+        let over = "x".repeat(PROMPT_SPILL_BYTES + 1);
+        let arg = spill_prompt_to_file("t", &over).expect("1바이트 초과는 spill");
+        std::fs::remove_file(arg.trim_start_matches('@')).ok();
     }
 
     /// custom + Anthropic 방식(Databricks AI Gateway): api 방언·authHeader·compat 가

@@ -115,6 +115,13 @@
 
         <!-- 진행 리본은 pi 셸에 맞게 제거(해킹 단계 스테퍼/취약점 메트릭은 prime 모드에서 무의미) -->
 
+        <!-- 현재 진행 상태: 실행 중 단계 문구 + 경과 시간 (라이브/결과 탭 공용) -->
+        <div id="activityBar" class="activity hidden">
+          <span class="activity-dot"></span>
+          <span id="activityText" class="activity-text"></span>
+          <span id="activityElapsed" class="activity-elapsed"></span>
+        </div>
+
         <!-- 서브뷰: 라이브(pi 터미널) / 결과(Markdown 렌더) -->
         <div class="subtabs">
           <button class="subtab active" data-view="live">라이브</button>

@@ -239,7 +239,17 @@ function setBadge(status) {
   state.textContent = running ? "작동 중" : (status === "done" ? "완료" : status === "error" ? "오류" : status === "stopped" ? "중지됨" : "대기");
   state.className = "agent-state" + (running ? " busy" : "");
   const actEl = $("activityText");
-  if (running && actEl) setActivity(actEl.textContent || "prime-agent 가 작업 중…");
+  if (running && actEl) {
+    // 재렌더/재시작 직후 문구가 비었으면 마지막 이벤트에서 복원한다.
+    let t = actEl.textContent;
+    if (!t) {
+      const s = cur();
+      const evs = s ? eventsOf(s) : [];
+      const last = [...evs].reverse().find((e) => activityLine(e));
+      t = (last && activityLine(last)) || "prime-agent 가 작업 중…";
+    }
+    setActivity(t);
+  }
   else hideActivity();
 }
 
@@ -518,15 +528,67 @@ function activityLine(e) {
     case "distilled": return `학습 저장 — ${e.title || ""}`;
     case "blocked": return `차단됨 — ${e.tool || "액션"} (인가 범위 밖)`;
     case "done": return "완료 — 결과를 정리했습니다";
+    case "worker_status": return workerActivity(e);
+    case "note": return noteActivity(e.text || "");
     default: return null;
   }
 }
+// 심층 진단 노트 → 현재 진행 문구. 구체 패턴부터 검사한다.
+function noteActivity(t) {
+  if (/모델 연결 확인 중/.test(t)) return "모델 연결 확인 중…";
+  if (/모델 연결 확인 완료/.test(t)) return "모델 연결 확인 완료 — 진단 시작…";
+  if (/P0 자동 스윕 시작/.test(t)) return "대상 접근·기본 점검 중… (자동 스윕)";
+  if (/P0 스윕.*프로브 \d+개/.test(t)) return "자동 스윕 완료 — 5개 분야 동시 진단 준비…";
+  const mRound = t.match(/추적 라운드 (\d+) 시작/);
+  if (mRound) return `추적 라운드 ${mRound[1]} — 교차 단서 확인 중…`;
+  const mRoundEnd = t.match(/추적 라운드 (\d+) 종료/);
+  if (mRoundEnd) return `추적 라운드 ${mRoundEnd[1]} 완료`;
+  if (/수렴 — 추가 발견 없음/.test(t)) return "수렴 — 최종 병합 준비 중…";
+  if (/collector 가 최종/.test(t)) return "최종 리포트 병합 중…";
+  if (/리포트 병합 완료/.test(t)) return "리포트 병합 완료 — 결과 탭에서 확인하세요";
+  if (/^\[(오류|완료|중지|차단|경고)\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 100);
+  // 툴 호출 시작: [W3·인증] [pi-툴] web_fetch {"url":"…"} → 접근 시도 중
+  let m = t.match(/^\[([^\]]+)\] \[(?:pi|prime)-툴\] (\S+)/);
+  if (m) {
+    const url = (t.match(/"url"\s*:\s*"([^"]+)"/) || [])[1] || "";
+    let host = "";
+    try { host = url ? new URL(url).hostname : ""; } catch (_) {}
+    return `${m[1]} 접근 시도 중 — ${m[2]}${host ? " " + host : ""}…`;
+  }
+  if (/\[(?:pi|prime)-툴[✓✗]\]/.test(t)) return null; // 툴 완료줄은 너무 잦아 스킵
+  // 워커 분석 텍스트: [W2·주입] <첫머리>
+  m = t.match(/^\[(W\d·[^\]]+)\]\s*([\s\S]{1,70})/);
+  if (m) return `${m[1]} 분석 중 — ${m[2].replace(/\s+/g, " ").trim()}…`;
+  if (/^\[sys\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 90);
+  return null;
+}
+// 워커 상태 한 건 → "라벨 + 상태" 한 줄 문구.
+function workerActivity(e) {
+  if (e.state && e.state !== "running") return `${e.label || e.worker || "워커"} ${e.state === "done" ? "완료" : e.state === "error" ? "실패" : "중지됨"}`;
+  return `${e.label || e.worker || "워커"} 진행 중…`;
+}
+let runStartedAt = 0, elapsedTimer = null;
 function setActivity(text) {
   const bar = $("activityBar"); if (!bar || !text) return;
   $("activityText").textContent = text;
+  if (!runStartedAt) { runStartedAt = Date.now(); startElapsedTick(); }
+  tickElapsed();
   bar.classList.remove("hidden");
 }
-function hideActivity() { const b = $("activityBar"); if (b) b.classList.add("hidden"); }
+function hideActivity() {
+  const b = $("activityBar"); if (b) b.classList.add("hidden");
+  runStartedAt = 0;
+  if (elapsedTimer) { clearInterval(elapsedTimer); elapsedTimer = null; }
+}
+function startElapsedTick() {
+  if (elapsedTimer) clearInterval(elapsedTimer);
+  elapsedTimer = setInterval(tickElapsed, 1000);
+}
+function tickElapsed() {
+  const el = $("activityElapsed"); if (!el || !runStartedAt) return;
+  const s = Math.floor((Date.now() - runStartedAt) / 1000);
+  el.textContent = `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+}
 
 // ── 대화창 마일스톤: 결과·추가요청만 assistant 메시지로 ──────────────────────
 function milestoneChat(e) {
@@ -574,7 +636,14 @@ function renderWorkerBar(s) {
 // ── 라이브 이벤트 반영 ───────────────────────────────────────────────────────
 function onLiveEvent(event) {
   const s = cur(); if (!s) return;
-  if (event.type === "worker_status") { renderWorkerBar(s); return; } // 칩만 갱신
+  if (event.type === "worker_status") { // 칩 갱신 + 활동 바에 진행 중 요약
+    renderWorkerBar(s);
+    const running = Object.values(workerStates(s)).filter((w) => w.state === "running");
+    if (running.length === 1) setActivity(`${running[0].label} 진행 중…`);
+    else if (running.length > 1) setActivity(`${running[0].label} 등 ${running.length}개 분야 진단 중…`);
+    else { const line = activityLine(event); if (line) setActivity(line); }
+    return;
+  }
   const body = $("capBody");
   $("capEmpty").style.display = "none";
   const seq = event._seq != null ? event._seq : eventsOf(s).length - 1;
