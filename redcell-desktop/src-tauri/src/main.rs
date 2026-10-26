@@ -973,11 +973,33 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
             if provider == "lge-aigw" {
                 // thinking 이 max_tokens 를 먼저 쓴다 — 상한·컨텍스트를 명시해
                 // "thinking 만 하고 답이 잘리는" 현상을 막는다.
-                entry["reasoning"] = json!(true);
+                // reasoning 은 false 로 둔다 — pi 는 reasoning:true 모델에 thinking
+                // 레벨 미지정 시 `reasoning:{effort:"none"}` 을 보내는데, GLM 서빙은
+                // thinking-only 라 "none" 을 400 으로 거부한다 (직통 요청에는
+                // reasoning 필드가 없어 성공 — 핑 실패 원인 분류 참조).
+                entry["reasoning"] = json!(false);
                 entry["contextWindow"] = json!(200000);
                 entry["maxTokens"] = json!(16384);
             }
             models.push(entry);
+        }
+    }
+    if provider == "lge-aigw" {
+        // 구버전 앱이 기록한 `reasoning:true` 항목도 매 동기화마다 치유한다 —
+        // 항목이 이미 있으면 손대지 않던 기존 동작 탓에 stale 설정이 남아
+        // 핑 400(reasoning_effort "none" 거부)이 반복되던 것을 고친다.
+        // 사용자가 직접 쓴 상한·컨텍스트는 존중하고 빠진 것만 채운다.
+        for m in models.iter_mut() {
+            if let Some(obj) = m.as_object_mut() {
+                obj.insert("reasoning".into(), Value::Bool(false));
+                obj.remove("thinkingLevelMap");
+                if obj.get("contextWindow").and_then(|v| v.as_u64()).unwrap_or(0) == 0 {
+                    obj.insert("contextWindow".into(), json!(200000));
+                }
+                if obj.get("maxTokens").and_then(|v| v.as_u64()).unwrap_or(0) == 0 {
+                    obj.insert("maxTokens".into(), json!(16384));
+                }
+            }
         }
     }
     if models.is_empty() {
@@ -2317,9 +2339,17 @@ fn classify_ping_failure(settings: &Settings, provider: &str, ping_error: &str) 
             lines.push(format!(
                 "분류: 엔드포인트 직통 요청은 성공({line}) — 키·모델·API 방식 모두 정상입니다."
             ));
-            lines.push(format!(
-                "→ pi 엔진({ver})의 요청만 거부됐습니다. pi 버전이 오래됐거나(재설치 권장), 사내 프록시/보안 장비가 pi 요청의 특정 헤더·필드를 걸러내는 것일 수 있습니다 — 프록시 차단 로그를 확인하세요."
-            ));
+            // thinking-only 모델이 pi 의 reasoning 필드를 거부한 경우 — 프록시 문제가
+            // 아니라 모델 설정 문제이므로 점검 위치를 정확히 안내한다.
+            if ping_error.contains("reasoning_effort") || ping_error.contains("thinking-only") {
+                lines.push(
+                    "→ thinking-only 모델이 pi 요청의 reasoning.effort 값을 거부했습니다. 앱 실행 시 모델 설정(models.json)이 자동 보정되지만, 이 오류가 반복되면 ~/.pi/agent/models.json(prime-agent는 ~/.prime/agent/models.json)의 해당 모델 항목에 `reasoning:true`·`thinkingLevelMap` 잔재가 없는지 확인하세요.".into(),
+                );
+            } else {
+                lines.push(format!(
+                    "→ pi 엔진({ver})의 요청만 거부됐습니다. pi 버전이 오래됐거나(재설치 권장), 사내 프록시/보안 장비가 pi 요청의 특정 헤더·필드를 걸러내는 것일 수 있습니다 — 프록시 차단 로그를 확인하세요."
+                ));
+            }
         }
         Err(e) if e.contains("401") || e.contains("403") => {
             lines.push(format!(
@@ -3835,6 +3865,10 @@ mod tests {
     /// 기본 내장 연결(lge-aigw): 설정이 비어도 카탈로그 기본 base URL(MLflow Responses)·
     /// openai-responses 방언으로 동기화되고, 모델 메타데이터가 기록되어야 한다 —
     /// 셸 명령 키(`!ug auth-token`) 없이 붙여넣은 토큰(--api-key)으로 쓰는 직접 회귀 테스트.
+    ///
+    /// GLM 서빙은 thinking-only 모델이라 pi 가 보내는 `reasoning.effort="none"` 을
+    /// 400 으로 거부한다(게이트웨이 직통 요청에는 reasoning 필드가 없어 성공) —
+    /// `reasoning:false` 로 동기화해 pi 요청에서 reasoning 필드를 빼야 한다.
     #[test]
     fn sync_pi_models_json_lge_aigw_defaults() {
         let dir = std::env::temp_dir().join(format!("rc-models-aigw-{}", std::process::id()));
@@ -3866,8 +3900,48 @@ mod tests {
         assert!(aigw.get("authHeader").is_none(), "responses 방언은 Bearer 기본 — authHeader 불필요: {aigw}");
         assert_eq!(aigw["apiKey"], "dbcsi-abc123", "붙여넣은 토큰은 그대로 기록");
         assert_eq!(aigw["models"][0]["id"], LGE_AIGW_DEFAULT_MODEL);
-        assert_eq!(aigw["models"][0]["reasoning"], true);
+        assert_eq!(aigw["models"][0]["reasoning"], false, "thinking-only GLM 에는 reasoning 필드를 보내면 안 된다: {aigw}");
+        assert!(aigw["models"][0].get("thinkingLevelMap").is_none(), "stale thinkingLevelMap 잔재: {aigw}");
         assert!(aigw["models"][0]["maxTokens"].as_u64().unwrap_or(0) >= 8192, "thinking 상한 확보");
+        assert!(aigw["models"][0]["contextWindow"].as_u64().unwrap_or(0) >= 8192, "컨텍스트 명시");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 구버전 앱이 기록한 lge-aigw 항목(`reasoning:true`)도 동기화 때마다 치유되어야
+    /// 한다 — 항목이 이미 있으면 새로 만들지 않던 기존 동작 탓에 stale 설정이 그대로
+    /// 남아 핑 400(reasoning_effort "none" 거부)이 반복되던 회귀 테스트.
+    /// 사용자가 직접 쓴 maxTokens/contextWindow 는 존중한다.
+    #[test]
+    fn sync_pi_models_json_lge_aigw_heals_stale_reasoning() {
+        let dir = std::env::temp_dir().join(format!("rc-models-aigw-heal-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("models.json");
+        std::fs::write(
+            &path,
+            r#"{"providers":{"lge-aigw":{"baseUrl":"https://gw.example/mlflow/v1","api":"openai-responses","apiKey":"old","compat":{},"models":[{"id":"system.ai.glm-5-3-flash","reasoning":true,"thinkingLevelMap":{"off":"none"},"contextWindow":200000,"maxTokens":32768},{"id":"other-model","reasoning":true}]}}}"#,
+        )
+        .unwrap();
+        sync_pi_models_json_at(
+            &path,
+            "lge-aigw",
+            "https://gw.example/mlflow/v1",
+            "new-key",
+            LGE_AIGW_DEFAULT_MODEL,
+            "openai-responses",
+        )
+        .unwrap();
+        let root: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let models = root["providers"]["lge-aigw"]["models"].as_array().unwrap();
+        assert_eq!(models.len(), 2, "기존 항목은 치유만 하고 중복 추가 금지: {models:?}");
+        let glm = models.iter().find(|m| m["id"] == LGE_AIGW_DEFAULT_MODEL).expect("glm 항목");
+        assert_eq!(glm["reasoning"], false, "stale reasoning:true 치유: {glm}");
+        assert!(glm.get("thinkingLevelMap").is_none(), "stale thinkingLevelMap 제거: {glm}");
+        assert_eq!(glm["maxTokens"], 32768, "사용자 지정 상한 보존: {glm}");
+        assert_eq!(glm["contextWindow"], 200000, "사용자 지정 컨텍스트 보존: {glm}");
+        let other = models.iter().find(|m| m["id"] == "other-model").expect("other 항목");
+        assert_eq!(other["reasoning"], false, "같은 프로바이더의 전 항목 치유: {other}");
+        assert!(other["maxTokens"].as_u64().unwrap_or(0) >= 8192, "빠진 상한은 채운다: {other}");
+        assert!(other["contextWindow"].as_u64().unwrap_or(0) >= 8192, "빠진 컨텍스트는 채운다: {other}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
