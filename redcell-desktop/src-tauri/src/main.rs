@@ -233,6 +233,11 @@ fn guess_redcell_dir() -> Option<String> {
     None
 }
 
+/// LGE AIGW 기본 모델 — MLflow Responses 엔드포인트의 Sonnet 5.5 서빙 이름.
+const LGE_AIGW_DEFAULT_MODEL: &str = "lge_esdataplfm_ws.custom_model_prd.esdp-sonnet-5-5";
+/// 이전 기본 모델 — 저장된 설정 자동 이행용.
+const LGE_AIGW_OLD_DEFAULT_MODEL: &str = "system.ai.glm-5-3-flash";
+
 // ── 커맨드 ───────────────────────────────────────────────────────────────────
 #[tauri::command]
 fn get_settings(app: AppHandle) -> Settings {
@@ -255,11 +260,16 @@ fn get_settings(app: AppHandle) -> Settings {
             ProviderConn {
                 api_key: String::new(),
                 base_url: String::new(), // 빈 값 = 카탈로그 기본 base URL 사용
-                model: "system.ai.glm-5-3-flash".into(),
+                model: LGE_AIGW_DEFAULT_MODEL.into(),
                 api: "openai-responses".into(),
             },
         );
     } else if let Some(conn) = s.providers.get_mut("lge-aigw") {
+        // 구 기본 모델(GLM 5.3 Flash)은 pi 모델 목록에서 빠졌다 — 기본값 그대로였다면
+        // 새 기본 모델(Sonnet 5.5)로 옮긴다. 사용자가 직접 바꾼 모델은 존중한다.
+        if conn.model.trim() == LGE_AIGW_OLD_DEFAULT_MODEL {
+            conn.model = LGE_AIGW_DEFAULT_MODEL.into();
+        }
         // 구버전 기본값(`!ug auth-token` + Anthropic 경로)에서 새 기본값으로 이행 —
         // 셸 명령 키 해석은 데스크톱 실행 환경에 따라 실패하기 쉽다(핑 오류 원인).
         // 정확히 구버전 기본 조합일 때만 되돌리고, 사용자가 쓴 값은 존중한다.
@@ -482,7 +492,7 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     // 키는 사용자가 ⚙ 설정 > 프로바이더 카드에 직접 붙여넣는 Databricks 토큰
     // ($DATABRICKS_TOKEN, ug auth-token 출력과 동일) — CLI --api-key 로 주입되므로
     // 셸 명령 해석(!command)에 의존하지 않는다.
-    ProviderMeta { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (키: Databricks 토큰을 키란에 직접 입력)", default_model: "system.ai.glm-5-3-flash", env_keys: &[], base_url: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needs_base: false },
+    ProviderMeta { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (키: Databricks 토큰을 키란에 직접 입력)", default_model: LGE_AIGW_DEFAULT_MODEL, env_keys: &[], base_url: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needs_base: false },
     ProviderMeta { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", env_keys: &[], base_url: "http://localhost:11434/v1", needs_base: true },
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
@@ -1280,6 +1290,11 @@ fn prime_cli_candidates(redcell_dir: &str) -> Vec<PathBuf> {
             cands.push(b.join("dist").join("cli.js"));
             cands.push(b.join("cli.js"));
         }
+    }
+    // 1b) 앱 전용 pi 설치(~/.redcell/pi) — ensure_pinned_pi 가 고정 버전을 깔아 둔다.
+    //     시스템 전역 pi 가 구버전이어도 이쪽이 우선한다.
+    if let Some(d) = managed_pi_dir() {
+        cands.push(d.join("node_modules").join("@earendil-works").join("pi-coding-agent").join("dist").join("cli.js"));
     }
     // 2) 프로젝트 로컬 설치.
     cands.push(
@@ -2176,6 +2191,100 @@ fn pi_cli_version(settings: &Settings) -> String {
     }
 }
 
+/// 앱이 요구하는 pi 버전 — 이보다 낮으면 앱 전용 폴더에 이 버전을 설치해 쓴다.
+const PI_PINNED_VERSION: &str = "1.4.0";
+
+/// 앱 전용 pi 설치 위치 — 시스템 전역 pi 를 건드리지 않는다.
+fn managed_pi_dir() -> Option<PathBuf> {
+    user_home().map(|h| h.join(".redcell").join("pi"))
+}
+
+/// "pi 1.4.0" / "1.4.0" / "v1.4.0-beta" → (1,4,0).
+fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
+    let tok = s.split_whitespace().find(|t| t.chars().any(|c| c.is_ascii_digit()) && t.contains('.'))?;
+    let core = tok.trim_start_matches('v').split(|c| c == '-' || c == '+').next()?;
+    let mut it = core.split('.').map(|p| p.parse::<u32>().ok());
+    Some((it.next()??, it.next()??, it.next().flatten().unwrap_or(0)))
+}
+
+fn pi_version_at_least(found: &str, min: &str) -> bool {
+    match (parse_semver(found), parse_semver(min)) {
+        (Some(f), Some(m)) => f >= m,
+        _ => true, // 버전을 읽지 못하면 건드리지 않는다.
+    }
+}
+
+/// `npm install --prefix ~/.redcell/pi @earendil-works/pi-coding-agent@<고정버전>` (최대 5분).
+fn install_managed_pi() -> Result<(), String> {
+    let dir = managed_pi_dir().ok_or("홈 디렉터리를 찾을 수 없습니다.")?;
+    fs::create_dir_all(&dir).map_err(|e| format!("설치 폴더 생성 실패: {e}"))?;
+    let npm = first_on_path(if cfg!(windows) { "npm.cmd" } else { "npm" })
+        .ok_or("npm 을 PATH 에서 찾을 수 없습니다 — Node.js 설치를 확인하세요.")?;
+    let spec = format!("@earendil-works/pi-coding-agent@{PI_PINNED_VERSION}");
+    let mut cmd = if cfg!(windows) {
+        let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
+        let mut c = Command::new(comspec);
+        c.arg("/C").arg(&npm);
+        c
+    } else {
+        Command::new(&npm)
+    };
+    cmd.arg("install").arg("--prefix").arg(&dir).arg(&spec).args(["--no-audit", "--no-fund", "--ignore-scripts"]);
+    hide_window(&mut cmd);
+    let mut child = cmd
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("npm 실행 실패: {e}"))?;
+    let mut waited = 0u64;
+    loop {
+        if let Some(st) = child.try_wait().map_err(|e| e.to_string())? {
+            if st.success() {
+                return Ok(());
+            }
+            let mut err = String::new();
+            if let Some(mut o) = child.stderr.take() {
+                use std::io::Read;
+                let _ = o.read_to_string(&mut err);
+            }
+            let tail: String = err.trim().lines().rev().take(3).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join(" / ");
+            return Err(format!("npm install 실패: {tail}"));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        waited += 500;
+        if waited > 300_000 {
+            let _ = child.kill();
+            return Err("npm install 시간 초과 (5분) — 네트워크·사내 npm 레지스트리 설정을 확인하세요.".into());
+        }
+    }
+}
+
+/// 심층 진단 시작 전 pi 버전 보장 — 고정 버전보다 낮으면 앱 전용 폴더에 설치한다.
+/// 실패해도 진단은 기존 pi 로 계속 시도한다(수동 설치 명령만 안내).
+fn ensure_pinned_pi(app: &AppHandle, id: &str, settings: &Settings) {
+    let ver = pi_cli_version(settings);
+    if pi_version_at_least(&ver, PI_PINNED_VERSION) {
+        return;
+    }
+    emit_note(
+        app,
+        id,
+        format!("[sys] pi {ver} 는 구버전입니다 — 앱 전용 폴더(~/.redcell/pi)에 pi {PI_PINNED_VERSION} 을 설치합니다 (최초 1회, 1~2분)."),
+        None,
+    );
+    match install_managed_pi() {
+        Ok(()) => emit_note(app, id, format!("[sys] pi {} 사용", pi_cli_version(settings)), None),
+        Err(e) => emit_note(
+            app,
+            id,
+            format!(
+                "[sys] pi {PI_PINNED_VERSION} 자동 설치 실패 — {e}\n수동 설치: npm i -g @earendil-works/pi-coding-agent@{PI_PINNED_VERSION}"
+            ),
+            None,
+        ),
+    }
+}
+
 /// 핑 실패 원인 분류 — pi 를 거치지 않는 직통 최소 요청(연결 테스트와 동일 경로)으로
 /// 계층을 가린다. "400 (no body)" 처럼 본문 없는 오류는 원인이 안 보이므로, 같은
 /// 엔드포인트에 앱이 직접 1토큰을 쏴서 어디가 거부했는지 한 줄로 판정한다:
@@ -2835,6 +2944,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         prime_agent_path()?;
     } else {
         prime_cli_path(&redcell)?;
+        ensure_pinned_pi(&app, &id, &settings);
     }
     // LLM 사전 점검 — 프로바이더가 죽어 있으면 워커 5개가 전부 실패하기 전에
     // 여기서 원인(400/401/타임아웃)을 한 번에 보여주고 즉시 중단한다.
@@ -3679,6 +3789,15 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
+    #[test]
+    fn pi_version_comparison() {
+        assert!(!pi_version_at_least("0.85.1", "1.4.0"));
+        assert!(!pi_version_at_least("1.3.9", "1.4.0"));
+        assert!(pi_version_at_least("1.4.0", "1.4.0"));
+        assert!(pi_version_at_least("pi v1.10.2", "1.4.0"));
+        assert!(pi_version_at_least("미확인", "1.4.0"), "읽지 못하면 건드리지 않는다");
+    }
+
     /// 기본 내장 연결(lge-aigw): 설정이 비어도 카탈로그 기본 base URL(MLflow Responses)·
     /// openai-responses 방언으로 동기화되고, 모델 메타데이터가 기록되어야 한다 —
     /// 셸 명령 키(`!ug auth-token`) 없이 붙여넣은 토큰(--api-key)으로 쓰는 직접 회귀 테스트.
@@ -3690,7 +3809,7 @@ mod tests {
         let conn = ProviderConn {
             api_key: "dbcsi-abc123".into(),
             base_url: String::new(), // 시딩된 기본값 — 카탈로그 base URL 로 폴백
-            model: "system.ai.glm-5-3-flash".into(),
+            model: LGE_AIGW_DEFAULT_MODEL.into(),
             api: "openai-responses".into(),
         };
         sync_pi_models_json_at(
@@ -3712,7 +3831,7 @@ mod tests {
         assert_eq!(aigw["api"], "openai-responses");
         assert!(aigw.get("authHeader").is_none(), "responses 방언은 Bearer 기본 — authHeader 불필요: {aigw}");
         assert_eq!(aigw["apiKey"], "dbcsi-abc123", "붙여넣은 토큰은 그대로 기록");
-        assert_eq!(aigw["models"][0]["id"], "system.ai.glm-5-3-flash");
+        assert_eq!(aigw["models"][0]["id"], LGE_AIGW_DEFAULT_MODEL);
         assert_eq!(aigw["models"][0]["reasoning"], true);
         assert!(aigw["models"][0]["maxTokens"].as_u64().unwrap_or(0) >= 8192, "thinking 상한 확보");
         std::fs::remove_dir_all(&dir).ok();
