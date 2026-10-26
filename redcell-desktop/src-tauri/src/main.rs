@@ -923,11 +923,16 @@ fn sync_pi_models_json_at(path: &Path, provider: &str, base_url: &str, api_key: 
         // 보내는데, 이를 모르는 엔드포인트(구버전 vLLM·사내 프록시·ollama 구버전)는
         // 이 필드 하나로 400 을 돌려준다. store·developer 역할도 알 수 없는
         // 엔드포인트엔 끄고 시작한다 — 사용자가 직접 쓴 compat 값은 존중한다.
+        // pi 의 openai-responses 클라이언트는 기본으로 HTTP 사양 밖의 `session_id`
+        // (밑줄 포함) 헤더를 보내 세션 어피니티를 챙기는데, strict 프록시·게이트웨이는
+        // 이를 본문 없는 400 으로 거부하는 게 알려진 pi 이슈(#3579)라 기본으로 끈다.
         let mut compat = prov.get("compat").and_then(|v| v.as_object()).cloned().unwrap_or_default();
         for (k, v) in [
             ("supportsUsageInStreaming", json!(false)),
             ("supportsStore", json!(false)),
             ("supportsDeveloperRole", json!(false)),
+            ("sessionAffinityFormat", json!("openai-nosession")), // 신버전 pi
+            ("sendSessionIdHeader", json!(false)),                // 구버전 pi
         ] {
             compat.entry(k.to_string()).or_insert(v);
         }
@@ -1048,8 +1053,10 @@ fn resolve_bang_key(key: &str) -> Result<String, String> {
 
 /// 연결 테스트 — node fetch 로 대상 엔드포인트 도달성/키 인증을 확인한다.
 /// (reqwest 의존성 추가 없이 이미 있는 node 를 재사용)
-/// `api` 가 "anthropic-messages" 면 Anthropic 경로에는 /models 가 없으므로
-/// POST {base}/v1/messages (max_tokens 1 — 최소 1토큰 사용)로 키·모델을 함께 검증한다.
+/// 방언별로 실제 1회 생성 호출을 날려 키·모델·방언을 함께 검증한다:
+/// anthropic-messages → POST {base}/v1/messages, openai-responses → POST {base}/responses,
+/// openai-completions → POST {base}/chat/completions. 실검증 로직은
+/// probe_provider_endpoint — 핑 실패 원인 분류(classify_ping_failure)도 같은 경로를 쓴다.
 #[tauri::command]
 fn test_provider(provider: String, api_key: String, base_url: String, api: Option<String>, model: Option<String>) -> Result<String, String> {
     let meta = PROVIDER_CATALOG
@@ -1075,9 +1082,17 @@ fn test_provider(provider: String, api_key: String, base_url: String, api: Optio
     } else {
         api.unwrap_or_default()
     };
+    probe_provider_endpoint(&provider, &key, &base, &effective_api, model.as_deref().unwrap_or(""))
+}
+
+/// 실제 1회 생성 호출로 엔드포인트·키·모델·방언을 검증한다 (연결 테스트와
+/// 핑 실패 원인 분류가 같은 경로를 쓴다 — 결과가 어긋나면 안 되므로).
+/// Ok(한 줄 요약) | Err(상세) 형태. Anthropic 방언은 x-api-key·anthropic-version,
+/// 나머지는 Authorization Bearer 만 쓴다.
+fn probe_provider_endpoint(provider: &str, key: &str, base: &str, effective_api: &str, model: &str) -> Result<String, String> {
     let anthropic = effective_api == "anthropic-messages";
     let responses = effective_api == "openai-responses";
-    let m = model.as_deref().unwrap_or("").trim();
+    let m = model.trim();
     let (url, body, anthropic_headers) = if anthropic {
         if m.is_empty() {
             return Err("Anthropic 방식 테스트는 모델명이 필요합니다 — 모델란에 입력하세요.".into());
@@ -2119,11 +2134,89 @@ fn preflight_llm_check(
     };
     if outcome.failed || outcome.aborted {
         let detail = if outcome.error.is_empty() { "오류 메시지 없음".to_string() } else { outcome.error.clone() };
+        let why = classify_ping_failure(settings, provider, &detail);
         return Err(format!(
-            "모델 연결 확인(핑) 실패 — provider '{provider}' 가 요청을 거부했습니다: {detail}\n설정(⚙) > 프로바이더에서 연결 테스트를 실행해 API 키·모델명·API 방식을 확인하세요."
+            "모델 연결 확인(핑) 실패 — provider '{provider}'\n{why}\n설정(⚙) > 프로바이더에서 연결 테스트를 실행해 API 키·모델명·API 방식을 확인하세요."
         ));
     }
     Ok(())
+}
+
+/// pi CLI 버전 — `node <cli.js> --version` 첫 줄 (3초 타임아웃, 실패 시 "미확인").
+fn pi_cli_version(settings: &Settings) -> String {
+    let fail = || "미확인".to_string();
+    let Ok(cli) = prime_cli_path(&settings.redcell_dir) else { return fail(); };
+    let Some(node) = first_on_path("node") else { return fail(); };
+    let mut probe = Command::new(node);
+    probe.arg(&cli).arg("--version").stdout(Stdio::piped()).stderr(Stdio::null());
+    hide_window(&mut probe);
+    let Ok(mut child) = probe.spawn() else { return fail(); };
+    let mut waited = 0;
+    loop {
+        match child.try_wait() {
+            Ok(Some(st)) if st.success() => {
+                use std::io::Read;
+                let mut out = String::new();
+                if let Some(mut o) = child.stdout.take() {
+                    let _ = o.read_to_string(&mut out);
+                }
+                let v = out.lines().next().unwrap_or("").trim().to_string();
+                return if v.is_empty() { fail() } else { v };
+            }
+            Ok(Some(_)) => return fail(),
+            Ok(None) => {}
+            Err(_) => return fail(),
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        waited += 100;
+        if waited > 3000 {
+            let _ = child.kill();
+            return fail();
+        }
+    }
+}
+
+/// 핑 실패 원인 분류 — pi 를 거치지 않는 직통 최소 요청(연결 테스트와 동일 경로)으로
+/// 계층을 가린다. "400 (no body)" 처럼 본문 없는 오류는 원인이 안 보이므로, 같은
+/// 엔드포인트에 앱이 직접 1토큰을 쏴서 어디가 거부했는지 한 줄로 판정한다:
+///   직통 OK  → 엔드포인트·키·모델 정상, pi 엔진 경로(버전/프록시/헤더) 문제
+///   401/403  → 키 문제 (토큰 재발급 안내)
+///   그 외    → 엔드포인트/네트워크 문제 (게이트웨이 본문이 있으면 그대로 노출)
+fn classify_ping_failure(settings: &Settings, provider: &str, ping_error: &str) -> String {
+    let conn = settings.providers.get(provider).cloned().unwrap_or_default();
+    let key = conn.api_key.trim().to_string();
+    let mut lines = vec![format!("핑 오류: {ping_error}")];
+    if key.is_empty() {
+        lines.push(
+            "원인: API 키 미설정 — 설정(⚙) > 프로바이더 > 이 카드에 토큰을 붙여넣고 연결 저장을 누르세요.".into(),
+        );
+        return lines.join("\n");
+    }
+    let base = sync_base_url(provider, &conn);
+    let api = sync_api(provider, &conn);
+    let ver = pi_cli_version(settings);
+    match probe_provider_endpoint(provider, &key, &base, &api, &conn.model) {
+        Ok(line) => {
+            lines.push(format!(
+                "분류: 엔드포인트 직통 요청은 성공({line}) — 키·모델·API 방식 모두 정상입니다."
+            ));
+            lines.push(format!(
+                "→ pi 엔진({ver})의 요청만 거부됐습니다. pi 버전이 오래됐거나(재설치 권장), 사내 프록시/보안 장비가 pi 요청의 특정 헤더·필드를 걸러내는 것일 수 있습니다 — 프록시 차단 로그를 확인하세요."
+            ));
+        }
+        Err(e) if e.contains("401") || e.contains("403") => {
+            lines.push(format!(
+                "분류: 엔드포인트가 키를 거부했습니다({e}) — 토큰이 만료됐을 수 있습니다. 터미널 `ug auth-token` 출력을 다시 카드에 붙여넣으세요."
+            ));
+        }
+        Err(e) => {
+            lines.push(format!("분류: 엔드포인트 직통 요청도 실패 — {e}"));
+            lines.push(
+                "→ base URL·API 방식을 점검하세요. 오류 본문이 비어 있다면 중간 프록시/네트워크 차단일 확률이 높습니다.".into(),
+            );
+        }
+    }
+    lines.join("\n")
 }
 
 /// 펌프+대기 — 등록된 자식을 펌핑하고 제거·대기한 뒤 outcome 을 확정한다.
@@ -2873,8 +2966,9 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 .iter()
                 .find_map(|(_, o)| if o.error.is_empty() { None } else { Some(o.error.clone()) })
                 .unwrap_or_default();
+            let why = classify_ping_failure(&settings, &provider, &detail);
             let ev = json!({ "type": "note", "text": format!(
-                "[오류] 모든 워커가 모델 호출에 실패해 심층 진단을 중단합니다 — 설정(⚙) > 프로바이더에서 '{provider}' 연결을 점검하세요. 마지막 오류: {detail}"
+                "[오류] 모든 워커가 모델 호출에 실패해 심층 진단을 중단합니다.\n{why}"
             )});
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
