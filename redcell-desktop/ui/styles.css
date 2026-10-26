@@ -288,7 +288,7 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .sh-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .sh-target-row { row-gap: 8px; }
 .sh-action-row {
-  gap: 12px; padding: 9px 12px; border-radius: 12px;
+  gap: 10px; padding: 8px 12px; border-radius: 12px;
   background: color-mix(in srgb, var(--accent) 7%, var(--surface-2));
   border: 1px solid color-mix(in srgb, var(--accent) 18%, var(--line-2));
 }
@@ -316,11 +316,10 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .badge-error { background: color-mix(in srgb, var(--brand) 13%, transparent); color: var(--brand-fg); border-color: color-mix(in srgb, var(--brand) 32%, transparent); }
 .badge-stopped { background: var(--surface-3); color: var(--warn-fg); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
 
-/* 작업 선택: 진단 시작(기본) · 목표 실행(보조) */
-.sh-action-hint { font-size: 11px; color: var(--faint); font-weight: 700; letter-spacing: 0.3px; }
-.btn-cmd { flex: none; flex-direction: column; gap: 1px; padding: 8px 20px; border-radius: 11px; min-width: 138px; }
-.btn-cmd .cmd-txt { font-size: 13.5px; font-weight: 800; letter-spacing: -0.2px; line-height: 1; }
-.btn-cmd .ic { width: 17px; height: 17px; }
+/* 작업 선택: 진단 시작(기본) · 위험 검사(보조) — 한 줄 버튼 */
+.btn-cmd { flex: none; flex-direction: row; gap: 8px; padding: 9px 18px; border-radius: 11px; }
+.btn-cmd .cmd-txt { font-size: 13.5px; font-weight: 800; letter-spacing: -0.2px; line-height: 1.2; white-space: nowrap; }
+.btn-cmd .ic { width: 16px; height: 16px; }
 .btn-cmd-ghost { background: transparent; box-shadow: none; border: 1px solid var(--line-2); color: var(--text); }
 .btn-cmd-ghost:hover { background: var(--surface-3); border-color: var(--faint); }
 .btn-cmd-ghost .ic { stroke: var(--accent-2-fg); }
@@ -331,8 +330,42 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .btn-cmd-ghost.btn-run .cmd-txt, .btn-cmd-ghost.btn-run .ic { color: var(--on-run); stroke: var(--on-run); fill: var(--on-run); }
 .btn-cmd-ghost.btn-stop .cmd-txt, .btn-cmd-ghost.btn-stop .ic { color: var(--brand-fg); stroke: var(--brand-fg); fill: var(--brand-fg); }
 .cmd-div { color: var(--faint); font-size: 11.5px; font-weight: 700; }
-.cmd-note { font-size: 11px; color: var(--muted); margin-left: auto; line-height: 1.45; max-width: 360px; }
-.cmd-note b { color: var(--text); font-weight: 700; }
+
+/* 진단 진행 방식: 평소엔 작은 물음 버튼 하나로, 누르면 3단계 팝오버 */
+.diag-info-wrap { position: relative; margin-left: auto; flex: none; }
+.diag-info-btn {
+  font: inherit; display: inline-flex; align-items: center; gap: 6px;
+  font-size: 12px; font-weight: 600; color: var(--muted);
+  background: transparent; border: 1px solid transparent; border-radius: 999px;
+  padding: 7px 13px; cursor: pointer; transition: color 0.13s, background 0.13s, border-color 0.13s;
+}
+.diag-info-btn .ic { width: 14px; height: 14px; }
+.diag-info-btn:hover, .diag-info-btn.open {
+  color: var(--text); background: var(--surface-3); border-color: var(--line-2);
+}
+.diag-info-pop {
+  position: absolute; right: 0; top: calc(100% + 8px); z-index: 60;
+  width: 348px; max-width: min(92vw, 348px);
+  background: var(--elev); border: 1px solid var(--line-2); border-radius: 14px;
+  box-shadow: var(--shadow-2); padding: 14px 15px 12px;
+}
+.diag-info-pop ol { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
+.diag-info-pop li { display: flex; gap: 10px; align-items: flex-start; counter-increment: diag-step; }
+.diag-info-pop ol { counter-reset: diag-step; }
+.diag-info-pop li::before {
+  content: counter(diag-step); flex: none; width: 20px; height: 20px; border-radius: 50%;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-size: 11px; font-weight: 800;
+  color: var(--accent-fg); background: color-mix(in srgb, var(--accent) 13%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, transparent);
+}
+.diag-info-pop li b { display: block; font-size: 12.5px; color: var(--text); }
+.diag-info-pop li span { display: block; font-size: 11.5px; color: var(--muted); line-height: 1.5; margin-top: 1px; }
+.diag-info-pop p {
+  margin: 11px 0 0; padding-top: 10px; border-top: 1px dashed var(--line-2);
+  font-size: 11.5px; color: var(--muted); line-height: 1.55;
+}
+.diag-info-pop p b { color: var(--text); }
 
 /* ── 진행 리본 ── */
 .ribbon { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 10px 16px; border-bottom: 1px solid var(--line); background: linear-gradient(180deg, var(--sheen), transparent); }
@@ -367,16 +400,16 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .count { background: var(--surface-3); border-radius: 10px; padding: 0 7px; font-size: 10.5px; color: var(--muted); margin-left: 6px; }
 .subtab.active .count { background: color-mix(in srgb, var(--brand) 16%, transparent); color: var(--brand-fg); }
 
-/* ── 결과 탭(리포트 화면): 얇은 요약 바 + 스크롤되는 본문 카드 ────────────────
+/* ── 결과 탭(리포트 화면): 얇은 요약 한 줄 + 스크롤되는 본문 카드 ─────────────
    상단 요약이 본문을 가리지 않도록 3중으로 막는다:
-   ① 요약 = 얇은 한 줄(.rs-topline) + 필요할 때만 펼치는 서랍(.rs-drawer)
+   ① 요약 첫 줄은 항상 한 줄(등급 · 위험 수 · 내보내기), 서랍은 접고 시작
    ② 높이 상한(max-height)으로 창이 좁아도 본문 몫을 남긴다
-   ③ 본문을 스크롤하면 서랍이 자동으로 접힌다(.collapsed) */
+   ③ 펼친 채로 본문을 스크롤하면 서랍이 자동으로 접힌다(.collapsed) */
 .results-view { flex: 1 1 auto; min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
 .report-summary {
   flex: 0 0 auto;
-  padding: 10px 14px 0;
-  max-height: min(46vh, 300px); /* 좁은 창에서도 본문을 가리지 않도록 상한 */
+  padding: 8px 12px 0;
+  max-height: min(38vh, 220px); /* 좁은 창에서도 본문을 가리지 않도록 상한 */
   overflow-y: auto;
   overscroll-behavior: contain;
 }
@@ -390,18 +423,18 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 
 /* ─ 보고서 요약 카드 ── */
 .rs-card {
-  display: flex; flex-direction: column; gap: 8px;
-  padding: 10px 12px; border-radius: 13px;
+  display: flex; flex-direction: column; gap: 6px;
+  padding: 8px 12px; border-radius: 13px;
   background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 12%, transparent) 0%, color-mix(in srgb, var(--accent-2) 7%, transparent) 100%),
     var(--elev);
   border: 1px solid color-mix(in srgb, var(--accent) 22%, var(--line-2));
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06), 0 8px 24px -14px rgba(0, 0, 0, 0.5);
 }
-.rs-topline { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-.rs-grade { display: flex; align-items: center; gap: 9px; flex: none; }
+.rs-topline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 6px; }
+.rs-grade { display: flex; align-items: center; gap: 8px; flex: none; }
 .rs-letter {
-  width: 40px; height: 40px; border-radius: 12px; display: grid; place-items: center;
-  font-size: 21px; font-weight: 800; font-family: var(--mono);
+  width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center;
+  font-size: 16px; font-weight: 800; font-family: var(--mono);
   background: color-mix(in srgb, var(--surface-3) 55%, transparent); border: 1px solid var(--line-2);
 }
 .rs-grade.g-a .rs-letter { color: #7fe0a9; border-color: rgba(93, 212, 142, 0.5); background: rgba(93, 212, 142, 0.1); }
@@ -413,33 +446,28 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .rs-grade.g-ok .rs-letter { color: var(--ok-fg); border-color: color-mix(in srgb, var(--ok) 45%, transparent); background: color-mix(in srgb, var(--ok) 10%, transparent); }
 .rs-grade.g-ok .rs-grade-txt span { color: var(--ok-fg); }
 .rs-grade-txt { display: flex; flex-direction: column; }
-.rs-grade-txt b { font-size: 14.5px; letter-spacing: -0.3px; }
-.rs-grade-txt span { font-size: 10px; color: var(--faint); letter-spacing: 0.3px; }
-.rs-head { flex: 1 1 200px; min-width: 150px; display: flex; flex-direction: column; gap: 5px; justify-content: center; }
-.rs-title { font-size: 12.5px; color: var(--muted); }
-.rs-title b { color: var(--text); font-size: 16px; }
-.rs-sub { color: var(--faint); }
-.rs-chips { display: flex; gap: 6px; flex-wrap: wrap; }
-.rs-chip {
-  display: inline-flex; align-items: baseline; gap: 5px; font-size: 11.5px; font-weight: 600;
-  padding: 3px 10px; border-radius: 999px; background: var(--surface-3); border: 1px solid var(--line-2); color: var(--muted);
-}
-.rs-chip b { font-size: 13.5px; font-family: var(--mono); }
-.rs-chip.c-crit b { color: #ff7d7d; }
-.rs-chip.c-high b { color: #ffa363; }
-.rs-chip.c-med b { color: #ffd073; }
-.rs-chip.c-low b { color: #7fe0a9; }
-.rs-verify { flex: none; display: flex; align-items: center; gap: 9px; padding-left: 12px; border-left: 1px dashed var(--line-2); }
-.rs-vtitle { font-size: 10px; letter-spacing: 0.5px; color: var(--faint); font-weight: 700; }
+.rs-grade-txt b { font-size: 13px; letter-spacing: -0.2px; white-space: nowrap; }
+.rs-head { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
+.rs-title { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rs-title b { color: var(--text); font-size: 13.5px; letter-spacing: -0.2px; }
+/* 위험도별 수 — 항상 한 줄로 보인다 */
+.rs-mini { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; font-size: 11.5px; color: var(--muted); }
+.rs-mini i { font-style: normal; font-weight: 700; white-space: nowrap; }
+.rs-mini i.c-crit { color: #ff7d7d; }
+.rs-mini i.c-high { color: #ffa363; }
+.rs-mini i.c-med { color: #ffd073; }
+.rs-mini i.c-low { color: #7fe0a9; }
+/* 서랍 안 '직접 확인' 줄 */
+.rs-verify-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
 .rs-vchip { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11px; color: var(--muted); font-weight: 600; }
 .rs-vchip b { font-family: var(--mono); font-size: 12.5px; }
 .rs-vchip.v-proof b { color: #7fe0a9; }
 .rs-vchip.v-sig b { color: #ffd073; }
 .rs-vchip.v-assume b { color: var(--muted); }
-.rs-actions { flex: none; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-left: auto; }
+.rs-actions { flex: none; display: flex; gap: 5px; align-items: center; flex-wrap: wrap; margin-left: auto; }
 .rs-btn {
-  font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
-  border: 1px solid var(--line-2); border-radius: 999px; padding: 5px 13px;
+  font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 999px; padding: 4px 11px;
   background: var(--surface-3); color: var(--muted); transition: all 0.13s; white-space: nowrap;
 }
 .rs-btn:hover { color: var(--text); border-color: var(--faint); background: var(--elev); }
@@ -457,20 +485,9 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .rs-export-status.ok { color: #7fe0a9; }
 .rs-export-status.err { color: var(--brand-fg); }
 
-/* 요약 서랍 — 위험도 필터 · 바로가기 · 범례 (스크롤 시 자동 접힘) */
-.rs-drawer { display: flex; flex-direction: column; gap: 8px; padding-top: 9px; border-top: 1px dashed var(--line-2); }
-.rs-card.collapsed .rs-drawer,
-.rs-card.collapsed .rs-grade-txt,
-.rs-card.collapsed .rs-verify,
-.rs-card.collapsed .rs-chips { display: none; }
-/* 압축 상태에서는 카운트를 한 줄로 보여준다 */
-.rs-mini { display: none; margin-left: 7px; font-size: 11.5px; color: var(--muted); }
-.rs-card.collapsed .rs-mini { display: inline-flex; align-items: center; gap: 5px; }
-.rs-mini i { font-style: normal; font-weight: 700; }
-.rs-mini i.c-crit { color: #ff7d7d; }
-.rs-mini i.c-high { color: #ffa363; }
-.rs-mini i.c-med { color: #ffd073; }
-.rs-mini i.c-low { color: #7fe0a9; }
+/* 요약 서랍 — 위험도 필터 · 바로가기 · 직접 확인 · 범례 (접고 시작, 스크롤 시 자동 접힘) */
+.rs-drawer { display: flex; flex-direction: column; gap: 8px; padding-top: 8px; border-top: 1px dashed var(--line-2); }
+.rs-card.collapsed .rs-drawer { display: none; }
 .rs-nav { display: flex; align-items: center; gap: 7px; flex-wrap: wrap; }
 .rs-nav-label { font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--faint); }
 .rs-nav-note { font-size: 10.5px; color: var(--warn-fg); }
@@ -480,6 +497,7 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
   background: var(--surface-3); color: var(--muted); transition: all 0.13s;
 }
 .rs-nav-chip:hover { color: var(--text); border-color: var(--faint); }
+.rs-nav-chip b { font-family: var(--mono); font-size: 11.5px; }
 .rs-nav-chip.on { border-color: transparent; }
 .rs-nav-chip.n-crit.on { background: rgba(255, 93, 93, 0.16); color: #ff8f8f; }
 .rs-nav-chip.n-high.on { background: rgba(255, 142, 77, 0.16); color: #ffa363; }
@@ -512,10 +530,8 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 /* ── 좁은 창 대응: 리포트 본문 자리를 먼저 확보한다 ── */
 @media (max-width: 1180px) {
   .session-header { padding: 10px 12px 11px; gap: 8px; }
-  .cmd-note { display: none; } /* 긴 안내문이 줄바꿈으로 높이를 먹지 않게 */
-  .sh-action-row { align-self: flex-start; } /* 빈 박스가 넘치지 않게 내용 폭에 맞춤 */
-  .rs-verify { border-left: none; padding-left: 0; }
   .report-summary { padding: 8px 10px 0; }
+  .rs-mini { display: none; } /* 좁은 창에선 첫 줄을 더 얇게 — 수는 서랍 필터에서 확인 */
 }
 @media (max-width: 900px) {
   #workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(200px, 40vh); }

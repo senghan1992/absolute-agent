@@ -12,6 +12,7 @@ let settings = { redcell_dir: "", auth_path: "", default_provider: "" };
 let selectedSeq = null;
 let diagFilter = null; // 진단 결과 루트 필터: null=전체, Set(치명|높음|중간|낮음)
 let resultsSegs = []; // 현재 렌더 중인 결과 카드별 원문 (개별 내보내기용)
+const reportSeenCounts = {}; // 세션별 확인한 리포트 수 — 새로 도착하면 결과 탭으로 자동 전환
 
 const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
@@ -76,7 +77,7 @@ function renderTabs() {
   for (const s of sessions) {
     const tab = document.createElement("div");
     tab.className = "tab" + (s.id === activeId ? " active" : "");
-    tab.innerHTML = `<span class="tdot ${s.status}"></span><span class="tname">${esc(s.name)}</span><span class="tclose" title="세션 닫기"><svg class="ic"><use href="#i-x"/></svg></span>`;
+    tab.innerHTML = `<span class="tdot ${s.status}"></span><span class="tname">${esc(s.name)}</span><span class="tclose" title="닫기"><svg class="ic"><use href="#i-x"/></svg></span>`;
     tab.querySelector(".tname").onclick = () => selectSession(s.id);
     tab.querySelector(".tdot").onclick = () => selectSession(s.id);
     tab.querySelector(".tclose").onclick = (e) => { e.stopPropagation(); removeSession(s.id); };
@@ -113,8 +114,8 @@ function renderActive() {
   const chatInput = $("chatInput");
   if (chatInput) {
     chatInput.placeholder = (s && s.diag)
-      ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
-      : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+      ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
+      : "위에 주소를 입력하세요 · 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
   }
   setBadge(s.status);
   renderDangerBtn(s);
@@ -129,31 +130,31 @@ function renderActive() {
   renderDetail(null);
 }
 
-// ── 파괴적 진단 동의 ─────────────────────────────────────────────────────────
+// ── 위험 검사 동의 ────────────────────────────────────────────────────────────
 function renderDangerBtn(s) {
   const btn = $("dangerBtn");
   const label = $("dangerLabel");
   if (!btn || !label) return;
   const armed = !!(s && s.danger_consent);
   btn.classList.toggle("armed", armed);
-  label.textContent = armed ? "파괴적: 켬" : "파괴적: 끔";
+  label.textContent = armed ? "위험 검사: 켜짐" : "위험 검사: 꺼짐";
   btn.title = armed
-    ? `파괴적 진단 동의됨${s.danger_consented_at ? " (" + s.danger_consented_at + ")" : ""} — 클릭하면 즉시 철회`
-    : "파괴적 진단 — 기본자격·IDOR 인접·쓰기 검증 (모달 동의 필요, 세션별)";
+    ? `위험 검사 동의됨${s.danger_consented_at ? " (" + s.danger_consented_at + ")" : ""} — 클릭하면 즉시 끄기`
+    : "위험 검사 — 사이트에 영향을 줄 수 있어 꺼져 있습니다 (자세한 설명 보기)";
 }
 let pendingDangerRetry = null; // 동의 후 재시도할 실행 (취소 시 파기)
 function parseConsentError(e) {
   const s = String((e && e.message) || e || "");
   const i = s.indexOf("CONSENT_REQUIRED:");
   if (i < 0) return null;
-  try { return JSON.parse(s.slice(i + "CONSENT_REQUIRED:".length)); } catch { return { level: "high", level_ko: "위험", concerns: [], summary: "파괴적 지시로 판단됨", shutdown_risk: false, data_loss_risk: false, irreversible: false }; }
+  try { return JSON.parse(s.slice(i + "CONSENT_REQUIRED:".length)); } catch { return { level: "high", level_ko: "위험", concerns: [], summary: "위험한 작업으로 판단됨", shutdown_risk: false, data_loss_risk: false, irreversible: false }; }
 }
 function openDangerModal() {
   const s = cur();
   if (!s) return;
   pendingDangerRetry = null;
-  $("dangerTitle").textContent = "파괴적 진단 동의";
-  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(대상 미지정)";
+  $("dangerTitle").textContent = "위험 검사 동의";
+  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(주소 없음)";
   $("dangerStatic").classList.remove("hidden");
   $("dangerDynamic").classList.add("hidden");
   $("dangerAck").checked = false;
@@ -165,8 +166,8 @@ function openRiskModal(risk, retry) {
   const s = cur();
   if (!s) return;
   pendingDangerRetry = retry || null;
-  $("dangerTitle").textContent = "파괴적 지시 확인";
-  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(대상 미지정)";
+  $("dangerTitle").textContent = "위험한 작업 확인";
+  $("dangerTarget").textContent = s.host ? `${s.host}${s.port ? ":" + s.port : ""}` : "(주소 없음)";
   $("dangerStatic").classList.add("hidden");
   $("dangerDynamic").classList.remove("hidden");
   const lv = $("riskLevel");
@@ -179,8 +180,8 @@ function openRiskModal(risk, retry) {
   flags.push(risk.irreversible ? `<span class="risk-flag">되돌릴 수 없음</span>` : `<span class="risk-flag ok">복구 가능</span>`);
   $("riskFlags").innerHTML = flags.join("");
   $("riskConcerns").innerHTML = (risk.concerns || []).map((c) =>
-    `<li><b>${esc(c.title)}</b> — ${esc(c.impact)} <span class="danger-risk">근거: <span class="risk-match">${esc(c.matched)}</span> · ${c.reversible ? "복구 가능" : "비가역"}</span></li>`
-  ).join("") || `<li>상세 근거 없음 — 지시를 다시 확인하세요.</li>`;
+    `<li><b>${esc(c.title)}</b> — ${esc(c.impact)} <span class="danger-risk">근거: <span class="risk-match">${esc(c.matched)}</span> · ${c.reversible ? "되돌릴 수 있음" : "되돌릴 수 없음"}</span></li>`
+  ).join("") || `<li>상세 근거 없음 — 내용을 다시 확인하세요.</li>`;
   $("dangerAck").checked = false;
   $("dangerConfirm").disabled = true;
   $("dangerModal").classList.remove("hidden");
@@ -189,7 +190,7 @@ async function cancelDangerPending(note) {
   pendingDangerRetry = null;
   const s = cur();
   if (note && s) {
-    await invoke("append_chat", { id: s.id, role: "system", content: "파괴적 지시 보류됨 — 동의 없이 실행하지 않았습니다." });
+    await invoke("append_chat", { id: s.id, role: "system", content: "위험한 작업은 보류했습니다 — 동의 없이 실행하지 않았습니다." });
     const fresh = await invoke("get_session", { id: s.id });
     if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
     renderChat();
@@ -229,7 +230,7 @@ function setBadge(status) {
     dbtn.dataset.mode = running ? "stop" : "diag";
     dbtn.classList.toggle("btn-stop", running);
     dbtn.classList.toggle("btn-diag", !running);
-    dbtn.title = running ? "실행 중지 — 진행 중인 진단/작업을 멈춥니다" : "진단 시작 — 대상 주소만 넣으면 보안 진단 리포트를 자동 생성합니다";
+    dbtn.title = running ? "실행 중지 — 진행 중인 진단/작업을 멈춥니다" : "진단 시작 — 주소만 넣으면 결과 리포트를 자동으로 만듭니다";
     const dlabel = $("diagLabel");
     if (dlabel) dlabel.textContent = running ? "중지" : "진단 시작";
     const dic = $("diagIcon");
@@ -246,7 +247,7 @@ function setBadge(status) {
       const s = cur();
       const evs = s ? eventsOf(s) : [];
       const last = [...evs].reverse().find((e) => activityLine(e));
-      t = (last && activityLine(last)) || "prime-agent 가 작업 중…";
+      t = (last && activityLine(last)) || "살펴보는 중…";
     }
     setActivity(t);
   }
@@ -292,7 +293,7 @@ function renderPiConsole(s) {
   }
   body.innerHTML = lines.length
     ? lines.map((l) => `<span class="${l.cls}">${esc(l.text)}</span>\n`).join("")
-    : "prime-agent(pi) 대기 중 — 위에 대상 호스트/URL 을 넣고 지시를 보내면 CLI 처럼 여기에 스트리밍됩니다.";
+    : "대기 중 — 위에 주소를 입력하고 진단 시작을 누르면 진행 상황이 여기에 표시됩니다.";
   body.scrollTop = body.scrollHeight;
 }
 function wireRows() {
@@ -344,7 +345,7 @@ function renderMetrics(s) {
 // ── 상세 드릴다운 ────────────────────────────────────────────────────────────
 function renderDetail(ev) {
   const el = $("detail");
-  if (!ev) { el.innerHTML = `<div class="detail-empty">행을 선택하면 상세가 표시됩니다.</div>`; return; }
+  if (!ev) { el.innerHTML = `<div class="detail-empty">항목을 선택하면 자세한 내용이 표시됩니다.</div>`; return; }
   const row = (k, v) => `<div class="d-row"><span class="d-k">${esc(k)}</span><span class="d-v">${esc(v)}</span></div>`;
   let html = `<h4>${esc(ev.type || "event")}</h4>`;
   if (ev.type === "finding" && ev.finding) {
@@ -377,7 +378,7 @@ function renderFindings(s) {
   const el = $("view-findings");
   if (!el) return;
   const fs = findingsOf(s);
-  if (!fs.length) { el.innerHTML = `<div class="placeholder">아직 발견된 항목이 없습니다.<br/>오른쪽 에이전트에게 목표를 지시하세요.</div>`; return; }
+  if (!fs.length) { el.innerHTML = `<div class="placeholder">아직 발견된 항목이 없습니다.<br/>오른쪽 AI 도우미에게 말씀해 보세요.</div>`; return; }
   el.innerHTML = fs.map((f) => `
     <div class="finding sev-${f.severity}">
       <div class="finding-head">
@@ -420,29 +421,29 @@ function nextSteps(s) {
   const steps = [];
   // 발견 신호 → 구체적 조치 가이드(우선순위 순)
   const RULES = [
-    [/sql|sqli/, "SQLi 신호 수동 검증", "탐지된 파라미터를 인가 범위 내에서 오류/부울 기반으로 재현해 영향 범위를 좁히세요. 데이터 추출은 PoC 최소한으로."],
-    [/openapi|swagger|api 명세|api-docs/, "API 명세 노출 차단", "/openapi.json·/swagger 등 명세가 외부에 열려 있으면 공격자가 전체 엔드포인트 지도를 얻습니다. 운영 환경에서는 인증 뒤로 옮기거나 비활성화하세요."],
-    [/header|헤더|csp|hsts|x-frame/, "보안 헤더 하드닝", "누락된 CSP·HSTS·X-Frame-Options·X-Content-Type-Options·Referrer-Policy 를 추가하고 재스캔으로 검증하세요. (nginx: add_header <헤더> always;)"],
-    [/graphql/, "GraphQL 노출 점검", "운영 환경에서 인트로스펙션·플레이그라운드를 비활성화하고 쿼리 깊이/비용 제한을 두세요."],
-    [/cors/, "CORS 신뢰 범위 축소", "Access-Control-Allow-Origin 의 와일드카드(*)·과도한 오리진 허용을 제거하고 필요한 도메인만 허용하세요."],
-    [/쿠키|cookie/, "세션 쿠키 플래그 설정", "HttpOnly·Secure·SameSite=Lax/Strict 를 설정하세요. 미설정 시 XSS/중간자 공격으로 세션 탈취가 가능합니다."],
-    [/jwt/, "JWT 검증 강화", "alg=none 거부·알고리즘 혼동(RS256↔HS256) 방지, 짧은 만료(exp), 페이로드에 민감정보 금지."],
-    [/secret|비밀|백업|\.env|credential|키/, "노출 비밀 즉시 폐기", "노출된 키·토큰·설정 파일은 유출로 간주하고 즉시 로테이션한 뒤 접근 로그를 확인하세요."],
-    [/upload|업로드/, "업로드 검증 강화", "확장자/MIME 화이트리스트, 저장 경로 실행 권한 제거, 파일명 재생성, 크기 제한."],
-    [/login|관리자|admin/, "관리자/로그인 인터페이스 보호", "기본 계정·약한 비밀번호를 점검하고 MFA·로그인 시도 제한(rate limit)·IP 허용목록을 적용하세요."],
-    [/열린 포트|port|ssh|redis|postgres|smb|mysql|3306|5432|6379/, "불필요 포트 축소·격리", "DB·캐시(5432/6379/3306) 같은 관리용 포트가 외부에 열려 있으면 방화벽/보안그룹으로 내부 전용으로 격리하세요. SSH 는 키 인증 전용 권장."],
-    [/dir|경로|열거|enum/, "노출 경로 점검", "열거된 경로의 접근 통제·디렉터리 인덱싱 여부를 확인하고 불필요한 노출을 차단하세요."],
+    [/sql|sqli/, "SQL 주입 신호 직접 확인", "탐지된 입력값에 오류 유발 문자를 넣어 보고 응답을 비교해 보세요. 확인할 때에는 최소한으로만 건드리세요."],
+    [/openapi|swagger|api 명세|api-docs/, "API 설계도 노출 차단", "/openapi.json·/swagger 같은 설계도가 바깥에 열려 있으면 공격자가 전체 기능 지도를 얻습니다. 운영 환경에서는 로그인 뒤로 옮기거나 끄세요."],
+    [/header|헤더|csp|hsts|x-frame/, "보안 헤더 보강", "빠진 CSP·HSTS·X-Frame-Options·X-Content-Type-Options·Referrer-Policy 를 추가하고 다시 점검해 확인하세요."],
+    [/graphql/, "GraphQL 설계도 노출 확인", "운영 환경에서는 설계도 보기·테스트 화면을 끄고, 복잡한 질문에 제한을 두세요."],
+    [/cors/, "CORS 허용 범위 줄이기", "모든 사이트(*)를 허용하는 설정을 지우고 필요한 주소만 허용하세요."],
+    [/쿠키|cookie/, "로그인 쿠키 안전장치 설정", "HttpOnly·Secure·SameSite=Lax/Strict 를 켜세요. 꺼져 있으면 악성 스크립트나 도청으로 로그인이 가로채일 수 있습니다."],
+    [/jwt/, "로그인 토큰(JWT) 검사 강화", "alg=none 거부·알고리즘 혼동(RS256↔HS256) 방지, 짧은 만료 시간, 토큰 안에 민감정보 넣지 않기."],
+    [/secret|비밀|백업|\.env|credential|키/, "노출된 비밀번호·키 즉시 교체", "노출된 키·토큰·설정 파일은 새어 나간 것으로 보고 즉시 바꾼 뒤 접근 기록을 확인하세요."],
+    [/upload|업로드/, "파일 올리기 검사 강화", "허용 확장자 목록, 저장 폴더 실행 금지, 파일명 새로 만들기, 크기 제한."],
+    [/login|관리자|admin/, "관리자·로그인 페이지 보호", "기본 계정·쉬운 비밀번호를 바꾸고 2단계 인증·로그인 시도 제한·IP 허용 목록을 적용하세요."],
+    [/열린 포트|port|ssh|redis|postgres|smb|mysql|3306|5432|6379/, "안 쓰는 문(포트) 닫기", "DB·캐시(5432/6379/3306) 같은 관리용 문이 바깥에 열려 있으면 방화벽으로 내부 전용으로 막으세요."],
+    [/dir|경로|열거|enum/, "숨은 페이지 노출 확인", "찾아낸 주소들의 접근 권한·목록 공개 여부를 확인하고 필요 없는 노출은 막으세요."],
   ];
   for (const [re, t, d] of RULES) if (re.test(blob)) steps.push([t, d]);
   const fp = fingerprintOf(s);
-  if (fp.service && fp.service !== "미상") steps.push([`${fp.service} 심화 열거`, "식별된 스택/버전 기준으로 알려진 이슈를 좁혀 exploit 단계 전 근거를 확보하세요."]);
+  if (fp.service && fp.service !== "미상") steps.push([`${fp.service} 깊이 살펴보기`, "확인된 종류·버전을 기준으로 알려진 문제점을 좁혀 근거를 확보하세요."]);
   if (!steps.length) {
     const ran = eventsOf(s).some((e) => e.type === "tool_result");
-    if (ran) steps.push(["정찰 확대", "유의미한 발견이 없었습니다. 목표/포트를 바꾸거나 다른 provider(모델)로 계획을 다양화해 재실행하세요."]);
-    else steps.push(["세션 실행", "오른쪽 에이전트에 목표를 지시해 첫 engagement 를 실행하세요. 대상은 인가 목록(scope) 안이어야 합니다."]);
+    if (ran) steps.push(["범위 넓혀 다시 보기", "눈에 띄는 발견이 없었습니다. 주소·포트를 바꾸거나 다른 AI 모델로 다시 실행해 보세요."]);
+    else steps.push(["아직 시작 전", "오른쪽 AI 도우미에게 하고 싶은 일을 말씀하세요. 주소는 점검 대상에 등록되어 있어야 합니다."]);
   }
   const blocked = eventsOf(s).filter((e) => e.type === "blocked");
-  if (blocked.length) steps.push(["차단된 액션 확인", `ScopeGuard 가 ${blocked.length}건을 차단했습니다. 인가 범위/기간/포트 설정을 검토하세요.`]);
+  if (blocked.length) steps.push(["멈춘 동작 확인", `허용 범위를 벗어난 동작 ${blocked.length}건을 멈췄습니다. 점검 대상 목록을 확인하세요.`]);
   return steps;
 }
 function renderNext(s) {
@@ -460,12 +461,12 @@ function renderNextActions(s) {
     <div class="ns-card">
       <span class="ns-num">${i + 1}</span>
       <div class="ns-body"><b>${esc(t)}</b><p>${esc(d)}</p></div>
-      <button class="ns-run" data-goal="${esc(t)} · ${esc(d)}" title="이 조치를 에이전트에 지시해 실행/검증">지시<svg class="ic"><use href="#i-send"/></svg></button>
+      <button class="ns-run" data-goal="${esc(t)} · ${esc(d)}" title="이 항목을 AI 도우미에게 시켜 실행·확인">실행<svg class="ic"><use href="#i-send"/></svg></button>
     </div>`).join("");
   return `<section class="next-actions">
     <header class="ns-title">
       <span class="ns-ico"><svg class="ic"><use href="#i-check"/></svg></span>
-      <div><b>자동 보완</b><span>정리된 다음 조치를 1클릭으로 에이전트에 지시해 실행·검증합니다</span></div>
+      <div><b>이어서 하기</b><span>아래 항목을 누르면 AI 도우미가 바로 실행·확인합니다</span></div>
     </header>
     <div class="ns-grid">${items}</div>
   </section>`;
@@ -476,7 +477,7 @@ function renderChat() {
   const s = cur();
   const el = $("chatMessages");
   const chat = (s && s.chat) || [];
-  if (!chat.length) { el.innerHTML = `<div class="placeholder">목표를 지시해 오퍼레이션을 시작하세요.<br/>에이전트가 방법을 찾아 왼쪽에 진행 상황을 보여줍니다.</div>`; return; }
+  if (!chat.length) { el.innerHTML = `<div class="placeholder">하고 싶은 일을 말씀하세요.<br/>AI가 방법을 찾아 왼쪽 진행 상황에서 보여줍니다.</div>`; return; }
   el.innerHTML = chat.map((m) => `<div class="msg ${m.role}">${esc(m.content)}<span class="ts">${hhmm(m.ts)}</span></div>`).join("");
   el.scrollTop = el.scrollHeight;
 }
@@ -486,47 +487,80 @@ function renderChat() {
 const TOOL_LABEL = {
   http_probe: "웹 응답 파악",
   header_audit: "보안 헤더 점검",
-  waf_detect: "WAF/방화벽 식별",
-  crawl: "링크·폼 크롤(공격 표면 수집)",
-  jwt_audit: "JWT 토큰 정적 분석",
-  port_scan: "포트 스캔",
-  dir_enum: "경로 열거",
-  api_discover: "backend API 발견",
-  api_probe: "API 노출 정보 확인",
-  cookie_audit: "세션 쿠키 플래그 점검",
-  cors_audit: "CORS 신뢰정책 점검",
-  secret_scan: "노출 비밀·백업 파일 스캔",
-  graphql_probe: "GraphQL 스키마 노출 확인",
-  csrf_audit: "CSRF 방어(토큰) 점검",
-  upload_probe: "파일 업로드 제한 점검",
-  sqli_probe: "SQLi 신호 탐지(오류·블라인드)",
-  xss_probe: "반사형 XSS 탐지",
-  path_traversal: "경로 조작·LFI 시도",
-  open_redirect: "오픈 리다이렉트 확인",
-  ssrf_probe: "SSRF 신호 관찰",
-  idor_probe: "IDOR·접근통제 점검",
-  ssti_probe: "서버측 템플릿 인젝션 탐지",
-  cmdi_probe: "OS 커맨드 인젝션 탐지",
-  xxe_probe: "XXE(내부 엔티티) 탐지",
-  web_fetch: "웹 페이지 조회(실측 확인)",
-  recon_list: "경로 정찰(공격 표면 점검)",
+  waf_detect: "방어 장비(WAF) 확인",
+  crawl: "링크·폼 따라다니며 수집",
+  jwt_audit: "로그인 토큰(JWT) 뜯어보기",
+  port_scan: "열린 문(포트) 찾기",
+  dir_enum: "숨은 페이지 찾기",
+  api_discover: "숨은 기능(API) 찾기",
+  api_probe: "숨은 기능 정보 확인",
+  cookie_audit: "로그인 쿠키 안전장치 확인",
+  cors_audit: "다른 사이트 접근 허용(CORS) 확인",
+  secret_scan: "숨은 비밀번호·백업 파일 찾기",
+  graphql_probe: "GraphQL 설계도 노출 확인",
+  csrf_audit: "위조 요청(CSRF) 방어 확인",
+  upload_probe: "파일 올리기 제한 확인",
+  sqli_probe: "SQL 주입 신호 찾기",
+  xss_probe: "악성 스크립트 삽입(XSS) 확인",
+  path_traversal: "엉뚱한 파일 접근 시도",
+  open_redirect: "엉뚱한 사이트로 보내기 확인",
+  ssrf_probe: "서버 속임수(SSRF) 신호 확인",
+  idor_probe: "남의 정보 접근(IDOR) 점검",
+  ssti_probe: "템플릿 조종(SSTI) 확인",
+  cmdi_probe: "서버 명령어 삽입 확인",
+  xxe_probe: "파일 빼내기(XXE) 시도 확인",
+  web_fetch: "사이트 직접 열어 확인",
+  recon_list: "들어갈 수 있는 곳 찾기",
 };
 function toolLabel(name) { return TOOL_LABEL[name] || name; }
 
+// ── 진단 분야 쉬운 이름: 백엔드는 W1·정찰 같은 내부 라벨을 보내므로 UI에서만 바꾼다 ──
+const WORKER_FRIENDLY = {
+  p0: { label: "기본 점검", title: "수백 가지 기본 항목을 자동으로 확인합니다" },
+  w1: { label: "구조 살펴보기", title: "겉모습·메뉴·숨은 페이지를 찾습니다" },
+  w2: { label: "입력값 점검", title: "입력창·검색창이 공격에 견디는지 봅니다" },
+  w3: { label: "로그인·권한 점검", title: "로그인과 내 정보 보호를 확인합니다" },
+  w4: { label: "정보 노출 점검", title: "숨은 파일·비밀번호 노출을 찾습니다" },
+  w5: { label: "기능 오용 점검", title: "할인·주문 같은 기능이 악용되는지 봅니다" },
+};
+function friendlyWorker(id, fallbackLabel) {
+  const f = WORKER_FRIENDLY[id];
+  return f ? f.label : (fallbackLabel || id || "점검");
+}
+function friendlyWorkerTitle(id, fallbackTitle) {
+  const f = WORKER_FRIENDLY[id];
+  return f ? f.title : (fallbackTitle || "");
+}
+// 노트 앞머리의 [W2·주입] 같은 백엔드 태그를 쉬운 이름으로 바꾼다.
+// 새 백엔드는 쉬운 이름을 직접 보내므로 그대로 둔다.
+function friendlyWorkerTag(tag) {
+  const t = tag || "";
+  if (Object.values(WORKER_FRIENDLY).some((f) => f.label === t)) return t;
+  const m = /W([1-5])/.exec(t);
+  if (m) {
+    const f = WORKER_FRIENDLY["w" + m[1]];
+    if (f) return f.label;
+  }
+  if (/^P0/.test(t)) return WORKER_FRIENDLY.p0.label;
+  return tag;
+}
+// 새 형식 태그([구조 살펴보기] 등) 매칭용.
+const FRIENDLY_TAG_ALT = Object.values(WORKER_FRIENDLY).map((f) => f.label).join("|");
+
 function activityLine(e) {
   switch (e.type) {
-    case "authorized": return "대상 인가 확인 — 정찰을 준비합니다";
+    case "authorized": return "점검 대상 확인됨 — 살펴보기를 준비합니다";
     case "phase": return ({
-      recon: "정찰(recon) — 대상 표면을 파악합니다",
-      enumerate: "열거(enumerate) — 경로·서비스를 나열합니다",
-      exploit: "공략(exploit) — 취약점 신호를 검증합니다",
-      post: "정리(post) — 결과를 종합합니다",
-    })[e.phase] || `${e.phase} 단계`;
-    case "action": return `${e.phase} · ${toolLabel(e.tool)} 실행 중` + (e.rationale ? ` — ${e.rationale}` : "");
+      recon: "겉모습 살펴보는 중 — 사이트 구조를 파악합니다",
+      enumerate: "메뉴·기능 목록 만드는 중",
+      exploit: "빈틈이 진짜 뚫리는지 확인 중",
+      post: "결과 정리 중",
+    })[e.phase] || "살펴보는 중";
+    case "action": return `${toolLabel(e.tool)} 확인 중` + (e.rationale ? ` — ${e.rationale}` : "");
     case "tool_result": return `${toolLabel(e.tool)} 결과 — ${e.summary || (e.ok ? "완료" : "실패")}`;
     case "finding": return e.finding ? `발견: ${e.finding.title}` : "발견";
-    case "distilled": return `학습 저장 — ${e.title || ""}`;
-    case "blocked": return `차단됨 — ${e.tool || "액션"} (인가 범위 밖)`;
+    case "distilled": return `방법 저장 — ${e.title || ""}`;
+    case "blocked": return `멈춤 — ${toolLabel(e.tool || "")} (허용 범위 밖)`;
     case "done": return "완료 — 결과를 정리했습니다";
     case "worker_status": return workerActivity(e);
     case "note": return noteActivity(e.text || "");
@@ -535,42 +569,57 @@ function activityLine(e) {
 }
 // 심층 진단 노트 → 현재 진행 문구. 구체 패턴부터 검사한다.
 function noteActivity(t) {
-  if (/모델 연결 확인 중/.test(t)) return "모델 연결 확인 중…";
-  if (/모델 연결 확인 완료/.test(t)) return "모델 연결 확인 완료 — 진단 시작…";
-  if (/P0 자동 스윕 시작/.test(t)) return "대상 접근·기본 점검 중… (자동 스윕)";
-  if (/P0 스윕.*프로브 \d+개/.test(t)) return "자동 스윕 완료 — 5개 분야 동시 진단 준비…";
+  if (/모델 연결 확인 중/.test(t)) return "AI 모델 연결 확인 중…";
+  if (/모델 연결 확인 완료/.test(t)) return "AI 모델 연결됨 — 진단을 시작합니다…";
+  if (/기본 점검 시작/.test(t)) return "기본 점검 중… (수백 가지 항목 자동 확인)";
+  if (/기본 점검 — 항목 \d+개/.test(t)) return "기본 점검 끝 — 다섯 가지 정밀 진단을 준비합니다…";
+  if (/P0 자동 스윕 시작/.test(t)) return "기본 점검 중… (수백 가지 항목 자동 확인)"; // 구 문구 호환
+  if (/P0 스윕.*프로브 \d+개/.test(t)) return "기본 점검 끝 — 다섯 가지 정밀 진단을 준비합니다…"; // 구 문구 호환
+  if (/1차 확인 끝/.test(t)) return "1차 확인 끝 — 1차 리포트 만드는 중…";
+  if (/1차 리포트를 만들지 못했습니다/.test(t)) return "1차 리포트를 만들지 못했습니다 — 추가 확인 뒤 다시 시도합니다";
+  if (/1차 리포트 완성/.test(t)) return "1차 리포트 완성 — 추가 확인은 계속됩니다…";
+  if (/최종 리포트를 만듭니다/.test(t)) return "최종 리포트 만드는 중…";
+  if (/최종 리포트 완성/.test(t)) return "최종 리포트 완성 — 결과 리포트 탭에서 확인하세요";
+  if (/추가 확인을 중단/.test(t)) return "추가 확인 중단 — 1차 리포트는 그대로 둡니다";
+  if (/추가 확인을 마칩니다/.test(t)) return "추가 확인 끝 — 최종 리포트 만드는 중…";
+  const mRound2 = t.match(/추가 확인 (\d+)차 시작/);
+  if (mRound2) return `추가 확인 ${mRound2[1]}차 — 엇갈린 단서 확인 중…`;
+  const mRound2End = t.match(/추가 확인 (\d+)차 끝/);
+  if (mRound2End) return `추가 확인 ${mRound2End[1]}차 끝`;
   const mRound = t.match(/추적 라운드 (\d+) 시작/);
-  if (mRound) return `추적 라운드 ${mRound[1]} — 교차 단서 확인 중…`;
+  if (mRound) return `추가 확인 ${mRound[1]}차 — 엇갈린 단서 확인 중…`; // 구 문구 호환
   const mRoundEnd = t.match(/추적 라운드 (\d+) 종료/);
-  if (mRoundEnd) return `추적 라운드 ${mRoundEnd[1]} 완료`;
-  if (/수렴 — 추가 발견 없음/.test(t)) return "수렴 — 최종 병합 준비 중…";
-  if (/collector 가 실사용진단리포트를 병합/.test(t)) return "실사용진단리포트 병합 중…";
-  if (/collector 가 최종/.test(t)) return "최종 리포트 병합 중…"; // 구 문구 호환
-  if (/실사용진단리포트 병합 완료/.test(t)) return "실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요";
-  if (/리포트 병합 완료/.test(t)) return "리포트 병합 완료 — 결과 탭에서 확인하세요";
-  if (/1라운드 완료.*(조기 리포트|의심진단리포트)를 발행/.test(t)) return "의심진단리포트 발행 중…";
-  if (/(1차 리포트|의심진단리포트) 발행 — 결과 탭/.test(t)) return "의심진단리포트 발행 완료 — 추적 계속…";
-  if (/백그라운드 추적 취소 — (1차 리포트|의심진단리포트)/.test(t)) return "추적 취소 — 의심진단리포트 유지";
+  if (mRoundEnd) return `추가 확인 ${mRoundEnd[1]}차 완료`; // 구 문구 호환
+  if (/수렴 — 추가 발견 없음/.test(t)) return "확인 끝 — 최종 정리 준비 중…"; // 구 문구 호환
+  if (/collector 가 실사용진단리포트를 병합/.test(t)) return "최종 리포트 만드는 중…"; // 구 문구 호환
+  if (/collector 가 최종/.test(t)) return "최종 리포트 만드는 중…"; // 구 문구 호환
+  if (/실사용진단리포트 병합 완료/.test(t)) return "최종 리포트 완성 — 결과 리포트 탭에서 확인하세요"; // 구 문구 호환
+  if (/리포트 병합 완료/.test(t)) return "리포트 완성 — 결과 리포트 탭에서 확인하세요";
+  if (/1라운드 완료.*(조기 리포트|의심진단리포트)를 발행/.test(t)) return "1차 리포트 만드는 중…"; // 구 문구 호환
+  if (/(1차 리포트|의심진단리포트) 발행 — 결과 탭/.test(t)) return "1차 리포트 완성 — 정밀 진단은 계속됩니다…"; // 구 문구 호환
+  if (/백그라운드 추적 취소 — (1차 리포트|의심진단리포트)/.test(t)) return "추가 확인 중단 — 1차 리포트는 유지됩니다"; // 구 문구 호환
   if (/^\[(오류|완료|중지|차단|경고)\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 100);
-  // 툴 호출 시작: [W3·인증] [pi-툴] web_fetch {"url":"…"} → 접근 시도 중
+  // 툴 호출 시작: [W3·인증] [pi-툴] web_fetch {"url":"…"} → 확인 중
   let m = t.match(/^\[([^\]]+)\] \[(?:pi|prime)-툴\] (\S+)/);
   if (m) {
     const url = (t.match(/"url"\s*:\s*"([^"]+)"/) || [])[1] || "";
     let host = "";
     try { host = url ? new URL(url).hostname : ""; } catch (_) {}
-    return `${m[1]} 접근 시도 중 — ${m[2]}${host ? " " + host : ""}…`;
+    return `${friendlyWorkerTag(m[1])} 확인 중 — ${toolLabel(m[2])}${host ? " " + host : ""}…`;
   }
   if (/\[(?:pi|prime)-툴[✓✗]\]/.test(t)) return null; // 툴 완료줄은 너무 잦아 스킵
-  // 워커 분석 텍스트: [W2·주입] <첫머리>
-  m = t.match(/^\[(W\d·[^\]]+)\]\s*([\s\S]{1,70})/);
-  if (m) return `${m[1]} 분석 중 — ${m[2].replace(/\s+/g, " ").trim()}…`;
+  // 분야 분석 텍스트: [입력값 점검] <첫머리> (구 형식 [W2·주입] 도 처리)
+  m = t.match(new RegExp(`^\\[(${FRIENDLY_TAG_ALT})\\]\\s*([\\s\\S]{1,70})`))
+    || t.match(/^\[(W\d·[^\]]+)\]\s*([\s\S]{1,70})/);
+  if (m) return `${friendlyWorkerTag(m[1])} 살펴보는 중 — ${m[2].replace(/\s+/g, " ").trim()}…`;
   if (/^\[sys\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 90);
   return null;
 }
-// 워커 상태 한 건 → "라벨 + 상태" 한 줄 문구.
+// 워커 상태 한 건 → "쉬운 이름 + 상태" 한 줄 문구.
 function workerActivity(e) {
-  if (e.state && e.state !== "running") return `${e.label || e.worker || "워커"} ${e.state === "done" ? "완료" : e.state === "error" ? "실패" : "중지됨"}`;
-  return `${e.label || e.worker || "워커"} 진행 중…`;
+  const name = friendlyWorker(e.worker, e.label);
+  if (e.state && e.state !== "running") return `${name} ${e.state === "done" ? "완료" : e.state === "error" ? "실패" : "중지됨"}`;
+  return `${name} 살펴보는 중…`;
 }
 let runStartedAt = 0, elapsedTimer = null;
 function setActivity(text) {
@@ -602,7 +651,7 @@ function milestoneChat(e) {
     return `발견 · [${(f.severity || "info").toUpperCase()}] ${f.title}` + (f.detail ? `\n${f.detail}` : "");
   }
   if (e.type === "blocked") {
-    return `권한 밖 액션이 차단되었습니다: ${e.tool || "액션"}.\n계속하려면 설정(⚙)에서 authorization scope를 확장한 뒤 다시 실행하세요.`;
+    return `허용되지 않은 동작이라 멈췄습니다: ${toolLabel(e.tool || "")}.\n계속하려면 점검 대상 목록에 주소를 추가한 뒤 다시 실행하세요.`;
   }
   if (e.type === "error") return `실행 중 오류가 발생했습니다: ${e.text || ""}`.trim();
   return null;
@@ -619,7 +668,7 @@ function workerStates(s) {
   const st = {};
   for (const e of eventsOf(s)) {
     if (e.type === "worker_status" && e.worker) {
-      st[e.worker] = { state: e.state || "running", title: e.title || "", label: e.label || e.worker };
+      st[e.worker] = { id: e.worker, state: e.state || "running", title: e.title || "", label: e.label || e.worker };
     }
   }
   return st;
@@ -630,11 +679,11 @@ function renderWorkerBar(s) {
   const order = ["p0", "w1", "w2", "w3", "w4", "w5"].filter((id) => st[id]);
   if (!order.length) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
   bar.classList.remove("hidden");
-  bar.innerHTML = `<span class="wk-title">심층 진단</span>` + order.map((id) => {
+  bar.innerHTML = `<span class="wk-title">정밀 진단</span>` + order.map((id) => {
     const w = st[id];
     const dot = w.state === "done" ? "ok" : w.state === "error" ? "err" : w.state === "stopped" ? "stop" : "run";
     const txt = w.state === "done" ? "완료" : w.state === "error" ? "실패" : w.state === "stopped" ? "중지" : "진행 중";
-    return `<span class="wk-chip ${dot}" title="${esc(w.title)}"><i></i>${esc(w.label)}<em>${txt}</em></span>`;
+    return `<span class="wk-chip ${dot}" title="${esc(friendlyWorkerTitle(id, w.title))}"><i></i>${esc(friendlyWorker(id, w.label))}<em>${txt}</em></span>`;
   }).join("");
 }
 
@@ -644,8 +693,8 @@ function onLiveEvent(event) {
   if (event.type === "worker_status") { // 칩 갱신 + 활동 바에 진행 중 요약
     renderWorkerBar(s);
     const running = Object.values(workerStates(s)).filter((w) => w.state === "running");
-    if (running.length === 1) setActivity(`${running[0].label} 진행 중…`);
-    else if (running.length > 1) setActivity(`${running[0].label} 등 ${running.length}개 분야 진단 중…`);
+    if (running.length === 1) setActivity(`${friendlyWorker(running[0].id, running[0].label)} 살펴보는 중…`);
+    else if (running.length > 1) setActivity(`${friendlyWorker(running[0].id, running[0].label)} 등 ${running.length}곳을 함께 살펴보는 중…`);
     else { const line = activityLine(event); if (line) setActivity(line); }
     return;
   }
@@ -669,6 +718,18 @@ function onLiveEvent(event) {
   else { // 라이브 탭 시청 중에도 리포트 도착을 뱃지로 알린다.
     const c = $("resultsCount");
     if (c && s) { const n = resultDocs(s).length; c.textContent = String(n); c.style.display = n ? "inline-flex" : "none"; }
+    // 병합 리포트(report 표식)가 도착하면 결과 리포트 탭으로 자동 전환 —
+    // 1차 리포트를 기다리지 않고 바로 보여주기 위함. (경고·중간 메모·일반 작업 제외)
+    if (s.diag && event.report && (event.type === "note" || event.type === "text_end")) {
+      const n = resultDocs(s).length;
+      if (n > (reportSeenCounts[s.id] || 0)) {
+        reportSeenCounts[s.id] = n;
+        switchView("results");
+        if (s.status === "running") {
+          pushAssistant(s.id, "1차 리포트가 나왔습니다 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다.");
+        }
+      }
+    }
   }
 
   renderStepper(s);
@@ -690,10 +751,10 @@ async function onFinished(id, status) {
   const s = sessions.find((x) => x.id === id);
   {
     const summary = status === "error"
-      ? "prime-agent 가 오류로 종료되었습니다. 라이브 캡처의 [sys]/[오류] 노트를 확인하세요."
+      ? "실행 중 오류가 발생했습니다. 진행 상황 탭의 기록을 확인하세요."
       : (s && s.deep)
-        ? "심층 진단 완료 — 결과 탭에서 공격 시나리오 리포트(흐름·증거·멘토 노트·보완책)를 확인하세요. 이어서 질문하면 같은 세션에서 답변합니다."
-        : "완료 — 아래에서 이어서 지시할 수 있습니다(같은 대화로 이어집니다).";
+        ? "진단 완료 — 결과 리포트 탭에서 뚫리는 과정·증거·막는 방법을 확인하세요. 이어서 질문하면 같은 작업에서 답변합니다."
+        : "완료 — 아래 입력창에서 이어서 말씀하세요(같은 작업으로 이어집니다).";
     await invoke("append_chat", { id, role: "assistant", content: summary });
   }
   const upd = await invoke("get_session", { id });
@@ -721,7 +782,7 @@ async function newSession() {
 }
 
 async function removeSession(id) {
-  if (!confirm("이 세션을 삭제할까요? 저장된 로그도 함께 삭제됩니다.")) return;
+  if (!confirm("이 작업을 삭제할까요? 저장된 기록도 함께 삭제됩니다.")) return;
   await invoke("delete_session", { id });
   sessions = sessions.filter((x) => x.id !== id);
   if (activeId === id) activeId = sessions[0] ? sessions[0].id : null;
@@ -787,13 +848,13 @@ async function ensureTargetAuthorized() {
     const r = await invoke("auth_ensure", { host });
     // 실제 인가 목록 반영(자동 추가)은 매번 수행 — 알림만 1회로 제한.
     const msg = r.yaml
-      ? `인가 파일이 정식 YAML 입니다 — 대상 ${r.host} 을(를) 자동 추가하지 않았습니다. 인가 범위는 엔진(ScopeGuard)이 그대로 강제합니다.`
+      ? `고급 설정 파일(YAML)을 사용 중이라 ${r.host} 을(를) 자동 등록하지 않았습니다. 점검 범위는 그대로 적용됩니다.`
       : (() => {
           const ipNote = (r.ips_added && r.ips_added.length)
-            ? ` 해석된 IP 도 함께 허용: ${r.ips_added.join(", ")}`
-            : (r.ips_known && r.ips_known.length ? ` (해석된 IP ${r.ips_known.join(", ")} 이미 허용됨)` : "");
-          if (r.added) return `대상 ${r.host} 을(를) 인가 목록에 자동 추가했습니다.${ipNote} 빼려면 🛡 인가 대상 관리에서 제거하세요.`;
-          if (r.existed) return `대상 ${r.host} 은(는) 이미 인가된 대상입니다.${ipNote}`;
+            ? ` 함께 찾은 IP도 등록했습니다: ${r.ips_added.join(", ")}`
+            : (r.ips_known && r.ips_known.length ? ` (함께 찾은 IP ${r.ips_known.join(", ")}는 이미 등록됨)` : "");
+          if (r.added) return `${r.host} 을(를) 점검 대상에 자동 등록했습니다.${ipNote} 빼려면 점검 대상 관리에서 제거하세요.`;
+          if (r.existed) return `${r.host} 은(는) 이미 등록된 주소입니다.${ipNote}`;
           return null;
         })();
     if (msg && !authNotified[s.id]) {
@@ -803,14 +864,14 @@ async function ensureTargetAuthorized() {
   } catch (e) {
     if (!authNotified[s.id]) {
       authNotified[s.id] = true;
-      await pushAssistant(s.id, `대상 자동 인가 실패: ${e} — 인가 범위는 엔진이 계속 강제합니다.`);
+      await pushAssistant(s.id, `대상 자동 등록 실패: ${e} — 점검 범위는 그대로 적용됩니다.`);
     }
   }
 }
 
 async function runEngagement() {
   const s = cur(); if (!s) return;
-  if (!s.host && !$("shHost").value.trim()) { alert("host 를 먼저 입력하세요."); return; }
+  if (!s.host && !$("shHost").value.trim()) { alert("주소를 먼저 입력하세요."); return; }
   await persistHeader();
   if (!activeProvider()) { showProviderModal(); return; } // 미설정 → 모달로 설정 유도
   await ensureTargetAuthorized();
@@ -819,7 +880,7 @@ async function runEngagement() {
     await invoke("start_engagement", { id: s.id });
   } catch (e) {
     const risk = parseConsentError(e);
-    if (risk) { // 파괴적 지시 — 에러가 아니라 동의 모달로 전환
+    if (risk) { // 위험한 작업 — 에러가 아니라 동의 모달로 전환
       setBadge("idle");
       openRiskModal(risk, () => runEngagement());
       return;
@@ -871,12 +932,12 @@ async function sendChat() {
   const host = $("shHost").value.trim();
   const port = $("shPort").value.trim();
   const provider = activeProvider();
-  const target = host ? `${host}${port ? ":" + port : ""}` : "(대상 미지정 — host 를 입력하세요)";
+  const target = host ? `${host}${port ? ":" + port : ""}` : "(주소 없음 — 위에 주소를 입력하세요)";
   let ack;
   if (s.status === "running") {
-    ack = `목표 "${text}" 을(를) 저장했습니다. 현재 실행이 진행 중입니다 — 완료 후 이 목표로 다시 실행됩니다.`;
+    ack = `"${text}" 을(를) 메모했습니다. 지금 실행 중인 작업이 끝나면 이 내용으로 다시 실행됩니다.`;
   } else {
-    ack = `목표 반영: "${text}"\n대상 ${target} · 프로바이더 ${provider} 로 실행합니다 — 왼쪽 라이브 캡처에서 진행을 확인하세요.`;
+    ack = `알겠습니다: "${text}"\n${target} · AI 모델 ${provider} 로 실행합니다 — 왼쪽 진행 상황에서 확인하세요.`;
   }
   await invoke("append_chat", { id: s.id, role: "assistant", content: ack });
   const fresh = await invoke("get_session", { id: s.id });
@@ -892,12 +953,12 @@ function setDiagPlaceholder() {
   if (!ci) return;
   const s = cur();
   ci.placeholder = (s && s.diag)
-    ? "서비스 설명을 넣으면 더 정밀하게 — 없어도 URL 만으로 실측 정찰 후 진단합니다"
-    : "대상이 있으면 위에 host/URL 을 입력하세요 · 지시 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+    ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
+    : "위에 주소를 입력하세요 · 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
 }
 
 // ── [진단 시작] 원클릭: URL 만으로 심층 진단 (5개 분야 병렬 + 시나리오 리포트) ─
-const DEFAULT_DIAG_GOAL = "이 서비스의 보안 진단을 해줘 — 취약점, 실행 가능한 공격 시나리오, 대비해야 할 위협, 그리고 미리 막는 방법까지 리포트로 정리해줘.";
+const DEFAULT_DIAG_GOAL = "이 서비스의 보안 진단을 해줘 — 어디가 뚫리는지, 어떻게 뚫리는지, 무엇을 조심해야 하는지, 그리고 미리 막는 방법까지 리포트로 정리해줘.";
 function activeEngine() {
   const sel = $("shEngine");
   if (sel && sel.value) return sel.value === "prime" ? "prime" : "pi";
@@ -906,9 +967,8 @@ function activeEngine() {
 }
 async function beginDeepDiagnosis(s) {
   const goal = (s.goal || "").trim() || DEFAULT_DIAG_GOAL;
-  const eng = s.engine === "prime" ? "prime-agent" : "pi";
   await invoke("append_chat", { id: s.id, role: "user", content: goal });
-  await invoke("append_chat", { id: s.id, role: "assistant", content: `심층 진단 시작(${eng}) — 정찰·주입·인증·노출·로직 5개 워커가 동시에 파고든 뒤 하나의 시나리오 리포트로 병합합니다. 왼쪽에서 진행을 확인하세요.` });
+  await invoke("append_chat", { id: s.id, role: "assistant", content: `진단 시작 — 먼저 기본 점검을 한 뒤 다섯 가지 관점에서 동시에 깊이 살펴보고, 하나의 결과 리포트로 정리합니다. 왼쪽에서 진행을 확인하세요.` });
   const fresh = await invoke("get_session", { id: s.id });
   if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = fresh; }
   renderChat();
@@ -918,7 +978,7 @@ async function beginDeepDiagnosis(s) {
     await invoke("start_deep_diagnosis", { id: s.id });
   } catch (e) {
     const risk = parseConsentError(e);
-    if (risk) { // 파괴적 진단 목표 — 동의 모달로 전환 (채팅 중복 없이 재시도)
+    if (risk) { // 위험한 진단 목표 — 동의 모달로 전환 (채팅 중복 없이 재시도)
       setBadge("idle");
       const sid = s.id;
       openRiskModal(risk, async () => {
@@ -933,7 +993,7 @@ async function beginDeepDiagnosis(s) {
       return;
     }
     setBadge("error");
-    const msg = "심층 진단 실패: " + e;
+    const msg = "진단 실패: " + e;
     await invoke("append_chat", { id: s.id, role: "system", content: msg });
     const f2 = await invoke("get_session", { id: s.id });
     if (f2) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = f2; }
@@ -943,7 +1003,7 @@ async function beginDeepDiagnosis(s) {
 }
 async function runDiagnose() {
   const s = cur(); if (!s) return;
-  if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 host/URL 을 입력하세요."); return; }
+  if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 주소를 입력하세요."); return; }
   await persistHeader();
   if (!activeProvider()) { showProviderModal(); return; } // 입력 보존 + 설정 유도
   const s2 = cur();
@@ -1160,7 +1220,7 @@ async function refreshProviders() {
   const psel = $("shProvider");
   if (psel) {
     const prev = psel.value || ((cur() && cur().provider) || settings.default_provider || "");
-    psel.innerHTML = `<option value="">— provider 선택 —</option>`
+    psel.innerHTML = `<option value="">— AI 모델 선택 —</option>`
       + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
     if (prev && connected.some((p) => p.name === prev)) {
       psel.value = prev;
@@ -1173,8 +1233,8 @@ async function refreshProviders() {
   if (hint) {
     const names = connected.map((p) => p.name);
     hint.textContent = names.length
-      ? `LLM 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
-      : "LLM 프로바이더 미연결 — ⚙ 설정에서 API 키를 등록하세요.";
+      ? `AI 모델 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
+      : "AI 모델 미연결 — ⚙ 설정에서 연결하세요.";
   }
   syncObProvider();
 }
@@ -1195,7 +1255,7 @@ function switchView(name) {
 function normalizeReportTitle(text, name, report) {
   const re = /^#\s+.*리포트.*$/m;
   if (!re.test(text)) return text;
-  const kind = report === "early" ? "의심진단리포트" : report === "final" ? "실사용진단리포트" : "진단 리포트";
+  const kind = report === "early" ? "1차 리포트" : report === "final" ? "최종 리포트" : "진단 리포트";
   return text.replace(re, `# ${name} ${kind}`);
 }
 
@@ -1216,7 +1276,7 @@ function resultDocs(s) {
     if (t === prevText) continue; // 같은 결과가 연속 2번 저장된 경우
     prevText = t;
     const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null };
-    // 심층 진단 워커 중간 발견([Wn·…] 태그)은 최종 리포트가 아니면 결과에서 제외.
+    // 분야별 중간 발견(worker 표식)은 최종 리포트가 아니면 결과에서 제외.
     if (e.worker) { workerFallback.push(doc); continue; }
     // 진단 리포트 제목은 "{세션명} {종별}"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
     if (s && s.diag && s.name && s.name.trim()) doc.text = normalizeReportTitle(t, s.name.trim(), doc.report);
@@ -1289,12 +1349,12 @@ function reportStats(docs) {
       : { letter: "A", label: "안전", cls: "g-a" };
   return { roots: m, sev, ver, score, grade };
 }
-// ── 리포트 요약 바: 등급·카운트·내보내기를 한 줄로 압축하고 나머지는 접히는 서랍으로 ──
+// ── 리포트 요약 바: 얇은 한 줄(등급 · 위험 수 · 내보내기) + 접히는 서랍 ──
 // 리포트 본문이 상단 요약에 가리지 않도록:
-//   (1) 요약은 항상 얇은 한 줄(등급 · 루트/검증 카운트 · 내보내기)로 유지하고,
-//   (2) 본문을 스크롤하면 서랍(위험도 필터 · 바로가기 · 범례)이 자동으로 접히며,
-//   (3) [접기]/[펼치기] 로 직접 고정할 수도 있다. 맨 위로 돌아오면 자동 모드로 복귀.
-let summaryPinned = null;       // null=자동(스크롤 연동) · true=접힘 고정 · false=펼침 고정
+//   (1) 첫 줄은 항상 한 줄로 유지하고, 서랍(필터 · 바로가기 · 직접 확인 · 범례)은 접고 시작하며,
+//   (2) [자세히]로 펼치거나 [접기]로 접을 수 있고,
+//   (3) 펼친 채로 본문을 스크롤하면 자동으로 접힌다.
+let summaryPinned = true;        // 첫 화면은 접힘(리포트 본문 우선) · [자세히]로 펼침 고정
 let summaryTightWindow = false; // 창이 낮으면 위에서도 접힘 유지(본문 우선)
 const SUMMARY_COLLAPSE_AT = 48; // 이만큼 스크롤하면 서랍 자동 접힘(px)
 const SUMMARY_TIGHT_H = 420;    // 리포트 영역이 이보다 낮으면 접고 시작
@@ -1317,15 +1377,15 @@ function syncSummaryCollapse() {
   card.classList.toggle("collapsed", collapsed);
   const t = card.querySelector(".rs-toggle");
   if (t) {
-    t.textContent = collapsed ? "펼치기" : "접기";
+    t.textContent = collapsed ? "자세히" : "접기";
     t.setAttribute("aria-expanded", String(!collapsed));
   }
 }
 
-// 본문 스크롤 이벤트: 맨 위로 돌아오면 자동 모드로 복귀.
+// 본문 스크롤 이벤트: 펼친 채로 스크롤하면 자동으로 접어 본문 공간을 넓힌다.
 function onResultsScroll() {
   const body = $("resultsBody");
-  if (body && body.scrollTop <= 8) summaryPinned = null;
+  if (body && body.scrollTop > SUMMARY_COLLAPSE_AT && summaryPinned === false) summaryPinned = true;
   syncSummaryCollapse();
 }
 
@@ -1355,47 +1415,39 @@ function renderReportSummary(s, docs, segs) {
   const isDiag = s && s.diag;
   if (!isDiag || !docs.length) { top.classList.add("hidden"); top.innerHTML = ""; return; }
   const st = reportStats(statsDocs(docs));
-  const sevChip = (label, n, cls) =>
-    `<span class="rs-chip ${cls}" title="${label} 위험도 ${n}건"><b>${n}</b> ${label}</span>`;
   top.classList.remove("hidden");
   top.innerHTML = `
     <div class="rs-card">
       <div class="rs-topline">
-        <div class="rs-grade ${st.grade.cls}" title="검증 상태(실증·징후·가정)를 반영해 산정한 위험도 등급">
+        <div class="rs-grade ${st.grade.cls}" title="직접 확인한 정도를 반영한 위험도 등급">
           <span class="rs-letter">${st.grade.letter}</span>
-          <div class="rs-grade-txt"><b>${st.grade.label}</b><span>위험도 등급</span></div>
+          <div class="rs-grade-txt"><b>${st.grade.label}</b></div>
         </div>
         <div class="rs-head">
-          <div class="rs-title"><b>${st.roots}개</b> 공격 루트 발굴 <span class="rs-sub">· 실측 증거 반영</span><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
-          <div class="rs-chips">
-            ${sevChip("치명", st.sev["치명"], "c-crit")}
-            ${sevChip("높음", st.sev["높음"], "c-high")}
-            ${sevChip("중간", st.sev["중간"], "c-med")}
-            ${sevChip("낮음", st.sev["낮음"], "c-low")}
-          </div>
-        </div>
-        <div class="rs-verify" title="실측으로 어디까지 확인했는지 — 실증(초록) · 징후(노랑) · 가정(회색)">
-          <span class="rs-vtitle">검증</span>
-          <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 실증</span>
-          <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 징후</span>
-          <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 가정</span>
+          <div class="rs-title"><b>위험 ${st.roots}개 발견</b><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
         </div>
         <div class="rs-actions">
           <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
           <button id="rsPdf" class="rs-btn primary" title="리포트를 인쇄 대화상자에서 PDF로 저장">PDF</button>
           <button id="rsExport" class="rs-btn" title="리포트를 Markdown(.md) 파일로 저장">MD</button>
           <button id="rsExportHtml" class="rs-btn" title="리포트를 자체 완성형 HTML 파일로 저장">HTML</button>
-          <button id="rsToggle" class="rs-btn rs-toggle" aria-expanded="true" title="요약 접기/펼치기 — 접으면 리포트 본문이 더 넓게 보입니다">접기</button>
+          <button id="rsToggle" class="rs-btn rs-toggle" aria-expanded="false" title="필터·바로가기 펼치기/접기">자세히</button>
         </div>
       </div>
       <span id="rsExportStatus" class="rs-export-status"></span>
       <div class="rs-drawer">
         ${renderDiagNav(st, segs)}
+        <div class="rs-verify-row" title="직접 열어 확인한 정도 — 직접 확인(초록) · 일부 확인(노랑) · 추측(회색)">
+          <span class="rs-nav-label">직접 확인</span>
+          <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 직접 확인</span>
+          <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 일부 확인</span>
+          <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 추측</span>
+        </div>
         <div class="rs-legend">
           <span class="rs-legend-item"><span class="badge bx-crit">치명</span>위험도(치명→낮음)</span>
-          <span class="rs-legend-item"><span class="badge bx-proof">실증</span>실측 확인</span>
-          <span class="rs-legend-item"><span class="badge bx-sig">징후</span>부분 확인</span>
-          <span class="rs-legend-item"><span class="badge bx-assume">가정</span>추론(미확인)</span>
+          <span class="rs-legend-item"><span class="badge bx-proof">실증</span>직접 확인함</span>
+          <span class="rs-legend-item"><span class="badge bx-sig">징후</span>일부 확인</span>
+          <span class="rs-legend-item"><span class="badge bx-assume">가정</span>추측(미확인)</span>
         </div>
       </div>
     </div>`;
@@ -1433,18 +1485,19 @@ function renderDiagNav(st, segs) {
   const sevs = ["치명", "높음", "중간", "낮음"];
   const clsFor = { "치명": "crit", "높음": "high", "중간": "med", "낮음": "low" };
   const active = diagFilter;
-  const chip = (lbl, v, cls) => {
+  const chip = (lbl, v, cls, n) => {
     const on = v === "ALL" ? !active || !active.size : !!(active && active.has(v));
-    return `<button class="rs-nav-chip ${cls}${on ? " on" : ""}" data-f="${v}" title="${lbl} 루트만 보기">${lbl}</button>`;
+    const cnt = (n != null && v !== "ALL") ? ` <b>${n}</b>` : "";
+    return `<button class="rs-nav-chip ${cls}${on ? " on" : ""}" data-f="${v}" title="${lbl} 위험만 보기">${lbl}${cnt}</button>`;
   };
   const filteredCount = (segs || []).filter((it) => it.kind === "root").length;
   const filtered = !!(active && active.size);
   const rootCountTxt = filtered
     ? `${filteredCount}개 표시 · 전체 ${st.roots}개`
-    : `${st.roots}개 루트`;
+    : `위험 ${st.roots}개`;
   return `<div class="rs-nav"><span class="rs-nav-label">위험도</span>
      ${chip("전체", "ALL", "n-all")}
-     ${sevs.map((sv) => chip(sv, sv, "n-" + clsFor[sv])).join("")}
+     ${sevs.map((sv) => chip(sv, sv, "n-" + clsFor[sv], st.sev[sv])).join("")}
      ${filtered ? `<span class="rs-nav-note">필터 적용 중 — 같은 칩을 누르면 전체로 돌아옵니다</span>` : ""}
      <span class="rs-nav-sep"></span>
      ${renderJumpNav(segs)}
@@ -1457,9 +1510,9 @@ function renderJumpNav(segs) {
   if (!segs || segs.length < 3) return "";
   let rootNo = 0;
   const label = (it) => {
-    if (it.kind === "root") { rootNo++; return `루트 ${rootNo}`; }
+    if (it.kind === "root") { rootNo++; return `위험 ${rootNo}`; }
     if (it.kind === "prelude") return "요약";
-    if (it.kind === "tail") return "권고";
+    if (it.kind === "tail") return "막는 방법";
     return "결과";
   };
   const chips = segs
@@ -1693,7 +1746,7 @@ const RISK_CLS = { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med",
 function reportLabel(d) {
   const h1 = (d.text || "").match(/^#\s+(.*)$/m);
   if (h1) return h1[1].trim().slice(0, 60);
-  return d.report === "early" ? "의심진단리포트" : d.report === "final" ? "실사용진단리포트" : "결과";
+  return d.report === "early" ? "1차 리포트" : d.report === "final" ? "최종 리포트" : "결과";
 }
 
 function segmentDiag(docs) {
@@ -1706,13 +1759,13 @@ function segmentDiag(docs) {
     if (cur) { out.push({ kind: "root", title: cur.title, sev: cur.sev, text: cur.buf.join("\n") }); cur = null; }
   };
   const flushTail = () => {
-    if (tail.length) { out.push({ kind: "tail", title: "권고·실측 확인", sev: null, text: tail.join("\n") }); tail = []; }
+    if (tail.length) { out.push({ kind: "tail", title: "막는 방법 · 확인 내역", sev: null, text: tail.join("\n") }); tail = []; }
   };
   docs.forEach((d, di) => {
     if (di > 0) { // 새 리포트 시작 — 이전 리포트 카드 마감 + 구분 배너
       flushRoot();
       flushTail();
-      if (pre.length) { out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") }); pre = []; }
+      if (pre.length) { out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") }); pre = []; }
       out.push({ kind: "report", title: reportLabel(d), sev: null, text: "", seq: d.seq, ts: d.ts });
       cur = null; seenRoot = false;
     }
@@ -1720,7 +1773,7 @@ function segmentDiag(docs) {
       const isRoot = /^#{1,4}\s*루트\s*\d*\.?\s*/.test(raw.trim());
       // 루트 헤딩 → 새 루트 카드 시작
       if (isRoot) {
-        if (pre.length && !seenRoot) { out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") }); pre = []; }
+        if (pre.length && !seenRoot) { out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") }); pre = []; }
         flushRoot();
         seenRoot = true;
         const txt = raw.replace(/^#{1,4}\s*루트\s*\d*\.?\s*/, "").trim();
@@ -1741,7 +1794,7 @@ function segmentDiag(docs) {
   });
   flushRoot();
   flushTail();
-  if (pre.length) out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") });
+  if (pre.length) out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") });
   return out.filter((it) => it.text.trim() || it.kind === "report");
 }
 
@@ -1756,7 +1809,7 @@ function renderResults() {
   el.querySelectorAll("[data-sim]").forEach(simStop);
   if (!docs.length) {
     renderReportSummary(s, docs, null); // 결과 없음 → 요약도 감춘다
-    el.innerHTML = `<div class="placeholder">아직 표시할 결과가 없습니다.<br/>에이전트가 정리한 마크다운 결과가 여기에 렌더링되어 표시됩니다.</div>`;
+    el.innerHTML = `<div class="placeholder">아직 결과가 없습니다.<br/>진단이 끝나면 여기에 리포트가 표시됩니다.</div>`;
     return;
   }
 
@@ -1773,10 +1826,10 @@ function renderResults() {
   el.innerHTML = segs.map((it, i) => {
     const isRoot = it.kind === "root";
     const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
-    const tag = isRoot ? `<span class="md-kind root">루트</span>`
+    const tag = isRoot ? `<span class="md-kind root">발견</span>`
       : it.kind === "report" ? `<span class="md-kind doc">리포트</span>`
       : it.kind === "prelude" ? `<span class="md-kind pre">요약·범위</span>`
-      : it.kind === "tail" ? `<span class="md-kind tail">권고·실측</span>`
+      : it.kind === "tail" ? `<span class="md-kind tail">막는 방법</span>`
       : `<span class="md-kind doc">결과</span>`;
     const title = isRoot || it.kind === "report" ? esc(it.title || "") : (it.seq != null ? `#${it.seq}` : "");
     return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}" data-ix="${i}">
@@ -1831,9 +1884,9 @@ function diagFlowHtml(content) {
 
 /* 진단 필드 라인: 위험도/진입점/탈취 정보/공격 방법/영향/보완/검증 → 라벨+값 행 */
 const VERIFY_ST = [
-  ["실증", "bx-proof", "✅ 실증 — 실제 확인"],
-  ["징후", "bx-sig", "⚠️ 징후 — 부분 확인"],
-  ["가정", "bx-assume", "❓ 가정 — 설명 기반 추론"],
+  ["실증", "bx-proof", "직접 확인함"],
+  ["징후", "bx-sig", "일부만 확인"],
+  ["가정", "bx-assume", "추측 (직접 확인 못 함)"],
 ];
 function diagFieldHtml(label, content) {
   const l = label.trim();
@@ -1891,7 +1944,7 @@ function diagSimHtml(steps) {
     </li>`).join("");
   return `<div class="sim" data-sim data-cur="1" data-total="${steps.length}">
     <div class="sim-head">
-      <span class="sim-title">🎬 단계 시뮬레이션 — <b>이렇게 하면 → 이렇게 된다</b></span>
+      <span class="sim-title">단계별 미리보기 — <b>이렇게 하면 → 이렇게 된다</b></span>
       <span class="sim-ctl">
         <button class="sim-btn play" data-sim-act="play" title="전체 재생">▶ 재생</button>
         <button class="sim-btn" data-sim-act="step" title="다음 단계">+1 단계</button>
@@ -1901,7 +1954,7 @@ function diagSimHtml(steps) {
     </div>
     <div class="sim-track"><div class="sim-fill" style="width:${Math.round(100 / steps.length)}%"></div></div>
     <ol class="sim-steps">${rows}</ol>
-    <div class="sim-note">이것은 실제 공격이 아닌 <b>예측 시나리오 시뮬레이션</b>입니다 — 아래 <b>검증 상태</b>([실증]/[징후]/[가정])로 실측 여부를 함께 확인하세요.</div>
+    <div class="sim-note">이것은 실제 공격이 아니라 예상 과정을 보여주는 것입니다 — 아래 <b>검증 상태</b>([실증]/[징후]/[가정])에서 직접 확인 여부를 함께 보세요.</div>
   </div>`;
 }
 
@@ -2076,7 +2129,7 @@ function updateConnSummary() {
   el.innerHTML = `<span class="s-dot ${n ? "on" : ""}"></span>`
     + (n
       ? `연결됨 ${n}/${PROVIDER_CATALOG.length} — ${esc(names)}`
-      : `연결된 프로바이더 없음 (${PROVIDER_CATALOG.length}종 지원) — 아래에서 연결하세요`);
+      : `연결된 AI 모델 없음 (${PROVIDER_CATALOG.length}종 지원) — 아래에서 연결하세요`);
 }
 
 function openSettings() {
@@ -2151,7 +2204,7 @@ function renderAuth() {
 
   // 상태 필(pill)
   const allowList = a.allows || [];
-  if (a.yaml) setAuthPill("warn", "YAML 인가 파일");
+  if (a.yaml) setAuthPill("warn", "고급 설정 사용 중");
   else if (a.error) setAuthPill("err", "읽기 오류");
   else if (a.empty) setAuthPill("warn", "목록 비어 있음");
   else if (a.warn) setAuthPill("warn", "허용 0건");
@@ -2161,10 +2214,10 @@ function renderAuth() {
   const yamlWarn = $("authYamlWarn");
   if (a.yaml) {
     yamlWarn.classList.remove("hidden");
-    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>정식 YAML 인가 파일입니다.</b> IP 추가/제거는 이 파일을 편집하지 않습니다.<br/>⚙ 설정에서 auth 경로를 비우면 기본 IP 목록(<code>${esc(a.default_path || "~/.redcell/authorization.list")}</code>)을 관리합니다.</div>`;
+    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>고급 설정 파일(YAML)을 사용 중입니다.</b> 여기에서 추가·제거해도 이 파일은 바뀌지 않습니다.<br/>⚙ 설정에서 auth 경로를 비우면 기본 목록(<code>${esc(a.default_path || "~/.redcell/authorization.list")}</code>)을 관리합니다.</div>`;
   } else if (a.warn) {
     yamlWarn.classList.remove("hidden");
-    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>허용 대상이 없습니다.</b> 아래에서 IP를 추가하세요 — 추가하는 순간 인가된 대상이 됩니다.</div>`;
+    yamlWarn.innerHTML = `<svg class="ic ic-sm"><use href="#i-shield"/></svg><div><b>허용 대상이 없습니다.</b> 아래에서 주소를 추가하세요 — 추가하는 순간 점검할 수 있게 됩니다.</div>`;
   } else {
     yamlWarn.classList.add("hidden");
   }
@@ -2180,11 +2233,11 @@ function renderAuth() {
   // 메타 칩
   $("authMeta").innerHTML = [
     `<span class="auth-chip">유효기간 <b>${esc(a.until || "기본 +365일")}</b></span>`,
-    `<span class="auth-chip">허용 포트 <b>${a.ports && a.ports.length ? esc(a.ports.join(", ")) : "전체"}</b></span>`,
-    `<span class="auth-chip">RPS <b>10/s</b></span>`,
+    `<span class="auth-chip">점검 포트 <b>${a.ports && a.ports.length ? esc(a.ports.join(", ")) : "전체"}</b></span>`,
+    `<span class="auth-chip">속도 제한 <b>초당 10회</b></span>`,
   ].join("");
 
-  if (a.empty) showAuthError("인가 목록이 비어 있습니다 — 아래에서 IP를 추가하세요. 목록에 들어간 대상만 인가됩니다.");
+  if (a.empty) showAuthError("점검 대상이 비어 있습니다 — 아래에서 주소를 추가하세요. 등록된 곳만 점검합니다.");
   else if (a.error) showAuthError(a.error);
 }
 
@@ -2223,7 +2276,7 @@ async function addAuth() {
 }
 
 async function removeAuth(target) {
-  if (!confirm(`"${target}" 을(를) 인가 목록에서 제거할까요?`)) return;
+  if (!confirm(`"${target}" 을(를) 점검 대상에서 제외할까요?`)) return;
   const li = findAuthItem(target);
   if (li) {
     li.classList.add("removing"); // 페이드아웃 후 반영
@@ -2261,7 +2314,7 @@ function renderDashboard() {
   if (!body) return;
   const ordered = [...sessions].sort((a, b) => (String(b.updated_at || "").localeCompare(String(a.updated_at || ""))));
   if (!ordered.length) {
-    body.innerHTML = `<div class="dash-empty">아직 세션이 없습니다 — [새 세션]으로 시작하세요.</div>`;
+    body.innerHTML = `<div class="dash-empty">아직 기록이 없습니다 — 새로 시작해 보세요.</div>`;
     return;
   }
   const agg = ordered.map(dashSessionStats).reduce((a, st) => {
@@ -2280,10 +2333,10 @@ function renderDashboard() {
   const worst = agg.worst || { letter: "·", label: "—", cls: "g-none" };
   body.innerHTML = `
     <div class="dash-summary">
-      <div class="ds-stat"><b>${agg.total}</b><span>세션</span></div>
+      <div class="ds-stat"><b>${agg.total}</b><span>작업</span></div>
       <div class="ds-stat"><b>${agg.diag}</b><span>진단 완료</span></div>
-      <div class="ds-stat"><b>${agg.roots}</b><span>발굴 루트</span></div>
-      <div class="ds-grade ${worst.cls}"><b>${worst.letter}</b><span>최악 등급</span></div>
+      <div class="ds-stat"><b>${agg.roots}</b><span>발견한 위험</span></div>
+      <div class="ds-grade ${worst.cls}"><b>${worst.letter}</b><span>가장 낮은 등급</span></div>
       <div class="ds-crits">
         <span class="dc crit">치명 ${agg.sev["치명"]}</span><span class="dc high">높음 ${agg.sev["높음"]}</span>
         <span class="dc med">중간 ${agg.sev["중간"]}</span><span class="dc low">낮음 ${agg.sev["낮음"]}</span>
@@ -2299,7 +2352,7 @@ function renderDashboard() {
         <div class="dash-grade ${st.grade.cls}"><b>${st.grade.letter}</b><span>${st.grade.label}</span></div>
         <div class="dash-main">
           <div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
-          <div class="dash-meta">루트 ${st.roots}개 · ${esc((s.name || "").trim() || "진단 세션")}</div>
+          <div class="dash-meta">위험 ${st.roots}개 · ${esc((s.name || "").trim() || "진단")}</div>
           <div class="dash-chips">
             <span class="dc crit">치명 ${st.sev["치명"]}</span><span class="dc high">높음 ${st.sev["높음"]}</span>
             <span class="dc med">중간 ${st.sev["중간"]}</span><span class="dc low">낮음 ${st.sev["낮음"]}</span>
@@ -2310,11 +2363,11 @@ function renderDashboard() {
       card = `
         <div class="dash-grade g-none"><b>·</b><span>진단 중</span></div>
         <div class="dash-main"><div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
-        <div class="dash-meta">진단 리포트 미완성 · ${esc((s.goal && s.goal.slice(0,60)) || "대기")}</div></div>`;
+        <div class="dash-meta">리포트 만드는 중 · ${esc((s.goal && s.goal.slice(0,60)) || "대기")}</div></div>`;
     } else {
       card = `
         <div class="dash-grade g-none"><b>◇</b><span>작업</span></div>
-        <div class="dash-main"><div class="dash-title"><b>${esc(st.target || "(대상 미지정)")}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
+        <div class="dash-main"><div class="dash-title"><b>${esc(st.target || "(주소 없음)")}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
         <div class="dash-meta">${esc(st.goal)}</div></div>`;
     }
     return `<article class="dash-card" data-session="${s.id}">${card}
@@ -2367,9 +2420,9 @@ function auditEntries() {
     const evs = eventsOf(s);
     for (const e of evs) {
       if (e.type === "authorized") {
-        out.push({ kind: "auth", sev: "ok", desc: e.text || `대상 ${target} 인가 확인`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
+        out.push({ kind: "auth", sev: "ok", desc: e.text || `${target} 점검 대상 확인`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
       } else if (e.type === "blocked") {
-        out.push({ kind: "block", sev: "block", desc: e.text || `${e.tool || "액션"} — 인가 범위 밖 액션 차단`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
+        out.push({ kind: "block", sev: "block", desc: e.text || `${toolLabel(e.tool || "")} — 허용 범위 밖이라 멈춤`, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
       } else if (e.type === "finding" && e.finding) {
         out.push({ kind: "finding", sev: e.finding.severity || "info", desc: e.finding.title, target, session: s.name || "(무제)", ts: e._ts != null ? e._ts : s.created_at, id: s.id });
       }
@@ -2392,7 +2445,7 @@ function renderAudit() {
   const list = entries.filter((e) => auditFilter === "all" || e.kind === auditFilter);
   const body = $("auditList");
   if (!list.length) {
-    body.innerHTML = `<div class="audit-empty">아직 감사 기록이 없습니다 — 진단을 실행하면 인가·발견·차단 이력이 쌓입니다.</div>`;
+    body.innerHTML = `<div class="audit-empty">아직 기록이 없습니다 — 진단을 실행하면 대상 등록·발견·차단 기록이 쌓입니다.</div>`;
     return;
   }
   body.innerHTML = list.map((e) => {
@@ -2442,6 +2495,21 @@ function wire() {
   });
   $("diagBtn").onclick = onDiagButton;
   $("dangerBtn").onclick = onDangerButton;
+  // 진단 진행 방식 팝오버: 버튼 토글 · 바깥 클릭/Esc로 닫기
+  const infoBtn = $("diagInfoBtn"), infoPop = $("diagInfoPop");
+  if (infoBtn && infoPop) {
+    const setInfo = (open) => {
+      infoPop.classList.toggle("hidden", !open);
+      infoBtn.setAttribute("aria-expanded", String(open));
+      infoBtn.classList.toggle("open", open);
+    };
+    infoBtn.onclick = (e) => { e.stopPropagation(); setInfo(infoPop.classList.contains("hidden")); };
+    infoPop.addEventListener("pointerdown", (e) => e.stopPropagation());
+    document.addEventListener("pointerdown", (e) => {
+      if (!infoPop.classList.contains("hidden") && !e.target.closest(".diag-info-wrap")) setInfo(false);
+    });
+    document.addEventListener("keydown", (e) => { if (e.key === "Escape") setInfo(false); });
+  }
   $("dangerCancel").onclick = () => { $("dangerModal").classList.add("hidden"); cancelDangerPending(true); };
   $("dangerAck").addEventListener("change", (e) => { $("dangerConfirm").disabled = !e.target.checked; });
   $("dangerConfirm").onclick = confirmDanger;
@@ -2492,10 +2560,10 @@ function wire() {
       e.preventDefault();
       const goal = ns.dataset.goal || "";
       const s = cur();
-      if (s && !s.host) { alert("먼저 위에 대상 host/URL 을 입력하세요."); return; }
+      if (s && !s.host) { alert("먼저 위에 주소를 입력하세요."); return; }
       if (!activeProvider()) { showProviderModal(); return; }
       const ci = $("chatInput");
-      if (ci) ci.value = goal ? `이 보완 조치를 진행해줘: ${goal}` : goal;
+      if (ci) ci.value = goal ? `이 문제를 고쳐줘: ${goal}` : goal;
       sendChat();
       return;
     }
@@ -2524,7 +2592,7 @@ async function listenEngagement() {
     renderTabs();
     if (sessionId === activeId) setBadge(status);
     if (status === "done" || status === "error") onFinished(sessionId, status);
-    if (status === "stopped") pushAssistant(sessionId, "실행을 중지했습니다. '재실행'을 누르면 현재 목표로 다시 시작합니다.");
+    if (status === "stopped") pushAssistant(sessionId, "실행을 중지했습니다. 다시 시작하려면 진단 시작을 누르세요.");
   });
 }
 
@@ -2543,11 +2611,11 @@ function syncObProvider() {
   const sel = $("obProvider"); if (!sel) return;
   const connected = PROVIDER_CATALOG.filter(providerConnected);
   const prev = sel.value || settings.default_provider || "";
-  sel.innerHTML = `<option value="">— provider 선택 —</option>`
+  sel.innerHTML = `<option value="">— AI 모델 선택 —</option>`
     + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
   if (prev && connected.some((p) => p.name === prev)) sel.value = prev;
   if (!connected.length) {
-    sel.insertAdjacentHTML("beforeend", `<option value="__setup">⚙ 프로바이더 연결하기…</option>`);
+    sel.insertAdjacentHTML("beforeend", `<option value="__setup">⚙ AI 모델 연결하기…</option>`);
   }
 }
 async function obStart() {
@@ -2558,7 +2626,7 @@ async function obStart() {
   let prov = $("obProvider").value || settings.default_provider || "";
   if (!prov || prov === "__setup") { showProviderModal(); return; }
   const eng = $("obEngine").value === "prime" ? "prime" : "";
-  if (eng === "prime" && enginesInfo && !primeAvailable()) { obError("prime-agent 바이너리가 설치돼 있지 않습니다. pi 엔진을 선택하거나 prime-agent를 설치하세요."); return; }
+  if (eng === "prime" && enginesInfo && !primeAvailable()) { obError("prime-agent가 설치돼 있지 않습니다. pi를 선택하거나 prime-agent를 먼저 설치하세요."); return; }
   obError(null);
   const port = norm.port ? parseInt(norm.port, 10) : null;
   const s = await invoke("create_session", {
@@ -2598,7 +2666,7 @@ function syncEngineSelects() {
     opt.disabled = !ok;
     opt.textContent = ok ? "prime-agent" : "prime-agent (미설치)";
     if (!ok && sel.value === "prime") sel.value = "pi";
-    sel.title = ok ? "실행 엔진 — pi(확장 게이트) 또는 prime-agent(스킬+킬게이트)" : "prime-agent 미설치 — pi 엔진 사용 중";
+    sel.title = ok ? "진단 엔진 — 잘 모르면 pi 그대로 두세요" : "prime-agent 미설치 — pi 엔진 사용 중";
   });
 }
 async function refreshEngines() {

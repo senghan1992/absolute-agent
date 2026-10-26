@@ -48,6 +48,7 @@
         <symbol id="i-ban" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M5.5 5.5l13 13"/></symbol>
         <symbol id="i-check" viewBox="0 0 24 24"><path d="M5 12.5l4.5 4.5L19 7"/></symbol>
         <symbol id="i-alert" viewBox="0 0 24 24"><path d="M12 3 2.5 20h19z"/><path d="M12 10v4.5M12 17.5v.01"/></symbol>
+        <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 7.5v.01"/></symbol>
       </defs>
     </svg>
 
@@ -55,16 +56,16 @@
     <header id="topbar">
       <div class="brand">
         <span class="mark"><svg class="ic logo-svg"><use href="#i-logo"/></svg></span>
-        RedCell<span class="brand-sub">/ prime-agent 셸</span>
+        RedCell<span class="brand-sub">보안 진단</span>
       </div>
       <nav id="tabs" class="tabs"></nav>
       <div class="top-actions">
         <button id="themeBtn" class="btn btn-icon" title="테마 전환" aria-label="라이트/다크 테마 전환">
           <svg class="ic" id="themeIcon"><use href="#i-moon"/></svg>
         </button>
-        <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>세션</button>
-        <button id="historyBtn" class="btn btn-icon" title="전체 이력 — 진단 요약 · 감사 로그" aria-label="전체 이력 — 진단 요약 · 감사 로그"><svg class="ic"><use href="#i-grid"/></svg></button>
-        <button id="scopeBtn" class="btn btn-icon" title="인가 대상 관리" aria-label="인가 대상 관리"><svg class="ic"><use href="#i-shield"/></svg></button>
+        <button id="newSessionBtn" class="btn btn-primary"><svg class="ic"><use href="#i-plus"/></svg>새 작업</button>
+        <button id="historyBtn" class="btn btn-icon" title="지난 진단 기록" aria-label="지난 진단 기록"><svg class="ic"><use href="#i-grid"/></svg></button>
+        <button id="scopeBtn" class="btn btn-icon" title="점검 대상 관리" aria-label="점검 대상 관리"><svg class="ic"><use href="#i-shield"/></svg></button>
         <button id="settingsBtn" class="btn btn-icon" title="설정" aria-label="설정"><svg class="ic"><use href="#i-gear"/></svg></button>
       </div>
     </header>
@@ -75,41 +76,50 @@
         <!-- 세션 헤더: 1행 대상 지정 · 2행 작업 선택 (진단이 기본 액션) -->
         <div class="session-header">
           <div class="sh-row sh-target-row">
-            <input id="shName" class="sh-name" placeholder="세션 이름" spellcheck="false" />
+            <input id="shName" class="sh-name" placeholder="이름 (예: 우리 쇼핑몰)" spellcheck="false" />
             <div class="sh-target">
               <span class="tgt-ico"><svg class="ic"><use href="#i-crosshair"/></svg></span>
-              <span class="tgt-label">대상</span>
-              <input id="shHost" class="sh-input sh-host" placeholder="host / URL — 실행 시 인가 자동 추가" spellcheck="false" />
+              <span class="tgt-label">주소</span>
+              <input id="shHost" class="sh-input sh-host" placeholder="예: https://우리사이트.com" spellcheck="false" />
               <span class="tgt-sep">:</span>
-              <input id="shPort" class="sh-input sh-port" placeholder="port" spellcheck="false" />
+              <input id="shPort" class="sh-input sh-port" placeholder="포트" spellcheck="false" />
             </div>
-            <select id="shProvider" class="sh-input sh-provider" title="LLM 프로바이더 (custom 등 — ⚙ 설정에서 키/모델 관리)" aria-label="LLM 프로바이더">
-              <option value="">— provider 선택 —</option>
+            <select id="shProvider" class="sh-input sh-provider" title="AI 모델 — ⚙ 설정에서 연결 관리" aria-label="AI 모델">
+              <option value="">— AI 모델 선택 —</option>
             </select>
-            <select id="shEngine" class="sh-input sh-engine" title="실행 엔진 — pi(확장 게이트) 또는 prime-agent(스킬+킬게이트)" aria-label="실행 엔진">
+            <select id="shEngine" class="sh-input sh-engine" title="진단 엔진 — 잘 모르면 pi 그대로 두세요" aria-label="진단 엔진">
               <option value="pi">pi</option>
               <option value="prime">prime-agent</option>
             </select>
-            <div class="sh-target sh-cookie" title="인증 스윕용 세션 쿠키(선택) — 로그인 후 브라우저에서 복사한 Cookie 값을 붙여넣으면 인증 영역까지 스윕하고 로그인 폼 injection 시도 결과를 리포트에 포함합니다. 비밀번호 저장·자동 로그인은 하지 않습니다.">
+            <div class="sh-target sh-cookie" title="로그인이 필요한 곳까지 점검할 때 사용합니다(선택) — 브라우저에서 복사한 Cookie 값을 붙여넣으세요. 비밀번호를 저장하거나 자동으로 로그인하지 않습니다.">
               <span class="tgt-ico"><svg class="ic"><use href="#i-key"/></svg></span>
               <span class="tgt-label">쿠키</span>
-              <input id="shCookie" type="password" class="sh-input sh-cookie-input" placeholder="세션 쿠키 (선택) — name=value; ..." spellcheck="false" autocomplete="off" />
+              <input id="shCookie" type="password" class="sh-input sh-cookie-input" placeholder="로그인 쿠키 (선택)" spellcheck="false" autocomplete="off" />
             </div>
             <span id="statusBadge" class="badge badge-idle">대기</span>
           </div>
           <div class="sh-row sh-action-row">
-            <span class="sh-action-hint">진단은 원클릭 · 그 외 작업은 오른쪽 <b>Agent</b>에 지시</span>
-            <button id="diagBtn" class="btn btn-diag btn-cmd" title="진단 시작 — 대상 주소만 넣으면 보안 진단 리포트 자동 생성">
+            <button id="diagBtn" class="btn btn-diag btn-cmd" title="진단 시작 — 주소만 넣으면 결과 리포트를 자동으로 만듭니다">
               <svg class="ic" id="diagIcon"><use href="#i-crosshair"/></svg>
               <span class="cmd-txt" id="diagLabel">진단 시작</span>
             </button>
-            <button id="dangerBtn" class="btn btn-danger btn-cmd" title="파괴적 진단 — 기본자격·IDOR 인접·쓰기 검증 (모달 동의 필요, 세션별)">
+            <button id="dangerBtn" class="btn btn-danger btn-cmd" title="위험 검사 — 사이트에 영향을 줄 수 있어 꺼져 있습니다 (자세한 설명 보기)">
               <svg class="ic"><use href="#i-alert"/></svg>
-              <span class="cmd-txt" id="dangerLabel">파괴적: 끔</span>
+              <span class="cmd-txt" id="dangerLabel">위험 검사: 꺼짐</span>
             </button>
-            <span class="cmd-note">
-              <b>진단 시작</b> = P0 자동 스윕(수백 프로브) + 5개 분야(정찰·주입·인증·노출·로직) 동시 심층 진단 후 시나리오 리포트 자동 생성 · 그 외엔 오른쪽 <b>Agent</b> 패널에 하고 싶은 작업을 지시해 보세요
-            </span>
+            <div class="diag-info-wrap">
+              <button id="diagInfoBtn" class="diag-info-btn" aria-expanded="false" aria-controls="diagInfoPop" title="진단이 어떻게 진행되는지 보기">
+                <svg class="ic"><use href="#i-info"/></svg>어떻게 진행되나요?
+              </button>
+              <div id="diagInfoPop" class="diag-info-pop hidden" role="dialog" aria-label="진단 진행 방식">
+                <ol>
+                  <li><b>기본 점검</b><span>수백 가지 기본 항목을 자동으로 훑어봅니다</span></li>
+                  <li><b>정밀 진단</b><span>구조·입력값·로그인·정보 노출·기능 오용, 다섯 가지를 동시에 깊이 봅니다</span></li>
+                  <li><b>결과 리포트</b><span>뚫리는 과정·증거·막는 방법을 정리해 드립니다</span></li>
+                </ol>
+                <p>진단은 이 버튼 하나로 끝납니다. 다른 작업은 오른쪽 <b>AI 도우미</b>에게 말씀하세요.</p>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -124,8 +134,8 @@
 
         <!-- 서브뷰: 라이브(pi 터미널) / 결과(Markdown 렌더) -->
         <div class="subtabs">
-          <button class="subtab active" data-view="live">라이브</button>
-          <button class="subtab" data-view="results">결과<span class="count" id="resultsCount" style="display:none">0</span></button>
+          <button class="subtab active" data-view="live">진행 상황</button>
+          <button class="subtab" data-view="results">결과 리포트<span class="count" id="resultsCount" style="display:none">0</span></button>
         </div>
         <div id="view-live" class="view active live">
           <div id="workerBar" class="worker-bar hidden"></div>
@@ -134,19 +144,19 @@
               <thead>
                 <tr>
                   <th class="c-seq">#</th>
-                  <th class="c-time">time</th>
-                  <th class="c-phase">phase</th>
-                  <th class="c-tool">tool</th>
-                  <th class="c-msg">event</th>
-                  <th class="c-status">status</th>
+                  <th class="c-time">시간</th>
+                  <th class="c-phase">단계</th>
+                  <th class="c-tool">도구</th>
+                  <th class="c-msg">내용</th>
+                  <th class="c-status">상태</th>
                 </tr>
               </thead>
               <tbody id="capBody"></tbody>
             </table>
-            <div id="capEmpty" class="placeholder">대기 중 — 오른쪽 에이전트에게 목표를 지시하면 캡처가 시작됩니다.</div>
+            <div id="capEmpty" class="placeholder">대기 중 — 오른쪽 AI 도우미에게 말씀하시면 기록이 시작됩니다.</div>
           </div>
           <div id="detail" class="detail">
-            <div class="detail-empty">행을 선택하면 상세가 표시됩니다.</div>
+            <div class="detail-empty">항목을 선택하면 자세한 내용이 표시됩니다.</div>
           </div>
           <!-- prime-agent(pi) CLI 화면 — 터미널처럼 스트리밍 -->
           <div id="piConsole" class="pi-console hidden">
@@ -164,15 +174,15 @@
       <!-- 오른쪽: 에이전트 패널 -->
       <aside id="agentPanel" class="panel">
         <div class="agent-head">
-          <span class="agent-title"><span class="agent-orb"></span>Agent</span>
+          <span class="agent-title"><span class="agent-orb"></span>AI 도우미</span>
           <span id="agentState" class="agent-state">대기</span>
         </div>
         <div id="chatMessages" class="chat-messages"></div>
         <div class="composer">
-          <textarea id="chatInput" rows="3" placeholder="prime-agent 에 지시를 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
+          <textarea id="chatInput" rows="3" placeholder="하고 싶은 일을 입력하세요  (Enter 전송 · Shift+Enter 줄바꿈)"></textarea>
           <div class="composer-row">
-            <span class="composer-hint">인가된 scope 안에서만 실행됩니다</span>
-            <button id="chatSend" class="btn btn-primary">지시<svg class="ic"><use href="#i-send"/></svg></button>
+            <span class="composer-hint">등록된 주소에만 실행됩니다</span>
+            <button id="chatSend" class="btn btn-primary">보내기<svg class="ic"><use href="#i-send"/></svg></button>
           </div>
         </div>
         <div id="providerHint" class="provider-hint"></div>
@@ -187,26 +197,26 @@
           <span class="hero-brand-tx">RedCell <em>Security Diagnosis Console</em></span>
         </div>
         <h1>URL 하나면, 보안 진단 리포트가 나옵니다</h1>
-        <p class="hero-sub">P0 자동 스윕이 수백 가지 프로브로 빈틈을 쓸어 담은 뒤, 5개 분야 전문가 에이전트가 동시에 파고들어 공격 시나리오·증거·막는 방법까지 정리합니다. 해킹을 몰라도 읽히는 시니어 멘토 스타일 리포트.</p>
+        <p class="hero-sub">주소를 입력하면 수백 가지 기본 항목을 자동으로 점검한 뒤, 다섯 가지 관점에서 동시에 깊이 살펴보고 뚫리는 과정·증거·막는 방법까지 정리해 드립니다. 보안 지식이 없어도 읽을 수 있는 리포트.</p>
         <div class="hero-form">
-          <input id="obUrl" class="hero-url" placeholder="https://example.com — 진단할 URL" spellcheck="false" autocomplete="off" />
-          <select id="obProvider" class="hero-provider" title="LLM 프로바이더" aria-label="LLM 프로바이더"></select>
-          <select id="obEngine" class="hero-engine" title="실행 엔진 — pi 또는 prime-agent" aria-label="실행 엔진">
+          <input id="obUrl" class="hero-url" placeholder="진단할 주소 — 예: https://example.com" spellcheck="false" autocomplete="off" />
+          <select id="obProvider" class="hero-provider" title="AI 모델" aria-label="AI 모델"></select>
+          <select id="obEngine" class="hero-engine" title="진단 엔진 — 잘 모르면 pi 그대로 두세요" aria-label="진단 엔진">
             <option value="pi">pi</option>
             <option value="prime">prime-agent</option>
           </select>
-          <button id="obDiag" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-crosshair"/></svg>심층 진단 시작</button>
+          <button id="obDiag" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-crosshair"/></svg>진단 시작</button>
         </div>
         <div id="obError" class="hero-error hidden"></div>
         <div id="obEngines" class="hero-engines"></div>
         <ol class="hero-steps">
-          <li><b>1</b><div><strong>URL 입력</strong><span>대상은 자동으로 인가 목록에 등록</span></div></li>
-          <li><b>2</b><div><strong>스윕+5개 분야 동시 진단</strong><span>수백 프로브 선행 후 정찰·주입·인증·노출·로직 병렬 수행</span></div></li>
-          <li><b>3</b><div><strong>시나리오 리포트</strong><span>공격 흐름·증거·보완책을 한눈에</span></div></li>
+          <li><b>1</b><div><strong>주소 입력</strong><span>입력한 주소는 자동으로 점검 대상에 등록</span></div></li>
+          <li><b>2</b><div><strong>자동 점검 + 정밀 진단</strong><span>기본 점검 후 다섯 분야를 동시에 깊이 진단</span></div></li>
+          <li><b>3</b><div><strong>결과 리포트</strong><span>뚫리는 과정·증거·막는 방법을 한눈에</span></div></li>
         </ol>
         <div class="hero-foot">
-          <span class="hero-note">모든 진단은 비파괴 실측이며 인가된 대상에만 수행됩니다</span>
-          <button id="obSkip" class="btn btn-ghost">직접 세션 만들기</button>
+          <span class="hero-note">모든 검사는 사이트를 변경하지 않는 안전한 방식으로 진행됩니다</span>
+          <button id="obSkip" class="btn btn-ghost">직접 시작하기</button>
         </div>
       </div>
     </div>
@@ -215,23 +225,23 @@
     <div id="emptyState" class="empty-state hidden">
       <div class="empty-card">
         <span class="empty-mark"><svg class="ic logo-svg"><use href="#i-logo"/></svg></span>
-        <h2>세션을 시작하세요</h2>
-        <p>인가된 대상 하나로 오퍼레이션을 엽니다.<br />모든 액션은 <code>authorization.yaml</code> scope 안에서만 실행됩니다.</p>
-        <button id="emptyNewBtn" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-plus"/></svg>새 세션 만들기</button>
+        <h2>무엇을 점검할까요?</h2>
+        <p>주소를 입력하고 진단 시작만 누르세요.<br />등록된 주소에만 안전하게 실행됩니다.</p>
+        <button id="emptyNewBtn" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-plus"/></svg>새로 시작하기</button>
       </div>
     </div>
 
-    <!-- 전체 이력: 진단 요약(모아보기) + 감사 로그 탭 -->
-    <div id="historyModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="전체 이력">
+    <!-- 지난 기록: 진단 요약(모아보기) + 활동 기록 탭 -->
+    <div id="historyModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="지난 기록">
       <div class="modal-card hist-card">
         <header class="s-head">
           <div>
-            <h3>전체 이력</h3>
-            <div class="s-sub">세션·대상별 진단 요약과 보안 활동 이력을 한눈에</div>
+            <h3>지난 기록</h3>
+            <div class="s-sub">주소별 진단 결과와 활동 기록을 한눈에</div>
           </div>
-          <div class="hist-tabs" role="tablist" aria-label="이력 보기">
+          <div class="hist-tabs" role="tablist" aria-label="기록 보기">
             <button class="htab active" data-tab="summary" role="tab" aria-selected="true">진단 요약</button>
-            <button class="htab" data-tab="audit" role="tab" aria-selected="false">감사 로그</button>
+            <button class="htab" data-tab="audit" role="tab" aria-selected="false">활동 기록</button>
           </div>
           <button id="histClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
         </header>
@@ -240,15 +250,15 @@
         </div>
         <div id="histPaneAudit" class="hist-pane hidden">
           <div class="audit-summary" id="auditSummary">
-            <div class="as-tile"><b id="auAll">0</b><span>전체 이벤트</span></div>
-            <div class="as-tile ok"><b id="auAuth">0</b><span>인가</span></div>
+            <div class="as-tile"><b id="auAll">0</b><span>전체 기록</span></div>
+            <div class="as-tile ok"><b id="auAuth">0</b><span>대상 등록</span></div>
             <div class="as-tile block"><b id="auBlock">0</b><span>차단</span></div>
             <div class="as-tile find"><b id="auFind">0</b><span>발견</span></div>
             <div class="as-tile diag"><b id="auDiag">0</b><span>진단 완료</span></div>
           </div>
-          <div class="audit-filters" id="auditFilters" role="tablist" aria-label="감사 로그 필터">
+          <div class="audit-filters" id="auditFilters" role="tablist" aria-label="활동 기록 필터">
             <button class="af-chip active" data-f="all">전체</button>
-            <button class="af-chip" data-f="auth">인가</button>
+            <button class="af-chip" data-f="auth">대상 등록</button>
             <button class="af-chip" data-f="block">차단</button>
             <button class="af-chip" data-f="finding">발견</button>
             <button class="af-chip" data-f="diag">진단</button>
@@ -279,11 +289,11 @@
             </label>
             <label class="fld">authorization.yaml 경로 <span class="lbl-dim">(선택)</span>
               <input id="setAuthPath" class="sh-input mono" placeholder="config/authorization.yaml" spellcheck="false" />
-              <small class="fld-note">비우면 간단 IP 목록(<code style="font-size:inherit">~/.redcell/authorization.list</code>)을 인가로 사용합니다</small>
+              <small class="fld-note">비우면 기본 점검 대상 목록(<code style="font-size:inherit">~/.redcell/authorization.list</code>)을 사용합니다</small>
             </label>
             <div class="fld">진단 엔진
               <div id="engineStatus" class="engine-status"><span class="eng-dim">확인 중…</span></div>
-              <small class="fld-note">pi-coding-agent가 주 엔진입니다. prime-agent(Rust 하네스)가 설치돼 있으면 함께 표시됩니다.</small>
+              <small class="fld-note">진단은 pi 엔진으로 실행됩니다. prime-agent가 설치돼 있으면 함께 표시됩니다.</small>
             </div>
           </div>
 
@@ -291,11 +301,11 @@
             <div class="s-group-title">모델 연결 <span class="lbl-dim">— 카드를 펼쳐 연결</span></div>
             <div class="s-howto">
               <svg class="ic"><use href="#i-shield"/></svg>
-              <span>API 키는 <b>이 PC</b>에만 보관되고, 실행할 때 자동으로 주입됩니다.</span>
+              <span>API 키는 <b>이 PC</b>에만 보관되고, 실행할 때 자동으로 입력됩니다.</span>
             </div>
             <div class="s-steps"><b>custom</b>(임의 OpenAI 호환 엔드포인트)은 맨 위 카드. 순서: 카드 펼치기 <span class="arr">→</span> 키·Base URL·모델 입력 <span class="arr">→</span> <b>연결 테스트</b> <span class="arr">→</span> <b>연결 저장</b></div>
             <div id="providerCards" class="provider-cards"></div>
-            <label class="fld">새 세션 기본 프로바이더
+            <label class="fld">새 작업의 기본 AI 모델
               <select id="setProviderDefault" class="sh-input"></select>
             </label>
           </div>
@@ -311,12 +321,12 @@
       </div>
     </div>
 
-    <!-- 프로바이더 미설정 안내 모달 -->
+    <!-- AI 모델 미연결 안내 모달 -->
     <div id="providerModal" class="modal hidden">
       <div class="modal-card">
-        <h3>프로바이더 설정 필요</h3>
-        <p style="color:var(--muted); font-size:12.5px; line-height:1.6;">에이전트는 LLM 추론으로 공격 루트를 생성하고 판단합니다(&ldquo;redcell 모듈 + prime-agent 방식&rdquo;).<br/>분석을 시작하려면 먼저 프로바이더를 연결해야 합니다.</p>
-        <p style="color:var(--faint); font-size:11.5px; line-height:1.6;">설정(⚙) → <b>모델 연결</b> 에서 사용할 프로바이더 카드를 펼쳐 API 키를 입력하고 <b>[연결 저장]</b> 하세요.<br/>연결이 확인되면 상단 드롭다운에 나타나고 즉시 사용할 수 있습니다.</p>
+        <h3>AI 모델 연결이 필요해요</h3>
+        <p style="color:var(--muted); font-size:12.5px; line-height:1.6;">진단은 AI가 분석합니다.<br/>시작하려면 먼저 사용할 AI 모델을 연결해야 합니다.</p>
+        <p style="color:var(--faint); font-size:11.5px; line-height:1.6;">설정(⚙) → <b>모델 연결</b>에서 사용할 카드를 펼쳐 API 키를 입력하고 <b>[연결 저장]</b>을 누르세요.<br/>연결되면 위 선택 목록에 나타나 바로 사용할 수 있습니다.</p>
         <div class="modal-actions">
           <button id="providerClose" class="btn btn-ghost">닫기</button>
           <button id="providerGoto" class="btn btn-primary">설정 열기 (⚙)</button>
@@ -324,26 +334,26 @@
       </div>
     </div>
 
-    <!-- 파괴적 진단 동의 모달 (P0 고정 목록 + 동적 위험 평가 공용) -->
-    <div id="dangerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="파괴적 진단 동의">
+    <!-- 위험 검사 동의 모달 (고정 목록 + 동적 위험 평가 공용) -->
+    <div id="dangerModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="위험 검사 동의">
       <div class="modal-card danger-card">
-        <h3 id="dangerTitle">파괴적 진단 동의</h3>
-        <p class="danger-target">대상: <code id="dangerTarget">—</code></p>
+        <h3 id="dangerTitle">위험 검사 동의</h3>
+        <p class="danger-target">주소: <code id="dangerTarget">—</code></p>
         <div id="dangerStatic">
-          <p style="color:var(--muted); font-size:12.5px; line-height:1.6;">아래 프로브는 대상에 <b>실제 영향</b>을 줄 수 있어 기본적으로 꺼져 있습니다. 동의하면 <b>이 세션의 다음 진단부터</b> 실행됩니다.</p>
+          <p style="color:var(--muted); font-size:12.5px; line-height:1.6;">아래 검사는 사이트에 <b>실제 영향</b>을 줄 수 있어 기본적으로 꺼져 있습니다. 동의하면 <b>이번 작업의 다음 진단부터</b> 실행됩니다.</p>
           <ul class="danger-list">
-            <li><b>기본자격 대입</b> — 흔한 초기 자격 5종으로 로그인 시도 <span class="danger-risk">위험: 계정 잠금·로그 흔적 (잠금 신호 즉시 중단)</span></li>
-            <li><b>IDOR 인접 확인</b> — 본인 세션으로 인접 번호 리소스 조회 <span class="danger-risk">위험: 타인 데이터 수신 (증거는 마스킹 저장)</span></li>
-            <li><b>쓰기 검증</b> — 무해 마커 파일 1건 생성 후 삭제 시도 <span class="danger-risk">위험: 잔여 파일 가능 (실패 시 경로 보고)</span></li>
+            <li><b>흔한 초기 비밀번호로 로그인 시도</b> — admin 같은 기본 계정 5종을 넣어 봅니다 <span class="danger-risk">주의: 계정이 잠기거나 기록이 남을 수 있어요 (잠금 낌새가 보이면 즉시 중단)</span></li>
+            <li><b>옆 번호 정보가 보이는지 확인</b> — 내 로그인으로 옆 번호 게시물·주문을 열어 봅니다 <span class="danger-risk">주의: 남의 정보가 화면에 나올 수 있어요 (기록할 때는 가려서 저장)</span></li>
+            <li><b>임시 파일 만들기 테스트</b> — 빈 파일 1개를 만들었다가 바로 지워 봅니다 <span class="danger-risk">주의: 지우기에 실패하면 파일이 남을 수 있어요 (그때는 위치를 알려드립니다)</span></li>
           </ul>
         </div>
         <div id="dangerDynamic" class="hidden">
           <div class="risk-head"><span id="riskLevel" class="risk-level">위험</span><span id="riskSummary" class="risk-summary"></span></div>
           <div id="riskFlags" class="risk-flags"></div>
           <ul id="riskConcerns" class="danger-list"></ul>
-          <p class="danger-note">지시문 분석 결과입니다. 동의하면 이 지시를 실행하고, 이 세션의 파괴적 진단(P0 3종 포함)이 함께 활성화됩니다.</p>
+          <p class="danger-note">위 분석 결과입니다. 동의하면 이 작업을 실행하고, 이번 작업의 위험 검사(3종 포함)도 함께 켜집니다.</p>
         </div>
-        <label class="danger-ack"><input type="checkbox" id="dangerAck" /> 대상에 대한 명시적 진단 인가를 보유하고 있으며, 위 위험을 이해하고 동의합니다.</label>
+        <label class="danger-ack"><input type="checkbox" id="dangerAck" /> 이 사이트를 점검해도 된다는 허락을 받았고, 위 주의사항을 이해했으며 동의합니다.</label>
         <div class="modal-actions">
           <button id="dangerCancel" class="btn btn-ghost">취소</button>
           <button id="dangerConfirm" class="btn btn-danger-solid" disabled>동의하고 활성화</button>
@@ -351,14 +361,14 @@
       </div>
     </div>
 
-    <!-- 인가 대상 관리 -->
-    <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="인가 대상 관리">
+    <!-- 점검 대상 관리 -->
+    <div id="authModal" class="modal hidden" role="dialog" aria-modal="true" aria-label="점검 대상 관리">
       <div class="modal-card auth-card">
         <header class="auth-head">
           <span class="auth-head-ico"><svg class="ic"><use href="#i-shield"/></svg></span>
           <div class="auth-head-text">
-            <h3>인가 대상 관리</h3>
-            <p class="auth-head-sub">이 목록에 있는 대상만 스캔됩니다 — 입력한 IP·URL이 곧 인가입니다.</p>
+            <h3>점검 대상 관리</h3>
+            <p class="auth-head-sub">여기에 등록된 주소만 점검합니다</p>
           </div>
           <span id="authPill" class="auth-pill">…</span>
         </header>
@@ -372,7 +382,7 @@
 
         <div class="auth-add">
           <div class="auth-input-wrap">
-            <input id="authTarget" class="auth-input" placeholder="IP · CIDR · 도메인 · URL" spellcheck="false" autocomplete="off" />
+            <input id="authTarget" class="auth-input" placeholder="예: 10.13.37.5 · 우리사이트.com" spellcheck="false" autocomplete="off" />
             <div class="auth-seg" role="group" aria-label="추가 방식">
               <button id="segAllow" class="seg-btn allow active" aria-pressed="true">허용</button>
               <button id="segDeny" class="seg-btn deny" aria-pressed="false">제외</button>
@@ -399,7 +409,7 @@
         <div id="authError" class="auth-error hidden"></div>
 
         <footer class="auth-foot">
-          <span class="auth-foot-note">실행 시 host 란의 대상은 자동 추가됩니다</span>
+          <span class="auth-foot-note">위에 입력한 주소는 실행할 때 자동으로 등록됩니다</span>
           <div class="modal-actions">
             <button id="authRefresh" class="btn btn-ghost">새로고침</button>
             <button id="authClose" class="btn btn-primary">닫기</button>

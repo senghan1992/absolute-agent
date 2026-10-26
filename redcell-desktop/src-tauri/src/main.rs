@@ -59,13 +59,13 @@ struct Session {
     #[serde(default)]
     diag: bool, // 서비스 진단 모드 — 설명 기반 공격 포인트/개선 권고 리포트
     #[serde(default)]
-    deep: bool, // 심층 진단 — 병렬 워커 N개 + collector fan-in (prime-agent builder 패턴)
+    deep: bool, // 정밀 진단 — 병렬 5분야 + fan-in 병합 (prime-agent builder 패턴)
     #[serde(default)]
     engine: String, // 실행 엔진: ""|"pi" = pi-coding-agent, "prime" = prime-agent(Rust 하네스)
     #[serde(default)]
-    auth_cookie: String, // 인증 스윕용 세션 쿠키 (Cookie 헤더 값, 사용자가 붙여넣음)
+    auth_cookie: String, // 로그인 영역 점검용 세션 쿠키 (Cookie 헤더 값, 사용자가 붙여넣음)
     #[serde(default)]
-    danger_consent: bool, // 파괴적 진단 동의 (모달 명시 동의, 세션별, 철회 가능)
+    danger_consent: bool, // 위험 검사 동의 (모달 명시 동의, 세션별, 철회 가능)
     #[serde(default)]
     danger_consented_at: String, // 동의 시각 (RFC3339, 감사 추적용)
     #[serde(default)]
@@ -421,7 +421,7 @@ fn update_session(
     Some(s)
 }
 
-/// 파괴적 진단 동의 설정 — 동의 모달의 명시 확인 전용 커맨드.
+/// 위험 검사 동의 설정 — 동의 모달의 명시 확인 전용 커맨드.
 /// 동의 시 시각을 찍고 감사 노트를 남긴다. 철회는 즉시 반영된다.
 #[tauri::command]
 fn set_danger_consent(app: AppHandle, id: String, consent: bool) -> Option<Session> {
@@ -431,9 +431,9 @@ fn set_danger_consent(app: AppHandle, id: String, consent: bool) -> Option<Sessi
     s.updated_at = now();
     write_session_locked(&app, &s);
     let text = if consent {
-        "[경고] 파괴적 진단 동의됨 — 기본자격 시도·IDOR 인접 확인·쓰기 검증이 다음 진단부터 실행됩니다. (세션별, 언제든 철회 가능)"
+        "[경고] 위험 검사 켜짐 — 흔한 초기 비밀번호·옆 번호 정보·임시 파일 만들기가 다음 진단부터 실행됩니다. (이번 작업만, 언제든 끌 수 있음)"
     } else {
-        "[sys] 파괴적 진단 동의 철회 — 읽기 전용 모드로 복귀합니다."
+        "[sys] 위험 검사 꺼짐 — 안전한 읽기 방식으로 돌아갑니다."
     };
     let ev = json!({ "type": "note", "text": text });
     let stamped = append_event(&app, &id, &ev);
@@ -610,48 +610,48 @@ const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를 지
   검증 상태가 [실증]인 시나리오만 "확인된 취약점"으로 표현한다.
 - 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만."#;
 
-/// 심층 진단 워커 정의 — prime-agent builder(factory) 패턴의 워커/섹션에 대응.
-/// 각 워커는 독립 pi 세션으로 동시에 실행되고, collector 가 결과를 병합한다.
+/// 정밀 진단 분야 정의 — prime-agent builder(factory) 패턴의 워커/섹션에 대응.
+/// 각 분야는 독립 pi 세션으로 동시에 실행되고, 병합 단계에서 결과를 합친다.
 struct DeepWorkerDef {
     id: &'static str,    // pi 세션 접미사 + 이벤트 태그
-    label: &'static str, // UI 칩 표시 (W1·정찰)
+    label: &'static str, // UI 칩·로그 표시 (쉬운 이름)
     title: &'static str, // 담당 분야
     brief: &'static str, // 워커 전용 임무 지시
 }
 const DEEP_WORKERS: &[DeepWorkerDef] = &[
     DeepWorkerDef {
         id: "w1",
-        label: "W1·정찰",
+        label: "구조 살펴보기",
         title: "표면 정찰",
         brief: "홈페이지·헤더·쿠키·TLS·리다이렉트·민감 경로(/robots.txt, /.well-known/security.txt, /sitemap.xml, /openapi.json, /swagger, /admin, /login, /api, /health, /.env, /.git/HEAD, /server-status)를 비파괴 GET/HEAD 로 전수 조사하고, 링크·폼·스크립트·JS 번들에서 엔드포인트·파라미터·API 를 수집한다. 보안 헤더·쿠키 플래그 누락을 빠짐없이 기록한다.",
     },
     DeepWorkerDef {
         id: "w2",
-        label: "W2·주입",
+        label: "입력값 점검",
         title: "주입 공격",
         brief: "수집된 엔드포인트·파라미터에 SQL 주입·XSS(반사형, 무해 마커)·SSTI·SSRF·OS 명령 주입·경로 조작 신호를 비파괴 프로브로 탐지한다. 오류 메시지 노출·산술 평가·지연 응답 같은 신호를 증거 원문과 함께 기록한다. 파괴적 페이로드·대량 요청은 금지. 단, P0 증거에 danger-write(쓰기 검증)가 있으면 그 결과를 인용해 체인 시나리오(웹셸 경로·정리 여부 포함)를 작성한다.",
     },
     DeepWorkerDef {
         id: "w3",
-        label: "W3·인증",
+        label: "로그인·권한 점검",
         title: "인증·세션·권한",
         brief: "로그인·회원가입·토큰(JWT/쿠키/OAuth) 흐름을 분석한다: 세션 고정·예측 가능성, 로그아웃 무효화, 탈취 시 영향, 무차별 대입 방어(레이트리밋·잠금), IDOR·수평/수직 권한 상승 신호를 비파괴 범위에서 확인하고 기록한다. P0 증거에 danger-creds(기본자격)·danger-idor(인접 확정)이 있으면 인용해 권한 탈취 체인을 작성한다(비밀번호 원문은 절대 복기하지 마라).",
     },
     DeepWorkerDef {
         id: "w4",
-        label: "W4·노출",
+        label: "정보 노출 점검",
         title: "노출·설정 오류",
         brief: "노출된 비밀·설정 오류를 찾는다: /.env·백업 파일·설정 파일, /.git, JS 번들·openapi 문서 속 API 키·토큰·내부 URL, 디버그·관리자 페이지, CORS 와일드카드, 상세 오류 스택 노출. P0의 upload-surface(업로드 폼)·methods(쓰기 메서드)·method-override 증거를 인용해 설정 보완안(실제 업로드·PUT 발송 없이)을 제시한다. 발견 원문(민감값 마스킹)을 증거로 기록한다.",
     },
     DeepWorkerDef {
         id: "w5",
-        label: "W5·로직",
+        label: "기능 오용 점검",
         title: "비즈니스 로직",
         brief: "서비스 설명과 실제 화면·API 흐름을 대조해 비즈니스 로직 남용 포인트를 발굴한다: 가격·할인·쿼터·순서·상태 전이 조작, 레이스 컨디션 가능 지점, 권한 단계 건너뛰기, 악용 가능한 정상 기능. 각 포인트마다 악용 시나리오 초안을 기록한다.",
     },
 ];
 
-/// 심층 진단 워커용 지시문 — 독립 세션에서 한 분야만 깊게 파고든다.
+/// 정밀 진단 분야용 지시문 — 독립 세션에서 한 분야만 깊게 파고든다.
 fn deep_worker_instruction(
     def: &DeepWorkerDef,
     target: &str,
@@ -660,7 +660,7 @@ fn deep_worker_instruction(
     mem: &str,
 ) -> String {
     format!(
-        r#"# RedCell 심층 진단 워커 — {label} ({title})
+        r#"# RedCell 정밀 진단 워커 — {label} ({title})
 
 당신은 시니어 해커 팀의 '{title}' 담당 전문가다. 아래 대상을 맡은 분야에서만
 깊게 파고들어 발견 사항을 정리한다. 다른 워커가 다른 분야를 동시에 맡고 있으니
@@ -679,7 +679,7 @@ fn deep_worker_instruction(
 - 못 본 것은 [가정] 으로 표기하고 단정하지 마라.
 - 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니다.
 {mem}
-## 출력 형식 (반드시 지킨다 — collector 가 병합한다)
+## 출력 형식 (반드시 지킨다 — 병합 단계에서 합친다)
 ## 워커 발견 ({label} {title})
 - [치명|높음|중간|낮음|정보] <발견 제목> — <한 줄 설명> / 근거: <증거 발췌 또는 [가정]>
 (발견마다 한 줄, 최대 12줄. 발견이 없으면 "- [정보] 이상 없음 — <확인한 범위>" 한 줄)"#,
@@ -693,14 +693,14 @@ fn deep_worker_instruction(
     )
 }
 
-/// 심층 진단 collector(병합자)용 지시문 — 워커 발견을 시나리오 리포트로 fan-in.
-/// `kind` 는 리포트 종별 ("의심진단리포트" | "실사용진단리포트") — 역할 문구와 H1 에 반영된다.
+/// 정밀 진단 병합자용 지시문 — 분야별 발견을 결과 리포트로 fan-in.
+/// `kind` 는 리포트 종별 ("1차 리포트" | "최종 리포트") — 역할 문구와 H1 에 반영된다.
 fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str, kind: &str) -> String {
     let spec = REPORT_SPEC.replacen("# <서비스명> 진단 리포트", &format!("# <서비스명> {kind}"), 1);
     format!(
         r#"{DIAG_ROLE}
 
-당신은 심층 진단의 {kind} 작성자(collector)다. 5명의 분야별 워커가 같은
+당신은 정밀 진단의 {kind} 작성자(병합 담당)다. 5명의 분야별 워커가 같은
 대상을 동시에 진단한 결과(아래)가 주어졌다. 이를 병합·검증해 {kind} 1개를
 작성한다.
 
@@ -743,7 +743,7 @@ fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rou
             ok_n += 1;
         }
         let body = if body.is_empty() {
-            "(이 워커는 결과를 내지 못했습니다 — collector 가 해당 분야를 보강할 것)".to_string()
+            "(이 분야는 결과를 내지 못했습니다 — 최종 리포트에서 해당 분야를 보강할 것)".to_string()
         } else {
             body.chars().take(6000).collect::<String>()
         };
@@ -752,18 +752,20 @@ fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rou
     (combined, ok_n)
 }
 
-/// 의심진단리포트 병합 지시문 — 같은 본문에 의심 단계 고지만 덧붙인다.
+/// 1차 리포트 병합 지시문 — 같은 본문에 1차 단계 고지만 덧붙인다.
 fn early_merge_instruction(base: String) -> String {
-    format!("{base}\n\n주: 이는 1라운드 직후의 의심 단계 병합(의심진단리포트)이다. 서두에 '1라운드 실측 기반의 의심 단계 진단이며, 추적 라운드가 백그라운드로 계속되어 실사용진단리포트로 갱신될 수 있음'을 한 줄로 명시하라. 확정할 수 없는 것은 [가정]·[징후]로 정직하게 구분하라.")
+    format!("{base}\n\n주: 이는 1차 확인 직후의 1차 리포트 병합이다. 서두에 '1차 확인 기반의 1차 리포트이며, 추가 확인이 뒤에서 계속되어 최종 리포트로 바뀔 수 있음'을 한 줄로 명시하라. 확정할 수 없는 것은 [가정]·[징후]로 정직하게 구분하라.")
 }
 
-/// 심층 진단 추적 라운드 상한 (1차 + 추적 2회 = 최대 3라운드, 결정적 수렴).
-const DEEP_MAX_ROUNDS: u32 = 3;
-/// 추적 지시문에 넣는 자가 이전 결과 발췌 상한 (문자).
+/// 정밀 진단 추가 확인 상한 (1차 + 추가 1회 = 최대 2차).
+/// 1차 리포트가 먼저 나가고, 새로 찾은 게 없으면 1차에서 바로 끝난다.
+const DEEP_MAX_ROUNDS: u32 = 2;
+/// 추가 확인 지시문에 넣는 자가 이전 결과 발췌 상한 (문자).
 const DEEP_FOLLOWUP_TRUNC: usize = 2000;
 
 /// 워커 출력에서 발견 키 추출 — `[등급] 제목` 줄을 정규화해 순서 유지 중복 제거.
 /// 수렴 판정(신규 발견 수) + 교차 단서 전달에 쓴다.
+/// `##` 소제목은 매 라운드 새로 찍혀 신규로 오판되므로 세지 않는다.
 fn extract_finding_keys(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
@@ -776,8 +778,7 @@ fn extract_finding_keys(text: &str) -> Vec<String> {
             || t.contains("[치명]")
             || t.contains("[높음]")
             || t.contains("[중간]")
-            || t.contains("[낮음]")
-            || (t.starts_with("## ") && !t.contains("워커 발견"));
+            || t.contains("[낮음]");
         if !is_bullet {
             continue;
         }
@@ -794,7 +795,7 @@ fn extract_finding_keys(text: &str) -> Vec<String> {
     out
 }
 
-/// 추적 라운드 지시문 — 자가 이전 결과 + 타 워커 단서를 물고 추가 발견만 노린다.
+/// 추가 확인 지시문 — 자가 이전 결과 + 타 워커 단서를 물고 추가 발견만 노린다.
 fn deep_followup_instruction(
     def: &DeepWorkerDef,
     round: u32,
@@ -804,7 +805,7 @@ fn deep_followup_instruction(
 ) -> String {
     let own: String = own_prior.chars().take(DEEP_FOLLOWUP_TRUNC).collect();
     format!(
-        r###"# RedCell 심층 진단 추적 라운드 {round} — {label} ({title})
+        r###"# RedCell 정밀 진단 추가 확인 {round}차 — {label} ({title})
 
 너는 같은 대상을 계속 파고 있는 '{title}' 담당 전문가다. 이전 턴의 대화·P0 증거는
 그대로 이어진다. 새로 실측·추론해서 **추가 발견만** 보고한다. 이미 보고한 것은
@@ -815,11 +816,11 @@ fn deep_followup_instruction(
 ## 네 이전 보고 (요약 — 반복 금지)
 {own}
 
-## 다른 워커의 단서 (네 분야와 엮일 수 있음)
+## 다른 분야의 단서 (네 분야와 엮일 수 있음)
 {cross}
 
-## 추적 규칙
-- 위 단서 중 네 분야와 연결되는 것을 우선 추적하고, 네 이전 보고의 [가정] 은
+## 확인 규칙
+- 위 단서 중 네 분야와 연결되는 것을 우선 확인하고, 네 이전 보고의 [가정] 은
   web_fetch 비파괴 재현으로 [실증]/[징후] 승격을 시도한다.
 - 그래도 새 게 없으면 "- [정보] 추가 발견 없음 — <확인한 범위>" 한 줄만.
 - 출력 형식: "## 추가 발견 ({label})" + 발견마다 "- [등급] 제목 — 설명 / 근거: …"
@@ -883,7 +884,7 @@ fn inject_provider_env(cmd: &mut Command, provider: &str, conn: &ProviderConn) {
 /// 요구하는 authHeader·compat 를 함께 기록하고, OpenAI 방언으로 돌아오면 제거한다.
 /// apiKey 가 `!명령` 형태(pi 의 !command)면 그대로 기록한다 — pi 가 요청마다 실행해
 /// 토큰을 받아오므로 만료되는 키를 파일에 박지 않아도 된다 (`ug auth-token ...` 용).
-/// models.json 은 심층 진단의 5개 워커 스레드가 동시에 갱신할 수 있다 —
+/// models.json 은 정밀 진단의 5개 분야 스레드가 동시에 갱신할 수 있다 —
 /// read-modify-write 가 겹치면 엔트리가 사라지거나 반쯤 쓰인 파일이 남으므로 직렬화한다.
 static MODELS_JSON_LOCK: Mutex<()> = Mutex::new(());
 
@@ -1927,14 +1928,14 @@ fn run_prime(
 
     // RedCell 인가 확장(scope 게이트)을 `-e` 로 **명시 로드**한다 — 전역 설치·트러스트·settings
     // 병합이 없어도 패널에서 항상 게이트가 켜진다(다른 프로젝트의 pi 세션엔 영향 없음).
-    let ev3 = json!({ "type": "note", "text": "[sys] 인가 게이트: RedCell 확장을 -e 로 명시 로드 — pi 의 모든 툴 호출을 인가 목록으로 검사합니다(이 세션만)." });
+    let ev3 = json!({ "type": "note", "text": "[sys] 안전장치: pi 의 모든 동작을 점검 대상 목록으로 검사합니다(이번 작업만)." });
     let stamped3 = append_event(app, id, &ev3);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
 
     // 동기 프리플라이트 — pi 미설치면 즉시 Err (UI 즉시 안내).
     prime_cli_path(redcell)?;
     {
-        let ev = json!({ "type": "note", "text": format!("[sys] pi 턴 — session {piq}.") });
+        let ev = json!({ "type": "note", "text": "[sys] pi 엔진으로 실행합니다.".to_string() });
         let stamped = append_event(app, id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
@@ -2083,11 +2084,11 @@ fn netfilter_extra_env(
 /// 선행 차단 상태 노트 (활성/폴백을 실행마다 명시 — 보안 상태는 숨기지 않는다).
 fn emit_netfilter_note(app: &AppHandle, id: &str, active: bool) {
     let text = if active {
-        "[sys] 선행 차단 활성화(Linux egress 필터) — 인가 밖 연결·DNS 는 호출 전에 차단됩니다(반응형 킬게이트와 이중 방어, 감사: sessions/netfilter-<id>.log)."
+        "[sys] 연결 보호 켜짐 — 등록되지 않은 주소로의 연결·DNS 는 미리 차단됩니다."
     } else if cfg!(target_os = "linux") {
-        "[sys] 선행 차단 .so 없음 — 반응형 킬게이트로 동작합니다(`cargo build` 로 libredcell_netfilter.so 생성 시 활성화)."
+        "[sys] 연결 보호 부품 없음 — 실행 중 감시로만 동작합니다."
     } else {
-        "[sys] 선행 차단은 Linux 전용 — 이 OS 에서는 기존 방어(pi 훅/반응형 킬게이트)로 동작합니다."
+        "[sys] 연결 보호는 Linux 전용 — 이 기기에서는 실행 중 감시로 동작합니다."
     };
     let ev = json!({ "type": "note", "text": text });
     let stamped = append_event(app, id, &ev);
@@ -2133,7 +2134,7 @@ fn prepare_engine_run(
             let cont = prime_session_has_history(&sdir);
             let (bin, args) = prime_run_args(settings, provider, &skill, &sdir, cont, instruction)?;
             if auth.yaml && !quiet {
-                let ev = json!({ "type": "note", "text": "[sys] 경고: 인가 파일이 정식 YAML 이라 prime-agent 반응형 킬게이트가 동작하지 않습니다 — 선행 차단(세션 대상 단일 호스트)으로 강제됩니다." });
+                let ev = json!({ "type": "note", "text": "[sys] 참고: 고급 설정(YAML) 사용 중 — 실행 중 감시는 동작하지 않고, 시작 전 주소 제한으로만 보호됩니다." });
                 let stamped = append_event(app, id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
             }
@@ -2163,9 +2164,9 @@ fn spawn_prepared(
     launch_child(&prep.prog, &prep.args, &prep.cwd, provider, settings, &ee, "엔진 실행 실패")
 }
 
-/// LLM 연결 사전 점검 — 1턴 핑으로 프로바이더 실동작을 확인한다.
-/// 키·모델·API 방언·base URL 문제는 워커 5개가 모두 400 을 내고 collector 가
-/// "비정상 종료" 하기 전에, 여기서 원인 1건으로 잡아낸다 (심층 진단 전용).
+/// LLM 연결 사전 점검 — 1턴 핑으로 AI 모델 실동작을 확인한다.
+/// 키·모델·API 방언·base URL 문제는 "비정상 종료" 하기 전에 여기서
+/// 원인 1건으로 잡아낸다 (정밀 진단 전용).
 fn preflight_llm_check(
     app: &AppHandle,
     id: &str,
@@ -2175,7 +2176,7 @@ fn preflight_llm_check(
     redcell: &str,
     piq: &str,
 ) -> Result<(), String> {
-    emit_note(app, id, format!("[sys] 모델 연결 확인 중… ({provider})"), None);
+    emit_note(app, id, format!("[sys] AI 모델 연결 확인 중… ({provider})"), None);
     let ping = "연결 확인 핑입니다. 어떤 도구도 사용하지 말고 'pong' 이라고만 답하세요.".to_string();
     // 본 대화 세션을 더럽히지 않게 버림 세션 id 로 실행한다.
     let run_tag = if engine == Engine::Prime { "ping".to_string() } else { format!("{piq}-ping") };
@@ -2326,7 +2327,7 @@ fn install_managed_pi() -> Result<(), String> {
     }
 }
 
-/// 심층 진단 시작 전 pi 버전 보장 — 고정 버전보다 낮으면 앱 전용 폴더에 설치한다.
+/// 정밀 진단 시작 전 pi 버전 보장 — 고정 버전보다 낮으면 앱 전용 폴더에 설치한다.
 /// 실패해도 진단은 기존 pi 로 계속 시도한다(수동 설치 명령만 안내).
 fn ensure_pinned_pi(app: &AppHandle, id: &str, settings: &Settings) {
     let ver = pi_cli_version(settings);
@@ -2447,16 +2448,16 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
         let model_part = if model.is_empty() { String::new() } else { format!("/ {model}") };
         let detail = if outcome.error.is_empty() { String::new() } else { format!(" 마지막 오류: {}", outcome.error) };
         format!(
-            " — provider '{p}'{model_part} 연결을 점검하세요 (설정(⚙) > 프로바이더 연결 테스트).{detail}"
+            " — AI 모델 '{p}'{model_part} 연결을 점검하세요 (설정(⚙) > 모델 연결에서 연결 테스트).{detail}"
         )
     };
     let ev2 = json!({ "type": "note", "text": if outcome.aborted {
         format!("[중지] {engine_label} 실행이 중단됐습니다.")
     } else if outcome.blocked {
-        format!("[차단] scope 위반으로 {engine_label} 실행을 중단했습니다 — 🛡 인가 대상 관리에서 범위를 확인하세요.")
+        format!("[차단] 허용 범위를 벗어나 {engine_label} 실행을 중단했습니다 — 점검 대상 관리에서 주소를 확인하세요.")
     } else if ok {
         if is_empty_success(outcome) {
-            format!("[완료] {engine_label} 종료 — 빈 응답: 모델이 텍스트를 반환하지 않았습니다(상류 필터·게이트웨이 응답 확인).")
+            format!("[완료] {engine_label} 종료 — 빈 응답: AI가 글을 돌려주지 않았습니다(모델·게이트웨이 응답 확인).")
         } else if outcome.failed {
             format!("[완료] {engine_label} 종료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)")
         } else {
@@ -2490,14 +2491,14 @@ fn run_prime_agent(
         instruction.push_str(&p0_evidence_block(&sweep, 6000));
     }
 
-    let ev3 = json!({ "type": "note", "text": "[sys] 인가 게이트: 스코프 스킬 주입 + 반응형 킬게이트 — prime-agent 의 모든 툴 호출을 인가 목록으로 검사하고 위반 시 프로세스를 중단합니다(이 세션만)." });
+    let ev3 = json!({ "type": "note", "text": "[sys] 안전장치: prime-agent 의 모든 동작을 점검 대상 목록으로 검사하고 벗어나면 중단합니다(이번 작업만)." });
     let stamped3 = append_event(app, id, &ev3);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped3 })).ok();
 
     // 동기 프리플라이트 — 바이너리 미설치면 즉시 Err.
     prime_agent_path()?;
     {
-        let ev = json!({ "type": "note", "text": "[sys] prime-agent 턴 — Rust 하네스 직접 실행." });
+        let ev = json!({ "type": "note", "text": "[sys] prime-agent 엔진으로 실행합니다." });
         let stamped = append_event(app, id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
@@ -2647,7 +2648,7 @@ fn launch_child(
 }
 
 
-/// 심층 진단 워커 태그 — 이벤트에 worker id 를 찍고 UI 칩과 연결한다.
+/// 정밀 진단 분야 태그 — 이벤트에 worker id 를 찍고 UI 칩과 연결한다.
 #[derive(Clone)]
 struct WorkerTag {
     id: String,
@@ -2664,8 +2665,8 @@ fn emit_note(app: &AppHandle, id: &str, text: String, worker: Option<&WorkerTag>
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
 }
 
-/// 리포트 텍스트 1건 저장 + 프론트 전송 — collector 병합 결과용.
-/// `report` 표식("early"|"final")으로 결과 탭이 의심/실사용을 구분한다.
+/// 리포트 텍스트 1건 저장 + 프론트 전송 — 병합 결과용.
+/// `report` 표식("early"|"final")으로 결과 탭이 1차/최종을 구분한다.
 fn emit_report_text(app: &AppHandle, id: &str, text: String, tag: &str) {
     let ev = json!({ "type": "note", "text": text, "report": tag });
     let stamped = append_event(app, id, &ev);
@@ -2766,6 +2767,26 @@ fn tool_result_summary(ev: &Value) -> String {
     }
 }
 
+/// stderr 1줄 표시 여부 — 엔진 내부 소음은 사용자 로그에 올리지 않는다.
+/// 단발성 머지 세션(`rc-*-merge`)의 "세션 없음 → 새로 생성" 경고는 매 진단마다
+/// 나오는 정상 소음이라 버리고, 워커 연속 세션의 같은 경고는 맥락 유실 신호라 남긴다.
+fn stderr_line_visible(line: &str) -> bool {
+    let t = line.trim();
+    if t.is_empty() {
+        return false;
+    }
+    let low = t.to_lowercase();
+    if low.contains("no project session found") && low.contains("creating a new session") {
+        return !low.contains("merge");
+    }
+    for pat in ["deprecat", "npm warn", "experimentalwarning", "trace-warnings"] {
+        if low.contains(pat) {
+            return false;
+        }
+    }
+    true
+}
+
 /// pi/prime-agent json 이벤트 스트림 펌프 — stdout 은 인라인, stderr 는 내부 스레드.
 /// pi 1.3.0 json 프로토콜(docs/json.md) 기준 (prime-agent 0.10 실측 동일):
 ///   text_delta/text_end + tool_execution_start/end + message_end(stopReason) + agent_settled.
@@ -2783,18 +2804,17 @@ fn pump_pi_stdio(
     report_tag: Option<&str>,
 ) -> PumpOutcome {
     let PiPipes { out, err } = pipes;
-    // stderr → [sys] 노트(모델/스코프 로그·print 모드 오류).
+    // stderr → [sys] 노트(모델/스코프 로그·print 모드 오류). 엔진 내부 소음은 걸러낸다.
     let err_handle = {
         let app = app.clone();
         let id = id.to_string();
         let worker = worker.clone();
         thread::spawn(move || {
             for line in err.lines().map_while(Result::ok) {
-                let line = line.trim();
-                if line.is_empty() {
+                if !stderr_line_visible(&line) {
                     continue;
                 }
-                emit_note(&app, &id, format!("[sys] {line}"), worker.as_ref());
+                emit_note(&app, &id, format!("[sys] {}", line.trim()), worker.as_ref());
             }
         })
     };
@@ -2918,7 +2938,7 @@ fn pump_pi_stdio(
                 outcome.settled = true;
                 if ev.get("aborted").and_then(|v| v.as_bool()).unwrap_or(false) {
                     outcome.aborted = true;
-                    emit_note(app, id, "[중지] pi settled(aborted).".to_string(), worker.as_ref());
+                    emit_note(app, id, "[중지] 실행이 중단됐습니다.".to_string(), worker.as_ref());
                 }
             }
             "error" => {
@@ -2973,15 +2993,15 @@ fn engagement_precheck(app: &AppHandle, id: &str) -> Result<(Session, Settings, 
     Ok((s, settings, redcell, provider))
 }
 
-/// P0 스윕 실행 + 증거 저장 + 상태 이벤트 — 심층/단일 진단 공용.
-/// 스윕 실패(대상 다운 등)해도 빈 증거로 계속 진행한다 (LLM 자체 정찰로 보완).
+/// 기본 점검(P0) 실행 + 증거 저장 + 상태 이벤트 — 정밀/단일 진단 공용.
+/// 점검 실패(대상 다운 등)해도 빈 증거로 계속 진행한다 (AI 자체 살펴보기로 보완).
 fn run_p0_sweep(app: &AppHandle, id: &str, host: &str, port: Option<u16>, cookie: &str, danger: bool) -> probes::ProbeReport {
-    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "P0·스윕", "title": "자동 스윕", "state": "running" });
+    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "기본 점검", "title": "기본 점검", "state": "running" });
     let stamped = append_event(app, id, &ev);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-    emit_note(app, id, "[sys] P0 자동 스윕 시작 — 대상 접근·기본 점검 중…".to_string(), None);
+    emit_note(app, id, "[sys] 기본 점검 시작 — 수백 가지 기본 항목을 자동으로 확인합니다.".to_string(), None);
     if danger {
-        let ev = json!({ "type": "note", "text": "[경고] P0 파괴적 프로브 실행 — 기본자격·IDOR 인접·쓰기 검증 (사용자 동의 기반)" });
+        let ev = json!({ "type": "note", "text": "[경고] 위험 검사 실행 중 — 흔한 초기 비밀번호·옆 번호 정보·임시 파일 만들기 (동의하셨습니다)" });
         let stamped = append_event(app, id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
@@ -3004,7 +3024,7 @@ fn run_p0_sweep(app: &AppHandle, id: &str, host: &str, port: Option<u16>, cookie
     let ev = json!({ "type": "note", "text": line });
     let stamped = append_event(app, id, &ev);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
-    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "P0·스윕", "title": "자동 스윕", "state": "done" });
+    let ev = json!({ "type": "worker_status", "worker": "p0", "label": "기본 점검", "title": "기본 점검", "state": "done" });
     let stamped = append_event(app, id, &ev);
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     rep
@@ -3048,8 +3068,8 @@ fn https_hint_for(host: &str, port: Option<u16>) -> String {
     }
 }
 
-/// collector 병합 1회 실행 — 의심·실사용 공용.
-/// `report_tag`("early"|"final")는 결과 탭의 의심/실사용 구분 표식이다.
+/// 리포트 병합 1회 실행 — 1차·최종 공용.
+/// `report_tag`("early"|"final")는 결과 탭의 1차/최종 구분 표식이다.
 #[allow(clippy::too_many_arguments)]
 fn run_collector_merge(
     app: &AppHandle,
@@ -3082,16 +3102,16 @@ fn run_collector_merge(
     }
 }
 
-/// 심층 진단 — 워커 5개를 독립 pi 세션으로 동시에 실행한 뒤 collector 가 병합.
+/// 정밀 진단 — 다섯 가지를 독립 pi 세션으로 동시에 실행한 뒤 하나로 병합.
 /// prime-agent builder(factory) 패턴의 RedCell 구현: 병렬 섹션 작성자 + fan-in 병합.
-/// 1라운드 직후 의심진단리포트를 먼저 발행하고 추적 라운드는 백그라운드로 계속한다 —
-/// 사용자는 언제든 중지해 의심진단리포트만 받을 수 있다.
+/// 1차 확인 직후 1차 리포트를 먼저 발행하고 추가 확인은 뒤에서 계속한다 —
+/// 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
 /// 즉시 반환하며, 진행은 `engagement-event`(worker_status·노트)/`engagement-status` 로 전달된다.
 #[tauri::command]
 fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
     if s.host.trim().is_empty() {
-        return Err("심층 진단은 대상 host/URL 이 필요합니다 — 위에 URL 을 입력하세요.".into());
+        return Err("진단은 주소가 필요합니다 — 위에 URL 을 입력하세요.".into());
     }
     gate_session_instruction(&app, &id, &s)?;
     // 심층 플래그 확정 (결과 탭이 진단 리포트로 렌더되도록 diag 도 함께).
@@ -3122,7 +3142,6 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     };
     let mem = memory_block(&app, &s.host);
     let engine = session_engine(&s);
-    let engine_label = if engine == Engine::Prime { "prime-agent" } else { "pi" };
     // 동기 프리플라이트 — 엔진 바이너리 미설치면 즉시 Err.
     if engine == Engine::Prime {
         prime_agent_path()?;
@@ -3134,7 +3153,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     // 여기서 원인(400/401/타임아웃)을 한 번에 보여주고 즉시 중단한다.
     preflight_llm_check(&app, &id, engine, &settings, &provider, &redcell, &piq)?;
     {
-        let ev = json!({ "type": "note", "text": format!("[sys] 모델 연결 확인 완료({provider}) — 심층 진단을 시작합니다.") });
+        let ev = json!({ "type": "note", "text": format!("[sys] 모델 연결 확인 완료({provider}) — 진단을 시작합니다.") });
         let stamped = append_event(&app, &id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
@@ -3142,7 +3161,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     {
         let auth = auth::load(&resolve_app_auth_path(&app));
         if auth.yaml {
-            let ev = json!({ "type": "note", "text": "[sys] 경고: 인가 파일이 정식 YAML 이라 prime-agent 반응형 킬게이트가 동작하지 않습니다 — 선행 차단(세션 대상 단일 호스트)으로 강제됩니다." });
+            let ev = json!({ "type": "note", "text": "[sys] 참고: 고급 설정(YAML) 사용 중 — 실행 중 감시는 동작하지 않고, 시작 전 주소 제한으로만 보호됩니다." });
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
         }
@@ -3153,21 +3172,21 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     set_status(&app, &id, "running");
     app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
     {
-        let ev = json!({ "type": "note", "text": format!("[sys] 심층 진단 시작({engine_label}) — 5개 분야 워커를 동시에 실행합니다(정찰·주입·인증·노출·로직).") });
+        let ev = json!({ "type": "note", "text": "[sys] 진단 시작 — 기본 점검 후 다섯 가지(구조·입력값·로그인·정보 노출·기능 오용)를 동시에 살펴봅니다.".to_string() });
         let stamped = append_event(&app, &id, &ev);
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
 
     thread::spawn(move || {
-        // P0: 결정적 대량 스윕을 먼저 실행하고 증거를 워커·collector 에게 나눠준다.
+        // 기본 점검: 결정적 대량 확인을 먼저 실행하고 증거를 다섯 분야·병합에게 나눠준다.
         let sweep = run_p0_sweep(&app, &id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
-        // P0 도중 중지됐으면 워커를 띄우지 않고 마감한다 (stop_engagement 가 이미 stopped 처리).
+        // 기본 점검 도중 중지됐으면 다섯 분야를 띄우지 않고 마감한다 (stop_engagement 가 이미 stopped 처리).
         if read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(true) {
             return;
         }
         let digest_w = p0_evidence_block(&sweep, 6000);
         let digest_c = p0_evidence_block(&sweep, 12000);
-        // 워커 1라운드 실행 클로저 — round 0 = 초동, 1+ = 추적 (동일 세션 연속).
+        // 워커 실행 클로저 — round 0 = 1차, 1+ = 추가 확인 (동일 세션 연속).
         let run_round = |round: u32, ctx: &std::collections::HashMap<String, (String, String)>| -> Vec<(String, PumpOutcome)> {
             for def in DEEP_WORKERS {
                 let ev = json!({ "type": "worker_status", "worker": def.id, "title": def.title, "label": def.label, "state": "running" });
@@ -3241,7 +3260,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false)
                 || results.iter().any(|(_, o)| o.aborted)
         };
-        // agentic loop — 1차 → (신규 발견이 있으면) 추적 라운드, 수렴 시 조기 종료.
+        // agentic loop — 1차 → (새로 찾은 게 있으면) 추가 확인, 없으면 바로 최종 리포트로.
         let mut accum: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         let mut results = run_round(0, &std::collections::HashMap::new());
@@ -3253,8 +3272,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 }
             }
         }
-        // 1라운드 전체 실패 = 프로바이더 연결 문제 — 추적 라운드·collector 는 시도할 가치가
-        // 없다. "수렴" 으로 포장하지 말고 원인을 그대로 보여주고 즉시 마감한다.
+        // 1차 전체 실패 = AI 모델 연결 문제 — 추가 확인·최종 병합은 시도할 가치가
+        // 없다. 원인을 그대로 보여주고 즉시 마감한다.
         if !results.is_empty() && results.iter().all(|(_, o)| o.failed && !has_usable_text(o)) {
             let detail = results
                 .iter()
@@ -3262,7 +3281,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 .unwrap_or_default();
             let why = classify_ping_failure(&settings, &provider, &detail);
             let ev = json!({ "type": "note", "text": format!(
-                "[오류] 모든 워커가 모델 호출에 실패해 심층 진단을 중단합니다.\n{why}"
+                "[오류] 다섯 곳 모두 AI 호출에 실패해 진단을 중단합니다.\n{why}"
             )});
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
@@ -3272,28 +3291,28 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
             return;
         }
-        // 의심진단리포트 — 1라운드 결과로 먼저 발행하고, 추적 라운드는
-        // 백그라운드로 계속한다. 사용자는 언제든 중지해 의심진단리포트만 받을 수 있다.
+        // 1차 리포트 — 1차 확인 결과로 먼저 발행하고, 추가 확인은
+        // 뒤에서 계속한다. 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
         let mut early_published = false;
         {
             let (combined_early, ok_early) = combine_worker_outputs(&accum, 1);
             if ok_early > 0 && !is_stopped(&results) {
-                emit_note(&app, &id, format!("[sys] 1라운드 완료(워커 {ok_early}/{}) — 의심진단리포트를 발행합니다…", DEEP_WORKERS.len()), None);
-                let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem, "의심진단리포트"));
+                emit_note(&app, &id, format!("[sys] 1차 확인 끝(다섯 곳 중 {ok_early}곳 응답) — 1차 리포트를 만듭니다…"), None);
+                let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem, "1차 리포트"));
                 if engine == Engine::Prime {
                     merge = prime_adapt(merge);
                 }
                 merge.push_str(&digest_c);
                 let run_tag = if engine == Engine::Prime { "merge-early".to_string() } else { format!("{piq}-merge-early") };
                 let key = format!("{id}#merge-early");
-                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "의심 collector");
+                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트");
                 if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
                     early_published = true;
-                    emit_note(&app, &id, "[완료] 의심진단리포트 발행 — 결과 탭에서 확인하세요. 추적 라운드는 백그라운드로 계속됩니다.".to_string(), None);
+                    emit_note(&app, &id, "[완료] 1차 리포트 완성 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다.".to_string(), None);
                 } else if outcome.aborted || read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false) {
-                    return; // 의심 병합 중 중지 — 리포트 없이 stopped 유지
+                    return; // 1차 병합 중 중지 — 리포트 없이 stopped 유지
                 } else {
-                    emit_note(&app, &id, "[sys] 의심진단리포트 발행 실패 — 추적 라운드 후 실사용 병합을 시도합니다.".to_string(), None);
+                    emit_note(&app, &id, "[sys] 1차 리포트를 만들지 못했습니다 — 추가 확인 뒤 최종 리포트로 시도합니다.".to_string(), None);
                 }
             }
         }
@@ -3302,7 +3321,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             if is_stopped(&results) {
                 break;
             }
-            // 추적 컨텍스트 — 자가 누적 + 타 워커 신규 키 (교차 단서).
+            // 추가 확인 컨텍스트 — 자가 누적 + 타 분야 신규 키 (엇갈린 단서).
             let mut ctx: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
             let mut leads = 0usize;
             for def in DEEP_WORKERS {
@@ -3329,7 +3348,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 ctx.insert(def.id.to_string(), (own, cross_lines.join("\n")));
             }
             {
-                let ev = json!({ "type": "note", "text": format!("[sys] 추적 라운드 {} 시작 — 교차 단서 {leads}건 추적.", round + 1) });
+                let ev = json!({ "type": "note", "text": format!("[sys] 추가 확인 {}차 시작 — 엇갈린 단서 {leads}건 확인.", round + 1) });
                 let stamped = append_event(&app, &id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
             }
@@ -3345,35 +3364,35 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                         new_n += 1;
                     }
                 }
-                accum.entry(wid.clone()).or_default().push_str(&format!("\n\n--- 추적 라운드 {} ---\n{}", round + 1, o.text));
+                accum.entry(wid.clone()).or_default().push_str(&format!("\n\n--- 추가 확인 {}차 ---\n{}", round + 1, o.text));
             }
             {
-                let ev = json!({ "type": "note", "text": format!("[sys] 추적 라운드 {} 종료 — 신규 발견 {new_n}건.", round + 1) });
+                let ev = json!({ "type": "note", "text": format!("[sys] 추가 확인 {}차 끝 — 새로 찾은 것 {new_n}건.", round + 1) });
                 let stamped = append_event(&app, &id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
             }
             if new_n == 0 {
-                let ev = json!({ "type": "note", "text": "[sys] 수렴 — 추가 발견 없음, collector 로 진행합니다." });
+                let ev = json!({ "type": "note", "text": "[sys] 새로 찾은 것이 없어 추가 확인을 마칩니다 — 최종 리포트를 만듭니다." });
                 let stamped = append_event(&app, &id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
                 break;
             }
         }
 
-        // 중단됐으면 collector 없이 마감. 의심진단리포트가 있으면 유지하고 done 으로
+        // 중단됐으면 최종 병합 없이 마감. 1차 리포트가 있으면 유지하고 done 으로
         // 마감해 사용자가 "리포트만 받고 취소" 할 수 있게 한다.
         if is_stopped(&results) {
             if early_published {
-                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 의심진단리포트를 유지합니다.".to_string(), None);
+                emit_note(&app, &id, "[완료] 추가 확인을 중단했습니다 — 1차 리포트는 그대로 둡니다.".to_string(), None);
                 set_status(&app, &id, "done");
                 app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
             }
             return;
         }
-        // collector fan-in — 워커 발견(전 라운드 누적)을 시나리오 리포트로 병합.
+        // 최종 병합 — 다섯 가지 발견(전 차수 누적)을 결과 리포트로 정리.
         let (combined, ok_n) = combine_worker_outputs(&accum, rounds_run);
         {
-            let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 실사용진단리포트를 병합합니다.", DEEP_WORKERS.len()) });
+            let ev = json!({ "type": "note", "text": "[sys] 다섯 가지 확인 끝 — 최종 리포트를 만듭니다.".to_string() });
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
         }
@@ -3381,7 +3400,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         // (핑은 통과했지만 진단 본문이 필터된 경우의 방어선).
         if ok_n == 0 {
             let ev = json!({ "type": "note", "text": format!(
-                "[오류] 모든 워커가 빈 응답을 반환해 리포트를 병합할 수 없습니다.\n원인 후보: 모델의 상류 안전 필터(진단 용어·툴 정의 차단).\nlge-aigw 모델이 Sonnet 서빙이면 `{}` 로 되돌리고 다시 실행하세요.",
+                "[오류] 다섯 곳 모두 빈 응답이라 리포트를 만들 수 없습니다.\n원인 후보: AI의 상류 안전 필터(진단 용어·툴 정의 차단).\nlge-aigw 모델이 Sonnet 서빙이면 `{}` 로 되돌리고 다시 실행하세요.",
                 LGE_AIGW_DEFAULT_MODEL
             )});
             let stamped = append_event(&app, &id, &ev);
@@ -3392,25 +3411,25 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
             return;
         }
-        let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem, "실사용진단리포트");
+        let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem, "최종 리포트");
         if engine == Engine::Prime {
             merge = prime_adapt(merge);
         }
         merge.push_str(&digest_c);
         let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
-        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "collector");
+        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트");
         let ok = (!merge_outcome.failed && !merge_outcome.aborted) || has_usable_text(&merge_outcome);
         {
             let ev = json!({ "type": "note", "text": if ok {
                 if merge_outcome.failed {
-                    "[완료] 실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
+                    "[완료] 최종 리포트 완성 — 결과 리포트 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
                 } else {
-                    "[완료] 실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
+                    "[완료] 최종 리포트 완성 — 결과 리포트 탭에서 확인하세요.".to_string()
                 }
             } else if merge_outcome.aborted {
-                "[중지] collector 가 중단됐습니다.".to_string()
+                "[중지] 최종 리포트 만들기를 중단했습니다.".to_string()
             } else {
-                "[완료] collector 비정상 종료 — 워커 발견은 라이브 캡처에 남아 있습니다.".to_string()
+                "[완료] 최종 리포트를 만들지 못했습니다 — 찾은 내용은 진행 상황에서 볼 수 있습니다.".to_string()
             }});
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
@@ -3423,8 +3442,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 set_status(&app, &id, st);
                 app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
             } else if cur.status == "stopped" && early_published {
-                // 실사용 병합 중 취소 — 의심진단리포트를 유지하고 done 으로 마감한다.
-                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 의심진단리포트를 유지합니다.".to_string(), None);
+                // 최종 병합 중 취소 — 1차 리포트를 유지하고 done 으로 마감한다.
+                emit_note(&app, &id, "[완료] 추가 확인을 중단했습니다 — 1차 리포트는 그대로 둡니다.".to_string(), None);
                 set_status(&app, &id, "done");
                 app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
             }
@@ -3434,7 +3453,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
 }
 
 #[tauri::command]
-/// 파괴적 지시문 게이트 — 실행 진입점 공용. 미동의 파괴 지시는
+/// 위험 지시문 게이트 — 실행 진입점 공용. 미동의 위험 지시는
 /// CONSENT_REQUIRED 에러로 막고, Caution 은 주의 노트만 남기고 진행한다.
 fn gate_session_instruction(app: &AppHandle, id: &str, s: &Session) -> Result<(), String> {
     match risk::gate_instruction(&s.goal, s.danger_consent) {
@@ -3456,7 +3475,7 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
     gate_session_instruction(&app, &id, &s)?;
     // 세션 엔진에 따라 pi(-e 확장 게이트) 또는 prime-agent(스킬+킬게이트)로 실행한다.
-    // (심층 진단은 start_deep_diagnosis — 병렬 워커 + collector.)
+    // (정밀 진단은 start_deep_diagnosis — 병렬 5분야 + 병합.)
     return match session_engine(&s) {
         Engine::Pi => run_prime(&app, &id, &s, &settings, &redcell, &provider),
         Engine::Prime => run_prime_agent(&app, &id, &s, &settings, &provider),
@@ -3464,7 +3483,7 @@ fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
 }
 /// 실행 중지 — 등록된 자식 프로세스(심층 워커 `{id}#w{n}` 포함)를 kill 하고 stopped 로 마감한다.
 /// P0 스윕 중·라운드 사이처럼 등록된 자식이 없는 구간에서도 status 가 running 이면
-/// stopped 로 전이한다 — 그래야 심층 진단 스레드가 다음 단계(워커/collector)를
+/// stopped 로 전이한다 — 그래야 정밀 진단 스레드가 다음 단계를
 /// 시작하지 않고 바로 마감한다. (자식 없이 running 도 아닌 경우에만 Err.)
 #[tauri::command]
 fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
@@ -3662,7 +3681,7 @@ fn sanitize_filename(raw: &str) -> String {
 /// host 를 DNS 해석해 나온 IP 를 인가 목록에 추가한다. 반환: (새로 추가한 IP, 이미 있던 IP).
 // ── 진단 메모리(harness memory) — prime-agent Continual Harness 패턴의 경량 구현 ──
 // 전역 메모 + 대상별 메모를 앱 데이터 memory.json 에 누적하고, 진단 지시문에 주입한다.
-// kind: note(사용자 메모) | history(심층 진단 이력 자동 기록) | fix(조치 확인됨).
+// kind: note(사용자 메모) | history(정밀 진단 이력 자동 기록) | fix(조치 확인됨).
 #[derive(Serialize, Deserialize, Clone)]
 struct MemoryNote {
     id: String,
@@ -3710,7 +3729,7 @@ fn memory_block(app: &AppHandle, host: &str) -> String {
     out
 }
 
-/// 심층 진단 완료 후 이력 1줄 자동 기록 (대상별 history 5건·전체 300건 상한).
+/// 정밀 진단 완료 후 이력 1줄 자동 기록 (대상별 history 5건·전체 300건 상한).
 fn record_history(app: &AppHandle, host: &str, ok_n: usize, total: usize, ok: bool) {
     let guard = app.state::<IoGuard>();
     let _lock = guard.0.lock().unwrap();
@@ -4260,9 +4279,9 @@ mod tests {
             assert!(inst.contains("web_fetch"), "웹 조회 수단 명시: {}", def.id);
             assert!(inst.contains("## 워커 발견"), "출력 형식 명시: {}", def.id);
         }
-        let merge = deep_merge_instruction("http://t/", "", "--- W1 ---\n- [높음] x", "", "실사용진단리포트");
-        assert!(merge.contains("collector"), "병합자 역할 명시");
-        assert!(merge.contains("# <서비스명> 실사용진단리포트"), "종별 제목: {merge}");
+        let merge = deep_merge_instruction("http://t/", "", "--- W1 ---\n- [높음] x", "", "최종 리포트");
+        assert!(merge.contains("병합"), "병합자 역할 명시");
+        assert!(merge.contains("# <서비스명> 최종 리포트"), "종별 제목: {merge}");
         assert!(merge.contains("### 루트 1"), "리포트 형식 포함");
         assert!(merge.contains("멘토 노트"), "멘토 노트 라벨 포함");
     }
@@ -4421,17 +4440,39 @@ mod tests {
     }
 
     /// 발견 키 추출 — 등급 줄만 정규화·순서 유지·중복 제거.
+    /// `##` 소제목은 매 라운드 새로 찍혀 수렴 판정을 깨뜨리므로 세지 않는다
+    /// (무조건 3라운드 완주 회귀 방지).
     #[test]
     fn finding_keys_normalize_and_dedup() {
-        let text = "## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n잡담 줄은 무시된다\n* [높음] .env 노출 — 키 확인";
+        let text = "## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n잡담 줄은 무시된다\n* [높음] .env 노출 — 키 확인\n## 0. 한눈에 보기\n## 추가 발견";
         let keys = extract_finding_keys(text);
         assert_eq!(keys.len(), 2, "{keys:?}");
         assert!(keys[0].contains("보안헤더누락"));
         assert!(keys[1].contains("env노출"));
     }
 
-    /// 추적 지시문 — 라운드·자가 요약·교차 단서·추가 발견 형식 포함.
-    /// 의심 리포트용 워커 출력 병합 — 실사용 병합과 동일한 규칙(분야당 6000자·빈 워커
+    /// stderr 표시 여부 — 엔진 내부 소음(머지용 세션 자동 생성·지원 종료 경고)은
+    /// 사용자 로그에 올리지 않는다. 진짜 오류·경고는 그대로 보인다.
+    #[test]
+    fn stderr_engine_noise_filtered() {
+        // 단발성 머지 세션 자동 생성 — 매 진단마다 나오는 정상 소음.
+        assert!(!stderr_line_visible(
+            "Warning: No project session found with id 'rc-bd6baa08-merge'; creating a new session with that id."
+        ));
+        assert!(!stderr_line_visible("npm warn deprecated inflight@1.0.6"));
+        assert!(!stderr_line_visible(""));
+        assert!(!stderr_line_visible("   "));
+        // 진짜 문제는 보여야 한다.
+        assert!(stderr_line_visible("Error: 401 Unauthorized"));
+        assert!(stderr_line_visible("[model] request failed: timeout"));
+        // 워커 연속 세션의 자동 생성 경고는 맥락 유실 신호라 남긴다.
+        assert!(stderr_line_visible(
+            "Warning: No project session found with id 'rc-bd6baa08-w2'; creating a new session with that id."
+        ));
+    }
+
+    /// 추가 확인 지시문 — 차수·자가 요약·엇갈린 단서·추가 발견 형식 포함.
+    /// 1차 리포트용 출력 병합 — 최종 병합과 동일한 규칙(분야당 6000자·빈 분야
     /// 플레이스홀더·라운드 표기)이어야 두 리포트가 같은 품질로 나온다.
     #[test]
     fn combine_worker_outputs_shape() {
@@ -4439,21 +4480,21 @@ mod tests {
         accum.insert("w1".to_string(), "발견 A".to_string());
         accum.insert("w2".to_string(), "x".repeat(9000));
         let (combined, ok_n) = combine_worker_outputs(&accum, 1);
-        assert_eq!(ok_n, 2, "내용 있는 워커만 계수");
+        assert_eq!(ok_n, 2, "내용 있는 분야만 계수");
         assert!(combined.contains("발견 A"), "w1 내용: {combined}");
         assert!(combined.contains("[라운드 1]"), "라운드 표기: {combined}");
-        assert!(combined.contains("결과를 내지 못했습니다"), "빈 워커 플레이스홀더: {combined}");
-        let w2sec = combined.split("\n\n--- ").find(|s| s.starts_with("W2·")).unwrap_or("");
+        assert!(combined.contains("결과를 내지 못했습니다"), "빈 분야 플레이스홀더: {combined}");
+        let w2sec = combined.split("\n\n--- ").find(|s| s.starts_with("입력값 점검")).unwrap_or("");
         assert!(w2sec.chars().count() <= 6000 + 200, "분야당 6000자 절단: {}자", w2sec.chars().count());
     }
 
-    /// 의심진단리포트 병합 지시문은 같은 본문에 의심 단계 고지만 덧붙인다 —
-    /// 결과 탭에서 의심/실사용을 구분하는 표식이다.
+    /// 1차 리포트 병합 지시문은 같은 본문에 1차 단계 고지만 덧붙인다 —
+    /// 결과 탭에서 1차/최종을 구분하는 표식이다.
     #[test]
     fn early_merge_instruction_marks_preliminary() {
         let inst = early_merge_instruction("BASE".to_string());
         assert!(inst.starts_with("BASE"), "본문 보존");
-        assert!(inst.contains("의심진단리포트"), "의심 표기: {inst}");
+        assert!(inst.contains("1차 리포트"), "1차 표기: {inst}");
     }
 
     /// 부분 성공 판정 — 게이트웨이가 응답 말미를 자르면 pi 는 stopReason=error
@@ -4475,8 +4516,8 @@ mod tests {
     fn followup_instruction_shape() {
         let def = &DEEP_WORKERS[2];
         let inst = deep_followup_instruction(def, 2, "- [높음] IDOR 신호", "- [단서:w2] sqli", "http://t/");
-        assert!(inst.contains("추적 라운드 2"));
-        assert!(inst.contains("W3·인증"));
+        assert!(inst.contains("추가 확인 2차"));
+        assert!(inst.contains("로그인·권한 점검"));
         assert!(inst.contains("IDOR"));
         assert!(inst.contains("## 추가 발견"));
         assert!(inst.contains("web_fetch"));
@@ -4488,7 +4529,7 @@ mod tests {
     /// 회귀: lge-aigw 기본 모델은 보안 진단 콘텐츠를 통과시키는 서빙이어야 한다.
     /// Sonnet 5.5 서빙(esdp-sonnet-5-5)은 상류 안전 필터가 진단 용어·recon 툴 정의를
     /// 걸러 `completed` 빈 응답만 돌려준다(2026-10-26 실측) — 기본값으로 쓰면
-    /// 워커·collector 가 전부 빈 성공이 되어 리포트가 발행되지 않는다.
+    /// 분야·병합이 전부 빈 성공이 되어 리포트가 발행되지 않는다.
     #[test]
     fn lge_aigw_default_model_is_diagnosis_capable() {
         assert_eq!(LGE_AIGW_DEFAULT_MODEL, "system.ai.glm-5-3-flash");

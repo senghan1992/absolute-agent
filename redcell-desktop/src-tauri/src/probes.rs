@@ -148,7 +148,7 @@ pub struct SweepConfig {
     pub sweep_timeout: Duration,
     /// 세션 쿠키 (사용자가 붙여넣은 Cookie 헤더 값) — 전 요청에 첨부.
     pub cookie: Option<String>,
-    /// 파괴적 진단 동의 — 모달 명시 동의 시에만 true. 기본 false (fail-closed).
+    /// 위험 검사 동의 — 모달 명시 동의 시에만 true. 기본 false (fail-closed).
     /// true 일 때만 기본자격·IDOR 인접·쓰기검증 프로브가 동작한다.
     pub danger: bool,
     /// 진행 피드백 — TUI 폴링용 (None 이면 미사용).
@@ -2593,16 +2593,16 @@ fn sev_rank(s: &str) -> u8 {
     }
 }
 
-/// 한 줄 요약 — `[sys] P0 스윕 — 프로브 312개·발견 9건(…·정보 1)·검증 3건·18.2초`.
+/// 한 줄 요약 — `[sys] 기본 점검 — 항목 312개·발견 9건(…·정보 1)·직접 확인 3건·18.2초`.
 pub fn sweep_summary_line(rep: &ProbeReport) -> String {
     let mut c = [0usize; 5];
     for h in &rep.hits {
         c[sev_rank(&h.severity) as usize] += 1;
     }
     format!(
-        "[sys] P0 스윕{}{} — 프로브 {}개·발견 {}건(치명 {}/높음 {}/중간 {}/낮음 {}/정보 {})·검증 {}건·{:.1}초.",
-        if rep.authenticated { "(인증)" } else { "" },
-        if rep.danger { "(파괴적 동의)" } else { "" },
+        "[sys] 기본 점검{}{} — 항목 {}개·발견 {}건(치명 {}/높음 {}/중간 {}/낮음 {}/정보 {})·직접 확인 {}건·{:.1}초.",
+        if rep.authenticated { "(로그인 포함)" } else { "" },
+        if rep.danger { "(위험 검사 포함)" } else { "" },
         rep.probes_run,
         rep.hits.len(),
         c[0],
@@ -2835,7 +2835,7 @@ mod tests {
         assert!(d.find("hi-prio").unwrap() < d.find("low-prio").unwrap_or(usize::MAX), "{d}");
         assert!(d.contains("외 ") || d.contains("low-prio"), "{d}");
         let line = sweep_summary_line(&rep);
-        assert!(line.contains("프로브 10개") && line.contains("높음 1"), "{line}");
+        assert!(line.contains("항목 10개") && line.contains("높음 1"), "{line}");
     }
 
     // ── 실전 스윕: 로컬 스텁(HTTP) 대상으로 전체 파이프라인 실행 ──────────────

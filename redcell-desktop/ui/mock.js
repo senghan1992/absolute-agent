@@ -169,12 +169,12 @@
     updated_at: nowIso(),
     chat: [
       { role: "user", content: "쇼핑몰 서비스 보안 진단해줘", ts: nowIso() },
-      { role: "assistant", content: "진단 완료 — 공격 루트 3건(치명 1 · 높음 1 · 낮음 1)을 찾았습니다. 결과 탭에서 흐름·시뮬레이션·검증 상태를 확인하세요.", ts: nowIso() },
+      { role: "assistant", content: "진단 완료 — 결과 리포트 탭에서 뚫리는 과정·증거·막는 방법을 확인하세요. 이어서 질문하면 같은 작업에서 답변합니다.", ts: nowIso() },
     ],
     events: [
       { type: "note", text: "[sys] [model] anthropic:claude-opus-5" },
       { type: "note", text: "[sys] 진단 모드 시작 — DIAG_METHOD 주입" },
-      { type: "text_end", text: DIAG_DEMO_REPORT },
+      { type: "text_end", text: DIAG_DEMO_REPORT, report: "final" },
     ].map((e, i) => Object.assign({ _seq: i, _ts: Date.now() - 60000 + i * 2000 }, e)),
   };
 
@@ -384,53 +384,52 @@
     timers[session.id] = timer;
   }
 
-  // ── 심층 진단 시뮬레이션: 워커 5개 상태 + 중간 발견 + 최종 병합 리포트 ──────
+  // ── 정밀 진단 시뮬레이션: 5개 분야 상태 + 중간 발견 + 최종 병합 리포트 ──────
   const DEEP_DEMO_WORKERS = [
-    { worker: "w1", label: "W1·정찰", title: "표면 정찰" },
-    { worker: "w2", label: "W2·주입", title: "주입 공격" },
-    { worker: "w3", label: "W3·인증", title: "인증·세션·권한" },
-    { worker: "w4", label: "W4·노출", title: "노출·설정 오류" },
-    { worker: "w5", label: "W5·로직", title: "비즈니스 로직" },
+    { worker: "w1", label: "구조 살펴보기", title: "표면 정찰" },
+    { worker: "w2", label: "입력값 점검", title: "주입 공격" },
+    { worker: "w3", label: "로그인·권한 점검", title: "인증·세션·권한" },
+    { worker: "w4", label: "정보 노출 점검", title: "노출·설정 오류" },
+    { worker: "w5", label: "기능 오용 점검", title: "비즈니스 로직" },
   ];
   function simulateDeep(session) {
     const tp = session.engine === "prime" ? "prime-툴✓" : "pi-툴✓"; // 엔진별 툴 노트 접두
-    const eng = session.engine === "prime" ? "prime-agent" : "pi";
     const authed = !!(session.auth_cookie && session.auth_cookie.trim());
     const danger = !!session.danger_consent;
-    const suffix = `${authed ? "(인증)" : ""}${danger ? "(파괴적 동의)" : ""}`;
+    const suffix = `${authed ? "(로그인 포함)" : ""}${danger ? "(위험 검사 포함)" : ""}`;
     const p0note = danger
-      ? `[sys] P0 스윕${suffix} — 프로브 341개·발견 14건(치명 1/높음 4/중간 5/낮음 3/정보 1)·검증 6건·24.7초.`
+      ? `[sys] 기본 점검${suffix} — 항목 341개·발견 14건(치명 1/높음 4/중간 5/낮음 3/정보 1)·직접 확인 6건·24.7초.`
       : authed
-        ? `[sys] P0 스윕${suffix} — 프로브 318개·발견 11건(치명 0/높음 3/중간 4/낮음 3/정보 1)·검증 6건·19.4초.`
-        : `[sys] P0 스윕${suffix} — 프로브 312개·발견 9건(치명 0/높음 2/중간 4/낮음 2/정보 1)·검증 5건·18.2초.`;
+        ? `[sys] 기본 점검${suffix} — 항목 318개·발견 11건(치명 0/높음 3/중간 4/낮음 3/정보 1)·직접 확인 6건·19.4초.`
+        : `[sys] 기본 점검${suffix} — 항목 312개·발견 9건(치명 0/높음 2/중간 4/낮음 2/정보 1)·직접 확인 5건·18.2초.`;
     const seq = [
-      { type: "note", text: `[sys] 심층 진단 시작(${eng}) — 5개 분야 워커를 동시에 실행합니다(정찰·주입·인증·노출·로직).` },
-      { type: "worker_status", worker: "p0", label: "P0·스윕", title: "자동 스윕", state: "running" },
-      ...(danger ? [{ type: "note", text: "[경고] P0 파괴적 프로브 실행 — 기본자격·IDOR 인접·쓰기 검증 (사용자 동의 기반)" }] : []),
+      { type: "note", text: "[sys] 진단 시작 — 기본 점검 후 다섯 가지(구조·입력값·로그인·정보 노출·기능 오용)를 동시에 살펴봅니다." },
+      { type: "worker_status", worker: "p0", label: "기본 점검", title: "기본 점검", state: "running" },
+      ...(danger ? [{ type: "note", text: "[경고] 위험 검사 실행 중 — 흔한 초기 비밀번호·옆 번호 정보·임시 파일 만들기 (동의하셨습니다)" }] : []),
       { type: "note", text: p0note },
-      ...(authed ? [{ type: "note", text: "[sys] P0 인증 스윕 — 세션 쿠키 적용 · 로그인 폼 1건 발견 · injection 시도(무해 페이로드) 결과는 리포트의 auth-inject 시나리오를 확인하세요." }] : []),
-      ...(danger ? [{ type: "note", text: "[sys] P0 파괴적 결과 — 기본자격 admin/admin1234 성공 [치명] · IDOR 인접 열람 [높음] · 쓰기 검증·정리됨 [높음] (동의 기반, 상세는 리포트 참조)" }] : []),
-      { type: "worker_status", worker: "p0", label: "P0·스윕", title: "자동 스윕", state: "done" },
+      ...(authed ? [{ type: "note", text: "[sys] 기본 점검 — 로그인 쿠키 적용 · 로그인 폼 1건 발견 · 입력값 시도(무해) 결과는 리포트를 확인하세요." }] : []),
+      ...(danger ? [{ type: "note", text: "[sys] 위험 검사 결과 — 초기 비밀번호 admin/admin1234 성공 [치명] · 옆 번호 열람 [높음] · 임시 파일 만들기·정리됨 [높음] (동의 기반, 상세는 리포트 참조)" }] : []),
+      { type: "worker_status", worker: "p0", label: "기본 점검", title: "기본 점검", state: "done" },
       ...DEEP_DEMO_WORKERS.map((w) => ({ type: "worker_status", worker: w.worker, label: w.label, title: w.title, state: "running" })),
-      { type: "note", worker: "w1", text: `[W1·정찰] [${tp}] web_fetch (812ms) — 200 · nginx · X-Powered-By: PHP/8.1` },
-      { type: "note", worker: "w4", text: `[W4·노출] [${tp}] web_fetch (640ms) — /.env 200 · APP_KEY 노출 확인` },
-      { type: "note", worker: "w1", text: "[W1·정찰] ## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP·HSTS·X-Frame-Options 없음 / 근거: 응답 헤더 원문" },
+      { type: "note", worker: "w1", text: `[구조 살펴보기] [${tp}] web_fetch (812ms) — 200 · nginx · X-Powered-By: PHP/8.1` },
+      { type: "note", worker: "w4", text: `[정보 노출 점검] [${tp}] web_fetch (640ms) — /.env 200 · APP_KEY 노출 확인` },
+      { type: "note", worker: "w1", text: "[구조 살펴보기] ## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP·HSTS·X-Frame-Options 없음 / 근거: 응답 헤더 원문" },
       { type: "worker_status", worker: "w1", label: "W1·정찰", title: "표면 정찰", state: "done" },
-      { type: "note", worker: "w2", text: "[W2·주입] ## 워커 발견 (W2·주입 주입 공격)\n- [치명] 로그인 SQL 주입 신호 — DB 오류 노출 / 근거: You have an error in your SQL syntax" },
+      { type: "note", worker: "w2", text: "[입력값 점검] ## 워커 발견 (W2·주입 주입 공격)\n- [치명] 로그인 SQL 주입 신호 — DB 오류 노출 / 근거: You have an error in your SQL syntax" },
       { type: "worker_status", worker: "w2", label: "W2·주입", title: "주입 공격", state: "done" },
-      { type: "note", worker: "w3", text: "[W3·인증] ## 워커 발견 (W3·인증 인증·세션·권한)\n- [높음] IDOR 신호 — 무인증 인접 id 열람 / 근거: /api/orders/1000 무인증 200" },
-      ...(authed ? [{ type: "note", worker: "w3", text: "[W3·인증] 로그인 injection 시도 결과 — P0 auth-inject [P-31x] 인용: baseline 200/1.2KB → SQLi 페이로드 2종 모두 차단(동일 응답, DB 오류 없음) → [실증] 주입 내성 확인, 레이트리밋 미검출(10연속 200)은 별도 [중간] 보고" }] : []),
+      { type: "note", worker: "w3", text: "[로그인·권한 점검] ## 워커 발견 (W3·인증 인증·세션·권한)\n- [높음] IDOR 신호 — 무인증 인접 id 열람 / 근거: /api/orders/1000 무인증 200" },
+      ...(authed ? [{ type: "note", worker: "w3", text: "[로그인·권한 점검] 로그인 injection 시도 결과 — P0 auth-inject [P-31x] 인용: baseline 200/1.2KB → SQLi 페이로드 2종 모두 차단(동일 응답, DB 오류 없음) → [실증] 주입 내성 확인, 레이트리밋 미검출(10연속 200)은 별도 [중간] 보고" }] : []),
       { type: "worker_status", worker: "w3", label: "W3·인증", title: "인증·세션·권한", state: "done" },
-      { type: "note", worker: "w4", text: "[W4·노출] ## 워커 발견 (W4·노출 노출·설정 오류)\n- [높음] .env 노출 — 앱 키·DB 비밀번호 / 근거: /.env 200 원문" },
+      { type: "note", worker: "w4", text: "[정보 노출 점검] ## 워커 발견 (W4·노출 노출·설정 오류)\n- [높음] .env 노출 — 앱 키·DB 비밀번호 / 근거: /.env 200 원문" },
       { type: "worker_status", worker: "w4", label: "W4·노출", title: "노출·설정 오류", state: "done" },
-      { type: "note", worker: "w5", text: "[W5·로직] ## 워커 발견 (W5·로직 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
+      { type: "note", worker: "w5", text: "[기능 오용 점검] ## 워커 발견 (W5·로직 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
       { type: "worker_status", worker: "w5", label: "W5·로직", title: "비즈니스 로직", state: "done" },
-      { type: "note", text: "[sys] 추적 라운드 2 시작 — 교차 단서 3건 추적." },
-      { type: "note", text: "[sys] 추적 라운드 2 종료 — 신규 발견 0건." },
-      { type: "note", text: "[sys] 수렴 — 추가 발견 없음, collector 로 진행합니다." },
-      { type: "note", text: "[sys] 워커 5/5 완료(2라운드) — collector 가 최종 시나리오 리포트를 병합합니다." },
-      { type: "text_end", text: DIAG_DEMO_REPORT },
-      { type: "note", text: "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요." },
+      { type: "note", text: "[sys] 추가 확인 2차 시작 — 엇갈린 단서 3건 확인." },
+      { type: "note", text: "[sys] 추가 확인 2차 끝 — 새로 찾은 것 0건." },
+      { type: "note", text: "[sys] 새로 찾은 것이 없어 추가 확인을 마칩니다 — 최종 리포트를 만듭니다." },
+      { type: "note", text: "[sys] 다섯 가지 확인 끝 — 최종 리포트를 만듭니다." },
+      { type: "text_end", text: DIAG_DEMO_REPORT, report: "final" },
+      { type: "note", text: "[완료] 최종 리포트 완성 — 결과 리포트 탭에서 확인하세요." },
     ];
     session.diag = true;
     session.deep = true;
@@ -529,7 +528,7 @@
         s.danger_consented_at = args.consent ? nowIso() : "";
         s.updated_at = nowIso();
         const ev = { _seq: s.events.length, _ts: Date.now(), type: "note",
-          text: args.consent ? "[경고] 파괴적 진단 동의됨 — 기본자격 시도·IDOR 인접 확인·쓰기 검증이 다음 진단부터 실행됩니다. (세션별, 언제든 철회 가능)" : "[sys] 파괴적 진단 동의 철회 — 읽기 전용 모드로 복귀합니다." };
+          text: args.consent ? "[경고] 위험 검사 켜짐 — 흔한 초기 비밀번호·옆 번호 정보·임시 파일 만들기가 다음 진단부터 실행됩니다. (이번 작업만, 언제든 끌 수 있음)" : "[sys] 위험 검사 꺼짐 — 안전한 읽기 방식으로 돌아갑니다." };
         s.events.push(ev);
         emit("engagement-event", { sessionId: s.id, event: ev });
         return clone(s);
