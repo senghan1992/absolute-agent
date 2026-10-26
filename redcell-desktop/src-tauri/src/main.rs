@@ -3308,8 +3308,10 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트");
                 if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
                     early_published = true;
-                    // 발행 파일 자동 저장 — 실패해도 로그를 더럽히지 않고 넘어간다(열 때 저장됨).
-                    let _ = write_report_file(&reports_dir(&app), &id, "early", outcome.text.trim());
+                    // 발행 파일 자동 저장 — 실패하면 한 줄로 알린다(열 때 저장됨).
+                    if let Err(e) = write_report_file(&reports_dir(&app), &id, "early", outcome.text.trim()) {
+                        emit_note(&app, &id, format!("[sys] 1차 리포트 자동 저장 실패({e}) — 결과 탭에서 MD로 저장하세요."), None);
+                    }
                     emit_note(&app, &id, "[완료] 1차 리포트 완성 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다.".to_string(), None);
                 } else if outcome.aborted || read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false) {
                     return; // 1차 병합 중 중지 — 리포트 없이 stopped 유지
@@ -3422,8 +3424,10 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트");
         let ok = (!merge_outcome.failed && !merge_outcome.aborted) || has_usable_text(&merge_outcome);
         if ok && !merge_outcome.text.trim().is_empty() {
-            // 발행 파일 자동 저장 — 실패해도 조용히 넘어간다(열 때 저장됨).
-            let _ = write_report_file(&reports_dir(&app), &id, "final", merge_outcome.text.trim());
+            // 발행 파일 자동 저장 — 실패하면 한 줄로 알린다(열 때 저장됨).
+            if let Err(e) = write_report_file(&reports_dir(&app), &id, "final", merge_outcome.text.trim()) {
+                emit_note(&app, &id, format!("[sys] 최종 리포트 자동 저장 실패({e}) — 결과 탭에서 MD로 저장하세요."), None);
+            }
         }
         {
             let ev = json!({ "type": "note", "text": if ok {
@@ -3706,23 +3710,31 @@ fn parse_report_filename(name: &str) -> Option<(String, String, i64)> {
     Some((sid, tag, ts))
 }
 
+/// 같은 세션·태그의 동일 내용 발행 파일을 찾는다 — 저장 재사용 + 채우기 계수용.
+fn find_report_file(dir: &Path, session_id: &str, tag: &str, text: &str) -> Option<PathBuf> {
+    let sid: String = session_id.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
+    let rd = fs::read_dir(dir).ok()?;
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        if let Some((psid, ptag, _)) = parse_report_filename(&name) {
+            if psid == sid && ptag == tag
+                && fs::read_to_string(e.path()).map(|old| old == text).unwrap_or(false)
+            {
+                return Some(e.path());
+            }
+        }
+    }
+    None
+}
+
 /// 리포트 텍스트를 발행 파일로 저장 — 같은 세션·태그에 동일 내용 파일이 있으면 재사용.
 fn write_report_file(dir: &Path, session_id: &str, tag: &str, text: &str) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("보고서 폴더 생성 실패: {e}"))?;
     let sid: String = session_id.chars().filter(|c| c.is_alphanumeric() || *c == '-' || *c == '_').collect();
     let sid = if sid.is_empty() { "session".to_string() } else { sid };
     let tag = if matches!(tag, "early" | "final" | "note") { tag } else { "note" };
-    if let Ok(rd) = fs::read_dir(dir) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if let Some((psid, ptag, _)) = parse_report_filename(&name) {
-                if psid == sid && ptag == tag
-                    && fs::read_to_string(e.path()).map(|old| old == text).unwrap_or(false)
-                {
-                    return Ok(e.path());
-                }
-            }
-        }
+    if let Some(existing) = find_report_file(dir, &sid, tag, text) {
+        return Ok(existing);
     }
     // 같은 초에 다른 내용이 오면 1초씩 밀어 덮어쓰기를 피한다.
     let mut ts = Utc::now().timestamp();
@@ -3748,6 +3760,40 @@ struct ReportFile {
     file: String,
     size: u64,
     manual: bool,
+}
+
+/// 시작 시 1회: 발행 표식(early/final) 기록 중 파일이 없는 것을 저장한다.
+/// 자동 저장 도입 전 세션의 리포트도 파일로 갖게 하는 마이그레이션.
+/// 새로 쓴 개수를 돌려준다.
+fn backfill_reports_in_dir(sessions: &Path, reports: &Path) -> usize {
+    let mut n = 0usize;
+    let Ok(rd) = fs::read_dir(sessions) else { return 0 };
+    for e in rd.flatten() {
+        if e.path().extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let Ok(txt) = fs::read_to_string(e.path()) else { continue };
+        let Ok(s) = serde_json::from_str::<Session>(&txt) else { continue };
+        for ev in &s.events {
+            let tag = ev.get("report").and_then(|v| v.as_str()).unwrap_or("");
+            if !matches!(tag, "early" | "final") {
+                continue;
+            }
+            let text = ev.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+            if text.is_empty() || find_report_file(reports, &s.id, tag, text).is_some() {
+                continue;
+            }
+            if write_report_file(reports, &s.id, tag, text).is_ok() {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
+#[tauri::command]
+fn backfill_reports(app: AppHandle) -> usize {
+    backfill_reports_in_dir(&sessions_dir(&app), &reports_dir(&app))
 }
 
 /// 보고서 폴더 절대 경로 — "폴더 열기" 버튼용.
@@ -4048,6 +4094,7 @@ fn main() {
             reports_path,
             list_reports,
             save_report_file,
+            backfill_reports,
             open_path
         ])
         .run(tauri::generate_context!())
@@ -4641,6 +4688,33 @@ mod tests {
         let n = fs::read_dir(&dir).unwrap().count();
         assert_eq!(n, 2, "파일은 2개여야 한다");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    /// 시작 시 채우기 — 발행 표식 기록만 파일로 만들고, 자질구레한 기록은 건너뛴다.
+    /// 두 번째 실행부터는 새로 쓸 게 없어 0을 돌려준다(멱등).
+    #[test]
+    fn backfill_saves_only_tagged_reports() {
+        let base = std::env::temp_dir().join(format!("redcell-bf-{}-{}", std::process::id(), Utc::now().timestamp_nanos_opt().unwrap_or(0)));
+        let sessions = base.join("sessions");
+        let reports = base.join("reports");
+        fs::create_dir_all(&sessions).unwrap();
+        let sess = serde_json::json!({
+            "id": "sess-9", "name": "n", "host": "h", "port": null, "goal": "", "provider": "",
+            "mode": "tools", "max": false, "diag": true, "deep": true, "engine": "pi",
+            "auth_cookie": "", "danger_consent": false, "danger_consented_at": "", "piq": "",
+            "status": "done", "created_at": "", "updated_at": "", "chat": [],
+            "events": [
+                { "_seq": 0, "type": "text_end", "text": "pong" },
+                { "_seq": 1, "type": "note", "text": "# 1차 리포트 본문", "report": "early" },
+                { "_seq": 2, "type": "note", "text": "# 최종 리포트 본문", "report": "final" },
+                { "_seq": 3, "type": "note", "text": "" , "report": "final" },
+            ]
+        });
+        fs::write(sessions.join("sess-9.json"), serde_json::to_string(&sess).unwrap()).unwrap();
+        assert_eq!(backfill_reports_in_dir(&sessions, &reports), 2);
+        assert_eq!(fs::read_dir(&reports).unwrap().count(), 2);
+        assert_eq!(backfill_reports_in_dir(&sessions, &reports), 0, "두 번째는 새로 쓸 게 없다");
+        let _ = fs::remove_dir_all(&base);
     }
 
     /// 경로 열기 — 보고서 폴더 안의 파일만 허용하고, 바깥은 거부한다.

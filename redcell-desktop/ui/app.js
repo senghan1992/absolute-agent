@@ -1277,18 +1277,21 @@ function switchView(name) {
 
 // ── 결과 탭: 에이전트가 만들어낸 마크다운을 렌더링해 보여준다 ──────────────────
 // pi stdout 의 text_end 가 note 이벤트로 들어온다. [sys]/[pi-툴]/[오류]/[완료] 같은
-// 진단 리포트 H1 정규화 — "{세션명} {종별}"로 통일. 리포트형 H1이 없으면 그대로 둔다.
-function normalizeReportTitle(text, name, report) {
+// 진단 리포트 H1 정규화 — "{세션}-{주소} {종별}"로 통일. 리포트형 H1이 없으면 그대로 둔다.
+function normalizeReportTitle(text, s, report) {
   const re = /^#\s+.*리포트.*$/m;
   if (!re.test(text)) return text;
   const kind = report === "early" ? "1차 리포트" : report === "final" ? "최종 리포트" : "진단 리포트";
-  return text.replace(re, `# ${name} ${kind}`);
+  const name = ((s && s.name) || "").trim();
+  const tgt = sessionTarget(s);
+  const head = name && tgt ? `${name}-${tgt}` : (tgt || name || "진단");
+  return text.replace(re, `# ${head} ${kind}`);
 }
 
 // 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
 function resultDocs(s) {
   const out = [];
-  const workerFallback = []; // collector 실패 시 워커 발견이라도 보여준다
+  const workerFallback = []; // 병합 실패 시 분야별 발견이라도 보여준다
   const seen = new Set();
   let prevText = null; // text_end/message_end 이중 저장 등 연속 중복은 1개만
   for (const e of eventsOf(s)) {
@@ -1296,6 +1299,9 @@ function resultDocs(s) {
     if (!t) continue;
     if (/^\[(sys|pi-툴|prime-툴|오류|완료|인텔)\]/.test(t)) continue;
     if (/^대상 .*(인가|자동 추가)/.test(t)) continue;
+    // 진단 세션은 진짜 리포트만: 병합 표식 문서 + 긴 정리 문서.
+    // "pong" 같은 자질구레한 기록은 결과 탭에 올리지 않는다(진행 상황에는 남는다).
+    if (s && s.diag && !e.worker && !e.report && t.length < 200) continue;
     const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -1304,11 +1310,11 @@ function resultDocs(s) {
     const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null };
     // 분야별 중간 발견(worker 표식)은 최종 리포트가 아니면 결과에서 제외.
     if (e.worker) { workerFallback.push(doc); continue; }
-    // 진단 리포트 제목은 "{세션명} {종별}"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
-    if (s && s.diag && s.name && s.name.trim()) doc.text = normalizeReportTitle(t, s.name.trim(), doc.report);
+    // 진단 리포트 제목은 "{세션}-{주소} {종별}"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
+    if (s && s.diag) doc.text = normalizeReportTitle(t, s, doc.report);
     out.push(doc);
   }
-  // 의심·실사용 두 리포트는 모두 보여준다 (통계는 최신 리포트 기준으로 별도 집계).
+  // 1차·최종 두 리포트는 모두 보여준다 (통계는 최신 리포트 기준으로 별도 집계).
   return out.length ? out : workerFallback;
 }
 
@@ -2357,6 +2363,7 @@ function renderDashboard() {
     return a;
   }, { total: 0, done: 0, diag: 0, roots: 0, sev: { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 }, ver: { "실증": 0, "징후": 0, "가정": 0 }, worstRank: -1, worst: null });
   const worst = agg.worst || { letter: "·", label: "—", cls: "g-none" };
+  const STATUS_KO = { running: "진행 중", done: "완료", error: "오류", stopped: "중지됨", idle: "대기" };
   body.innerHTML = `
     <div class="dash-summary">
       <div class="ds-stat"><b>${agg.total}</b><span>작업</span></div>
@@ -2366,38 +2373,31 @@ function renderDashboard() {
       <div class="ds-crits">
         <span class="dc crit">치명 ${agg.sev["치명"]}</span><span class="dc high">높음 ${agg.sev["높음"]}</span>
         <span class="dc med">중간 ${agg.sev["중간"]}</span><span class="dc low">낮음 ${agg.sev["낮음"]}</span>
-        <span class="dc v">실증 ${agg.ver["실증"]} · 징후 ${agg.ver["징후"]} · 가정 ${agg.ver["가정"]}</span>
+        <span class="dc v">직접 ${agg.ver["실증"]} · 일부 ${agg.ver["징후"]} · 추측 ${agg.ver["가정"]}</span>
       </div>
     </div>
     ` + ordered.map((s) => {
     const st = dashSessionStats(s);
     const statusCls = ["running", "done", "error", "stopped", "idle"].includes(st.status) ? st.status : "idle";
-    let card;
+    const statusKo = STATUS_KO[statusCls] || "대기";
+    const title = st.kind === "diag" ? reportDisplayTitle(s) : `${((s.name || "").trim() || "작업")}${st.target ? `-${st.target}` : ""}`;
+    let badge, meta;
     if (st.kind === "diag" && !st.pending) {
-      card = `
-        <div class="dash-grade ${st.grade.cls}"><b>${st.grade.letter}</b><span>${st.grade.label}</span></div>
-        <div class="dash-main">
-          <div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
-          <div class="dash-meta">위험 ${st.roots}개 · ${esc((s.name || "").trim() || "진단")}</div>
-          <div class="dash-chips">
-            <span class="dc crit">치명 ${st.sev["치명"]}</span><span class="dc high">높음 ${st.sev["높음"]}</span>
-            <span class="dc med">중간 ${st.sev["중간"]}</span><span class="dc low">낮음 ${st.sev["낮음"]}</span>
-            <span class="dc v">실증 ${st.ver["실증"]} · 징후 ${st.ver["징후"]} · 가정 ${st.ver["가정"]}</span>
-          </div>
-        </div>`;
+      badge = `<div class="dash-grade ${st.grade.cls}"><b>${st.grade.letter}</b><span>${st.grade.label}</span></div>`;
+      meta = `<span class="dm-strong">위험 ${st.roots}개</span><i>치명 ${st.sev["치명"]}</i><i>높음 ${st.sev["높음"]}</i><i>중간 ${st.sev["중간"]}</i><i>낮음 ${st.sev["낮음"]}</i><i class="dm-v">직접 ${st.ver["실증"]} · 일부 ${st.ver["징후"]} · 추측 ${st.ver["가정"]}</i>`;
     } else if (st.kind === "diag") {
-      card = `
-        <div class="dash-grade g-none"><b>·</b><span>진단 중</span></div>
-        <div class="dash-main"><div class="dash-title"><b>${esc(st.target)}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
-        <div class="dash-meta">리포트 만드는 중 · ${esc((s.goal && s.goal.slice(0,60)) || "대기")}</div></div>`;
+      badge = `<div class="dash-grade g-run"><b><span class="dash-spin"></span></b><span>진단 중</span></div>`;
+      meta = `<span class="dm-strong">리포트 만드는 중</span><i>${esc((s.goal && s.goal.slice(0, 60)) || "대기")}</i>`;
     } else {
-      card = `
-        <div class="dash-grade g-none"><b>◇</b><span>작업</span></div>
-        <div class="dash-main"><div class="dash-title"><b>${esc(st.target || "(주소 없음)")}</b><span class="dash-status s-${statusCls}">${esc(st.status)}</span></div>
-        <div class="dash-meta">${esc(st.goal)}</div></div>`;
+      badge = `<div class="dash-grade g-none"><b>◇</b><span>작업</span></div>`;
+      meta = `<i>${esc(st.goal)}</i>`;
     }
-    return `<article class="dash-card" data-session="${s.id}">${card}
-        <div class="dash-foot"><span class="dash-upd">${esc(st.updated)}</span>
+    return `<article class="dash-card" data-session="${s.id}">${badge}
+        <div class="dash-main">
+          <div class="dash-title"><b>${esc(title)}</b><span class="dash-status s-${statusCls}">${statusKo}</span></div>
+          <div class="dash-meta">${meta}</div>
+        </div>
+        <div class="dash-side"><span class="dash-upd">${esc(st.updated)}</span>
           <button class="btn btn-ghost btn-xs dash-open">열기</button></div>
       </article>`;
   }).join("");
@@ -2465,6 +2465,18 @@ const AUDIT_ICON = { auth: "i-key", block: "i-ban", finding: "i-alert", diag: "i
 
 // ── 리포트 모아보기: 발행 파일 + 파일 없는 기록을 세션별로 ──────────────────────
 const REPORT_TAG_LABEL = { early: "1차", final: "최종", note: "메모", manual: "직접 저장" };
+// 과거 기록 표시용 제목 — "{세션}-{주소} 진단 리포트" 형식으로 통일한다.
+function sessionTarget(s) {
+  return `${(s && s.host) || ""}${s && s.port ? ":" + s.port : ""}`;
+}
+function reportDisplayTitle(s) {
+  const name = ((s && s.name) || "").trim();
+  const tgt = sessionTarget(s);
+  if (name && tgt) return `${name}-${tgt} 진단 리포트`;
+  if (tgt) return `${tgt} 진단 리포트`;
+  if (name) return `${name} 진단 기록`;
+  return "제목 없음 진단 기록";
+}
 function reportDocRows(s) {
   // 발행 후보: report 표식 문서 + 긴 문서(추가 지시 후 정리 등). 짧은 메모는 제외.
   return resultDocs(s).filter((d) => d.report || (d.text || "").length >= 200);
@@ -2524,10 +2536,9 @@ async function renderReports() {
       </div>
     </div>`;
   body.innerHTML = ordered.map((g) => {
-    const name = (g.s && g.s.name) || "(삭제된 작업)";
-    const tgt = g.s ? `${g.s.host || ""}${g.s.port ? ":" + g.s.port : ""}` : "";
+    const head = g.s ? reportDisplayTitle(g.s) : "(삭제된 작업) 진단 리포트";
     const rows = [...g.rows].sort((a, b) => (b.ts || 0) - (a.ts || 0)).map((r) => rowHtml(r, g.s ? g.s.id : "")).join("");
-    return `<section class="rp-group"><header class="rp-group-head"><b>${esc(name)}</b>${tgt ? `<span>${esc(tgt)}</span>` : ""}</header>${rows}</section>`;
+    return `<section class="rp-group"><header class="rp-group-head"><b>${esc(head)}</b></header>${rows}</section>`;
   }).join("") + (manual.length ? `<section class="rp-group"><header class="rp-group-head"><b>직접 저장한 파일</b></header>${
     manual.map((f) => rowHtml({ kind: "file", tag: "manual", ts: f.ts, file: f.file, size: f.size }, "")).join("")
   }</section>` : "");
@@ -2572,11 +2583,13 @@ function renderAudit() {
   }
   body.innerHTML = list.map((e) => {
     const icon = AUDIT_ICON[e.kind] || "i-file";
+    const s = sessions.find((x) => x.id === e.id);
+    const where = s && s.diag ? reportDisplayTitle(s) : `${e.session}${e.target && e.target !== "—" ? `-${e.target}` : ""}`;
     return `<div class="au-row au-${e.sev}">
       <span class="au-ic"><svg class="ic"><use href="#${icon}"/></svg></span>
       <div class="au-main">
         <div class="au-title"><span class="au-badge">${e.label}</span> ${esc(e.desc)}</div>
-        <div class="au-meta"><span class="au-tgt">${esc(e.target)}</span> · ${esc(e.session)}</div>
+        <div class="au-meta">${esc(where)}</div>
       </div>
       <span class="au-time">${fmtAuditTs(e.ts)}</span>
     </div>`;
@@ -2816,6 +2829,7 @@ async function boot() {
   switchView("live");
   settings = await invoke("get_settings");
   sessions = await invoke("list_sessions");
+  try { await invoke("backfill_reports"); } catch { /* 미리보기·구버전은 무시 */ }
   activeId = sessions.length ? sessions[0].id : null;
   renderTabs();
   renderActive();

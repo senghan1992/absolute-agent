@@ -413,17 +413,17 @@
       ...DEEP_DEMO_WORKERS.map((w) => ({ type: "worker_status", worker: w.worker, label: w.label, title: w.title, state: "running" })),
       { type: "note", worker: "w1", text: `[구조 살펴보기] [${tp}] web_fetch (812ms) — 200 · nginx · X-Powered-By: PHP/8.1` },
       { type: "note", worker: "w4", text: `[정보 노출 점검] [${tp}] web_fetch (640ms) — /.env 200 · APP_KEY 노출 확인` },
-      { type: "note", worker: "w1", text: "[구조 살펴보기] ## 워커 발견 (W1·정찰 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP·HSTS·X-Frame-Options 없음 / 근거: 응답 헤더 원문" },
-      { type: "worker_status", worker: "w1", label: "W1·정찰", title: "표면 정찰", state: "done" },
-      { type: "note", worker: "w2", text: "[입력값 점검] ## 워커 발견 (W2·주입 주입 공격)\n- [치명] 로그인 SQL 주입 신호 — DB 오류 노출 / 근거: You have an error in your SQL syntax" },
-      { type: "worker_status", worker: "w2", label: "W2·주입", title: "주입 공격", state: "done" },
-      { type: "note", worker: "w3", text: "[로그인·권한 점검] ## 워커 발견 (W3·인증 인증·세션·권한)\n- [높음] IDOR 신호 — 무인증 인접 id 열람 / 근거: /api/orders/1000 무인증 200" },
+      { type: "note", worker: "w1", text: "[구조 살펴보기] ## 워커 발견 (구조 살펴보기 표면 정찰)\n- [중간] 보안 헤더 누락 — CSP·HSTS·X-Frame-Options 없음 / 근거: 응답 헤더 원문" },
+      { type: "worker_status", worker: "w1", label: "구조 살펴보기", title: "표면 정찰", state: "done" },
+      { type: "note", worker: "w2", text: "[입력값 점검] ## 워커 발견 (입력값 점검 주입 공격)\n- [치명] 로그인 SQL 주입 신호 — DB 오류 노출 / 근거: You have an error in your SQL syntax" },
+      { type: "worker_status", worker: "w2", label: "입력값 점검", title: "주입 공격", state: "done" },
+      { type: "note", worker: "w3", text: "[로그인·권한 점검] ## 워커 발견 (로그인·권한 점검 인증·세션·권한)\n- [높음] IDOR 신호 — 무인증 인접 id 열람 / 근거: /api/orders/1000 무인증 200" },
       ...(authed ? [{ type: "note", worker: "w3", text: "[로그인·권한 점검] 로그인 injection 시도 결과 — P0 auth-inject [P-31x] 인용: baseline 200/1.2KB → SQLi 페이로드 2종 모두 차단(동일 응답, DB 오류 없음) → [실증] 주입 내성 확인, 레이트리밋 미검출(10연속 200)은 별도 [중간] 보고" }] : []),
-      { type: "worker_status", worker: "w3", label: "W3·인증", title: "인증·세션·권한", state: "done" },
-      { type: "note", worker: "w4", text: "[정보 노출 점검] ## 워커 발견 (W4·노출 노출·설정 오류)\n- [높음] .env 노출 — 앱 키·DB 비밀번호 / 근거: /.env 200 원문" },
-      { type: "worker_status", worker: "w4", label: "W4·노출", title: "노출·설정 오류", state: "done" },
-      { type: "note", worker: "w5", text: "[기능 오용 점검] ## 워커 발견 (W5·로직 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
-      { type: "worker_status", worker: "w5", label: "W5·로직", title: "비즈니스 로직", state: "done" },
+      { type: "worker_status", worker: "w3", label: "로그인·권한 점검", title: "인증·세션·권한", state: "done" },
+      { type: "note", worker: "w4", text: "[정보 노출 점검] ## 워커 발견 (정보 노출 점검 노출·설정 오류)\n- [높음] .env 노출 — 앱 키·DB 비밀번호 / 근거: /.env 200 원문" },
+      { type: "worker_status", worker: "w4", label: "정보 노출 점검", title: "노출·설정 오류", state: "done" },
+      { type: "note", worker: "w5", text: "[기능 오용 점검] ## 워커 발견 (기능 오용 점검 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
+      { type: "worker_status", worker: "w5", label: "기능 오용 점검", title: "비즈니스 로직", state: "done" },
       { type: "note", text: "[sys] 추가 확인 2차 시작 — 엇갈린 단서 3건 확인." },
       { type: "note", text: "[sys] 추가 확인 2차 끝 — 새로 찾은 것 0건." },
       { type: "note", text: "[sys] 새로 찾은 것이 없어 추가 확인을 마칩니다 — 최종 리포트를 만듭니다." },
@@ -609,6 +609,7 @@
         return `(preview)/reports/${a.download}`;
       }
       case "open_path": return null; // 미리보기는 저장 시점에 다운로드로 대신한다.
+      case "backfill_reports": return 0; // 미리보기는 파일이 없어 할 일 없음.
       default: console.warn("mock invoke: 알 수 없는 명령", cmd); return null;
     }
   }
