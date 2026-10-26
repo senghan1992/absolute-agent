@@ -233,10 +233,12 @@ fn guess_redcell_dir() -> Option<String> {
     None
 }
 
-/// LGE AIGW 기본 모델 — MLflow Responses 엔드포인트의 Sonnet 5.5 서빙 이름.
-const LGE_AIGW_DEFAULT_MODEL: &str = "lge_esdataplfm_ws.custom_model_prd.esdp-sonnet-5-5";
-/// 이전 기본 모델 — 저장된 설정 자동 이행용.
-const LGE_AIGW_OLD_DEFAULT_MODEL: &str = "system.ai.glm-5-3-flash";
+/// LGE AIGW 기본 모델 — MLflow Responses 엔드포인트의 GLM 서빙 이름.
+/// Sonnet 5.5 서빙(`lge_esdataplfm_ws.custom_model_prd.esdp-sonnet-5-5`)은 보안 진단
+/// 콘텐츠(공격 용어·recon 툴 정의)를 상류에서 필터링해 `completed` 빈 응답만 돌려줘
+/// (2026-10-26 실측) 진단 기본값으로 쓸 수 없다 — 기본값을 Sonnet 으로 바꾸면
+/// 전 워커가 빈 성공이 되어 리포트가 발행되지 않는다.
+const LGE_AIGW_DEFAULT_MODEL: &str = "system.ai.glm-5-3-flash";
 
 // ── 커맨드 ───────────────────────────────────────────────────────────────────
 #[tauri::command]
@@ -265,11 +267,9 @@ fn get_settings(app: AppHandle) -> Settings {
             },
         );
     } else if let Some(conn) = s.providers.get_mut("lge-aigw") {
-        // 구 기본 모델(GLM 5.3 Flash)은 pi 모델 목록에서 빠졌다 — 기본값 그대로였다면
-        // 새 기본 모델(Sonnet 5.5)로 옮긴다. 사용자가 직접 바꾼 모델은 존중한다.
-        if conn.model.trim() == LGE_AIGW_OLD_DEFAULT_MODEL {
-            conn.model = LGE_AIGW_DEFAULT_MODEL.into();
-        }
+        // 모델 자동 이행 없음 — 저장된 모델(Sonnet 포함)은 사용자가 직접 고른 값으로
+        // 존중한다. Sonnet 서빙은 진단 콘텐츠를 빈 응답 처리하므로 그런 설정에서는
+        // 실행 단계(핑·워커)의 빈-응답 게이트가 원인과 GLM 복귀를 안내한다.
         // 구버전 기본값(`!ug auth-token` + Anthropic 경로)에서 새 기본값으로 이행 —
         // 셸 명령 키 해석은 데스크톱 실행 환경에 따라 실패하기 쉽다(핑 오류 원인).
         // 정확히 구버전 기본 조합일 때만 되돌리고, 사용자가 쓴 값은 존중한다.
@@ -2154,6 +2154,14 @@ fn preflight_llm_check(
             "모델 연결 확인(핑) 실패 — provider '{provider}'\n{why}\n설정(⚙) > 프로바이더에서 연결 테스트를 실행해 API 키·모델명·API 방식을 확인하세요."
         ));
     }
+    // 빈 성공 — 정상 종료했지만 텍스트가 하나도 없으면(상류 필터의 빈 completion)
+    // 워커 5개를 돌려봤자 빈 리포트이므로 여기서 즉시 중단한다.
+    if is_empty_success(&outcome) {
+        return Err(format!(
+            "모델 연결 확인(핑) 실패 — provider '{provider}' 가 빈 응답을 반환했습니다(정상 종료지만 텍스트 없음).\n원인 후보: 모델의 상류 안전 필터(진단 용어·툴 정의 차단), 게이트웨이 무응답.\nlge-aigw 모델이 Sonnet 서빙이면 `{glm}` 로 되돌리세요 — Sonnet 서빙은 보안 진단 콘텐츠를 빈 응답 처리합니다.",
+            glm = LGE_AIGW_DEFAULT_MODEL,
+        ));
+    }
     Ok(())
 }
 
@@ -2379,7 +2387,11 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
     } else if outcome.blocked {
         format!("[차단] scope 위반으로 {engine_label} 실행을 중단했습니다 — 🛡 인가 대상 관리에서 범위를 확인하세요.")
     } else if ok {
-        format!("[완료] {engine_label} 종료.")
+        if is_empty_success(outcome) {
+            format!("[완료] {engine_label} 종료 — 빈 응답: 모델이 텍스트를 반환하지 않았습니다(상류 필터·게이트웨이 응답 확인).")
+        } else {
+            format!("[완료] {engine_label} 종료.")
+        }
     } else {
         format!("[완료] {engine_label} 비정상 종료{err_hint}")
     }});
@@ -2566,6 +2578,13 @@ struct PumpOutcome {
     settled: bool, // agent_settled 수신 (pi 1.3 정식 완료 신호)
     blocked: bool, // 반응형 스코프 게이트 발동 (인가 밖 툴 호출로 kill)
     error: String, // 마지막 LLM/실행 오류 메시지 — 사전 점검·마감 안내에 쓴다
+}
+
+/// 빈 성공 판정 — stop·exit 0 으로 끝났지만 어시스턴트 텍스트가 하나도 없을 때 true.
+/// 상류 안전 필터의 빈 completion·게이트웨이 무응답이 원인이며, 호출자는 실패로 취급하고
+/// 원인을 안내해야 한다 (조용히 빈 리포트가 되는 것을 방지).
+fn is_empty_success(o: &PumpOutcome) -> bool {
+    !o.failed && !o.aborted && o.text.trim().is_empty()
 }
 
 /// 반응형 스코프 게이트 — prime-agent 엔진용. tool_execution_start 를 볼 때마다
@@ -3175,6 +3194,21 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 최종 시나리오 리포트를 병합합니다.", DEEP_WORKERS.len()) });
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+        }
+        // 전 워커 빈 응답 — 병합할 게 없으니 collector 를 돌리지 않고 원인을 안내한다
+        // (핑은 통과했지만 진단 본문이 필터된 경우의 방어선).
+        if ok_n == 0 {
+            let ev = json!({ "type": "note", "text": format!(
+                "[오류] 모든 워커가 빈 응답을 반환해 리포트를 병합할 수 없습니다.\n원인 후보: 모델의 상류 안전 필터(진단 용어·툴 정의 차단).\nlge-aigw 모델이 Sonnet 서빙이면 `{}` 로 되돌리고 다시 실행하세요.",
+                LGE_AIGW_DEFAULT_MODEL
+            )});
+            let stamped = append_event(&app, &id, &ev);
+            app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
+            if read_session(&app, &id).map(|s| s.status == "running").unwrap_or(false) {
+                set_status(&app, &id, "error");
+                app.emit("engagement-status", json!({ "sessionId": id, "status": "error" })).ok();
+            }
+            return;
         }
         let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem);
         if engine == Engine::Prime {
@@ -4162,6 +4196,32 @@ mod tests {
         // prime 치환 후에도 골격 유지.
         let pa = prime_adapt(inst);
         assert!(pa.contains("python_repl+urllib") && pa.contains("## 추가 발견"));
+    }
+
+    /// 회귀: lge-aigw 기본 모델은 보안 진단 콘텐츠를 통과시키는 서빙이어야 한다.
+    /// Sonnet 5.5 서빙(esdp-sonnet-5-5)은 상류 안전 필터가 진단 용어·recon 툴 정의를
+    /// 걸러 `completed` 빈 응답만 돌려준다(2026-10-26 실측) — 기본값으로 쓰면
+    /// 워커·collector 가 전부 빈 성공이 되어 리포트가 발행되지 않는다.
+    #[test]
+    fn lge_aigw_default_model_is_diagnosis_capable() {
+        assert_eq!(LGE_AIGW_DEFAULT_MODEL, "system.ai.glm-5-3-flash");
+        let cat = PROVIDER_CATALOG.iter().find(|p| p.name == "lge-aigw").expect("lge-aigw 카탈로그");
+        assert_eq!(cat.default_model, LGE_AIGW_DEFAULT_MODEL);
+    }
+
+    /// 빈 성공 판정 — 정상 종료 + 텍스트 없음일 때만 true (실패·중지는 별도 경로).
+    #[test]
+    fn empty_success_only_when_clean_and_textless() {
+        let clean_empty = PumpOutcome { text: String::new(), ..Default::default() };
+        assert!(is_empty_success(&clean_empty));
+        let clean_ws = PumpOutcome { text: "  \n ".into(), ..Default::default() };
+        assert!(is_empty_success(&clean_ws));
+        let clean_text = PumpOutcome { text: "pong".into(), ..Default::default() };
+        assert!(!is_empty_success(&clean_text));
+        let failed_empty = PumpOutcome { failed: true, ..Default::default() };
+        assert!(!is_empty_success(&failed_empty));
+        let aborted_empty = PumpOutcome { aborted: true, ..Default::default() };
+        assert!(!is_empty_success(&aborted_empty));
     }
 
     /// .so 탐색 — 실행파일 옆 산출물을 찾는다 (build.rs 가 생성).

@@ -897,7 +897,7 @@ const PROVIDER_CATALOG = [
   { name: "zai", kind: "openai-compat", note: "Z.ai GLM", default_model: "glm-5.1", envKeys: ["ZAI_API_KEY"], baseUrl: "https://api.z.ai/api/coding/paas/v4", needsBase: false },
   // 기본 내장 연결 — LGE Databricks AI Gateway MLflow Responses 엔드포인트.
   // keyLabel 이 있으면 API 키 입력칸을 렌더링한다(envKeys 없이 키만 지정하는 내장 연결용).
-  { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (Sonnet 5.5)", default_model: "lge_esdataplfm_ws.custom_model_prd.esdp-sonnet-5-5", envKeys: [], keyLabel: "Databricks 토큰", baseUrl: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needsBase: false },
+  { name: "lge-aigw", kind: "openai-compat", note: "LGE Databricks AI Gateway — Responses API (GLM 5.3 Flash)", default_model: "system.ai.glm-5-3-flash", envKeys: [], keyLabel: "Databricks 토큰", baseUrl: "https://lge-esdatapf.cloud.databricks.com/ai-gateway/mlflow/v1", needsBase: false },
   { name: "ollama", kind: "openai-compat", note: "로컬/원격 ollama 서버 (키 불필요)", default_model: "llama3.1", envKeys: [], baseUrl: "http://localhost:11434/v1", needsBase: true },
   { name: "custom", kind: "openai-compat", note: "임의 엔드포인트 — vLLM·LM Studio·원격 ollama·Databricks AI Gateway(Anthropic 방식)", default_model: "", envKeys: ["REDCELL_OPENAI_API_KEY"], baseUrl: "", needsBase: true },
 ];
