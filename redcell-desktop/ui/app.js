@@ -544,11 +544,13 @@ function noteActivity(t) {
   const mRoundEnd = t.match(/추적 라운드 (\d+) 종료/);
   if (mRoundEnd) return `추적 라운드 ${mRoundEnd[1]} 완료`;
   if (/수렴 — 추가 발견 없음/.test(t)) return "수렴 — 최종 병합 준비 중…";
-  if (/collector 가 최종/.test(t)) return "최종 리포트 병합 중…";
+  if (/collector 가 실사용진단리포트를 병합/.test(t)) return "실사용진단리포트 병합 중…";
+  if (/collector 가 최종/.test(t)) return "최종 리포트 병합 중…"; // 구 문구 호환
+  if (/실사용진단리포트 병합 완료/.test(t)) return "실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요";
   if (/리포트 병합 완료/.test(t)) return "리포트 병합 완료 — 결과 탭에서 확인하세요";
-  if (/1라운드 완료.*조기 리포트를 발행/.test(t)) return "1차 리포트 발행 중…";
-  if (/1차 리포트 발행 — 결과 탭/.test(t)) return "1차 리포트 발행 완료 — 추적 계속…";
-  if (/백그라운드 추적 취소 — 1차 리포트/.test(t)) return "추적 취소 — 1차 리포트 유지";
+  if (/1라운드 완료.*(조기 리포트|의심진단리포트)를 발행/.test(t)) return "의심진단리포트 발행 중…";
+  if (/(1차 리포트|의심진단리포트) 발행 — 결과 탭/.test(t)) return "의심진단리포트 발행 완료 — 추적 계속…";
+  if (/백그라운드 추적 취소 — (1차 리포트|의심진단리포트)/.test(t)) return "추적 취소 — 의심진단리포트 유지";
   if (/^\[(오류|완료|중지|차단|경고)\]/.test(t)) return t.replace(/\s+/g, " ").trim().slice(0, 100);
   // 툴 호출 시작: [W3·인증] [pi-툴] web_fetch {"url":"…"} → 접근 시도 중
   let m = t.match(/^\[([^\]]+)\] \[(?:pi|prime)-툴\] (\S+)/);
@@ -664,7 +666,7 @@ function onLiveEvent(event) {
   // pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
   if (s) renderPiConsole(s);
   if (resultsTabActive()) renderResults();
-  else { // 라이브 탭 시청 중에도 1차 리포트 도착을 뱃지로 알린다.
+  else { // 라이브 탭 시청 중에도 리포트 도착을 뱃지로 알린다.
     const c = $("resultsCount");
     if (c && s) { const n = resultDocs(s).length; c.textContent = String(n); c.style.display = n ? "inline-flex" : "none"; }
   }
@@ -1189,13 +1191,12 @@ function switchView(name) {
 
 // ── 결과 탭: 에이전트가 만들어낸 마크다운을 렌더링해 보여준다 ──────────────────
 // pi stdout 의 text_end 가 note 이벤트로 들어온다. [sys]/[pi-툴]/[오류]/[완료] 같은
-// 진단 리포트 H1 정규화 — "{세션명} 진단 리포트"로 통일. 리포트형 H1이 없으면 그대로 둔다.
-function normalizeReportTitle(text, name, isEarly) {
+// 진단 리포트 H1 정규화 — "{세션명} {종별}"로 통일. 리포트형 H1이 없으면 그대로 둔다.
+function normalizeReportTitle(text, name, report) {
   const re = /^#\s+.*리포트.*$/m;
-  const m = text.match(re);
-  if (!m) return text;
-  const suffix = isEarly ? " (1차)" : "";
-  return text.replace(re, `# ${name} 진단 리포트${suffix}`);
+  if (!re.test(text)) return text;
+  const kind = report === "early" ? "의심진단리포트" : report === "final" ? "실사용진단리포트" : "진단 리포트";
+  return text.replace(re, `# ${name} ${kind}`);
 }
 
 // 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
@@ -1217,15 +1218,19 @@ function resultDocs(s) {
     const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null };
     // 심층 진단 워커 중간 발견([Wn·…] 태그)은 최종 리포트가 아니면 결과에서 제외.
     if (e.worker) { workerFallback.push(doc); continue; }
-    // 진단 리포트 제목은 "{세션명} 진단 리포트"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
-    if (s && s.diag && s.name && s.name.trim()) doc.text = normalizeReportTitle(t, s.name.trim(), doc.report === "early");
+    // 진단 리포트 제목은 "{세션명} {종별}"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
+    if (s && s.diag && s.name && s.name.trim()) doc.text = normalizeReportTitle(t, s.name.trim(), doc.report);
     out.push(doc);
   }
-  // 최종 리포트가 있으면 그 이전 1차 리포트는 결과에서 제외 (통계·내보내기 일관).
-  // 단, 최종 이후에 발행된 1차(재실행분)는 새 런의 리포트이므로 보여준다.
-  const lastFinal = out.map((d) => d.report).lastIndexOf("final");
-  const main = lastFinal >= 0 ? out.filter((d, i) => d.report !== "early" || i > lastFinal) : out;
-  return main.length ? main : workerFallback;
+  // 의심·실사용 두 리포트는 모두 보여준다 (통계는 최신 리포트 기준으로 별도 집계).
+  return out.length ? out : workerFallback;
+}
+
+// 통계 집계 대상 — 최신 리포트(태그 기준) 이후 문서만. 태그 없는 구 세션은 전체 집계(기존 동작).
+function statsDocs(docs) {
+  let li = -1;
+  docs.forEach((d, i) => { if (d.report) li = i; });
+  return li < 0 ? docs : docs.slice(li);
 }
 
 function resultsTabActive() {
@@ -1349,7 +1354,7 @@ function renderReportSummary(s, docs, segs) {
   if (!top) return;
   const isDiag = s && s.diag;
   if (!isDiag || !docs.length) { top.classList.add("hidden"); top.innerHTML = ""; return; }
-  const st = reportStats(docs);
+  const st = reportStats(statsDocs(docs));
   const sevChip = (label, n, cls) =>
     `<span class="rs-chip ${cls}" title="${label} 위험도 ${n}건"><b>${n}</b> ${label}</span>`;
   top.classList.remove("hidden");
@@ -1685,6 +1690,12 @@ function printSegment(ix, btn) {
 
 // ── 진단 리포트를 루트 카드로 분할 (prelude/루트/권고·실측) ──────────────────
 const RISK_CLS = { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med", "낮음": "rk-low" };
+function reportLabel(d) {
+  const h1 = (d.text || "").match(/^#\s+(.*)$/m);
+  if (h1) return h1[1].trim().slice(0, 60);
+  return d.report === "early" ? "의심진단리포트" : d.report === "final" ? "실사용진단리포트" : "결과";
+}
+
 function segmentDiag(docs) {
   const out = [];
   let pre = [];      // 첫 루트 앞(요약·범위·공격 표면)
@@ -1694,7 +1705,17 @@ function segmentDiag(docs) {
   const flushRoot = () => {
     if (cur) { out.push({ kind: "root", title: cur.title, sev: cur.sev, text: cur.buf.join("\n") }); cur = null; }
   };
-  for (const d of docs) {
+  const flushTail = () => {
+    if (tail.length) { out.push({ kind: "tail", title: "권고·실측 확인", sev: null, text: tail.join("\n") }); tail = []; }
+  };
+  docs.forEach((d, di) => {
+    if (di > 0) { // 새 리포트 시작 — 이전 리포트 카드 마감 + 구분 배너
+      flushRoot();
+      flushTail();
+      if (pre.length) { out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") }); pre = []; }
+      out.push({ kind: "report", title: reportLabel(d), sev: null, text: "", seq: d.seq, ts: d.ts });
+      cur = null; seenRoot = false;
+    }
     for (const raw of (d.text || "").split(/\r?\n/)) {
       const isRoot = /^#{1,4}\s*루트\s*\d*\.?\s*/.test(raw.trim());
       // 루트 헤딩 → 새 루트 카드 시작
@@ -1717,11 +1738,11 @@ function segmentDiag(docs) {
       else if (seenRoot) tail.push(raw);
       else pre.push(raw);
     }
-  }
+  });
   flushRoot();
-  if (tail.length) out.push({ kind: "tail", title: "권고·실측 확인", sev: null, text: tail.join("\n") });
-  if (pre.length && !out.some((o) => o.kind === "prelude")) out.unshift({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") });
-  return out.filter((it) => it.text.trim());
+  flushTail();
+  if (pre.length) out.push({ kind: "prelude", title: "요약·범위·공격 표면", sev: null, text: pre.join("\n") });
+  return out.filter((it) => it.text.trim() || it.kind === "report");
 }
 
 function renderResults() {
@@ -1753,17 +1774,18 @@ function renderResults() {
     const isRoot = it.kind === "root";
     const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
     const tag = isRoot ? `<span class="md-kind root">루트</span>`
+      : it.kind === "report" ? `<span class="md-kind doc">리포트</span>`
       : it.kind === "prelude" ? `<span class="md-kind pre">요약·범위</span>`
       : it.kind === "tail" ? `<span class="md-kind tail">권고·실측</span>`
       : `<span class="md-kind doc">결과</span>`;
-    const title = isRoot ? esc(it.title) : (it.seq != null ? `#${it.seq}` : "");
+    const title = isRoot || it.kind === "report" ? esc(it.title || "") : (it.seq != null ? `#${it.seq}` : "");
     return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}" data-ix="${i}">
        <header class="md-card-head">
          ${tag}<span class="md-card-title">${title}</span>
          <span class="md-card-ts">${hhmm(it.ts)}</span>
        </header>
        <div class="md-body">${mdToHtml(it.text)}</div>
-       ${segmentExportBar(i)}
+       ${it.kind === "report" ? "" : segmentExportBar(i)}
      </article>`;
   }).join("");
   if (s && s.diag && s.status === "done") el.insertAdjacentHTML("beforeend", renderNextActions(s));
@@ -2231,7 +2253,7 @@ function dashSessionStats(s) {
   }
   const docs = resultDocs(s);
   if (!docs.length) return { ...base, kind: "diag", pending: true };
-  const st = reportStats(docs);
+  const st = reportStats(statsDocs(docs));
   return { ...base, kind: "diag", pending: false, roots: st.roots, sev: st.sev, ver: st.ver, grade: st.grade };
 }
 function renderDashboard() {

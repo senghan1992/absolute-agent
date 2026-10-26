@@ -524,7 +524,7 @@ const DIAG_ROLE: &str = r#"# RedCell 서비스 진단 — 시니어 해커 멘�
 ⑥ JS 번들·openapi 문서에서 API 키·토큰·내부 URL 같은 비밀 문자열 탐색
 정찰에서 실제로 본 것을 근거로만 단정하고, 못 본 것은 [가정] 으로 표기한다."#;
 
-/// 최종 리포트 형식 + 집필 원칙 (단일 진단·심층 collector 공용).
+/// 리포트 형식 + 집필 원칙 (단일 진단·심층 collector 공용).
 const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를 지킨다 — UI 가 자동 시각화한다)
 # <서비스명> 진단 리포트
 ## 0. 한눈에 보기 (맨 앞 요약 표)
@@ -694,12 +694,14 @@ fn deep_worker_instruction(
 }
 
 /// 심층 진단 collector(병합자)용 지시문 — 워커 발견을 시나리오 리포트로 fan-in.
-fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str) -> String {
+/// `kind` 는 리포트 종별 ("의심진단리포트" | "실사용진단리포트") — 역할 문구와 H1 에 반영된다.
+fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str, kind: &str) -> String {
+    let spec = REPORT_SPEC.replacen("# <서비스명> 진단 리포트", &format!("# <서비스명> {kind}"), 1);
     format!(
         r#"{DIAG_ROLE}
 
-당신은 심층 진단의 최종 리포트 작성자(collector)다. 5명의 분야별 워커가 같은
-대상을 동시에 진단한 결과(아래)가 주어졌다. 이를 병합·검증해 최종 리포트 1개를
+당신은 심층 진단의 {kind} 작성자(collector)다. 5명의 분야별 워커가 같은
+대상을 동시에 진단한 결과(아래)가 주어졌다. 이를 병합·검증해 {kind} 1개를
 작성한다.
 
 대상 사이트(인가됨): {target}
@@ -720,7 +722,7 @@ fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str) ->
 3. 워커가 놓친 분야(비즈니스 로직 조합 등)가 보이면 1~2개 시나리오를 보강한다.
 4. 아래 리포트 형식·집필 원칙을 정확히 지킨다.
 
-{REPORT_SPEC}"#,
+{spec}"#,
         target = target,
         goal = if goal.trim().is_empty() { "(설명 없음 — 워커 실측 기반)" } else { goal.trim() },
         outputs = outputs,
@@ -729,7 +731,7 @@ fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str) ->
 }
 
 /// 워커 출력 병합 — collector 입력용. 분야당 6000자로 절단하고 빈 워커는
-/// 플레이스홀더로 채운다. 조기(1차)·최종 병합이 같은 규칙을 쓰도록 공용화.
+/// 플레이스홀더로 채운다. 의심·실사용 병합이 같은 규칙을 쓰도록 공용화.
 /// (combined, 내용 있는 워커 수) 반환.
 fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rounds_run: u32) -> (String, usize) {
     let mut combined = String::new();
@@ -750,9 +752,9 @@ fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rou
     (combined, ok_n)
 }
 
-/// 조기(1차) 병합 지시문 — 최종 병합 본문에 1차 표기 지시만 덧붙인다.
+/// 의심진단리포트 병합 지시문 — 같은 본문에 의심 단계 고지만 덧붙인다.
 fn early_merge_instruction(base: String) -> String {
-    format!("{base}\n\n주: 이는 1라운드 직후의 조기(중간) 병합이다. 리포트 제목에 '(1차)' 를 붙이고, 서두에 '추적 라운드가 백그라운드로 계속되며 최종 리포트로 갱신될 수 있음'을 한 줄로 명시하라.")
+    format!("{base}\n\n주: 이는 1라운드 직후의 의심 단계 병합(의심진단리포트)이다. 서두에 '1라운드 실측 기반의 의심 단계 진단이며, 추적 라운드가 백그라운드로 계속되어 실사용진단리포트로 갱신될 수 있음'을 한 줄로 명시하라. 확정할 수 없는 것은 [가정]·[징후]로 정직하게 구분하라.")
 }
 
 /// 심층 진단 추적 라운드 상한 (1차 + 추적 2회 = 최대 3라운드, 결정적 수렴).
@@ -2663,7 +2665,7 @@ fn emit_note(app: &AppHandle, id: &str, text: String, worker: Option<&WorkerTag>
 }
 
 /// 리포트 텍스트 1건 저장 + 프론트 전송 — collector 병합 결과용.
-/// `report` 표식("early"|"final")으로 결과 탭이 1차/최종을 구분한다.
+/// `report` 표식("early"|"final")으로 결과 탭이 의심/실사용을 구분한다.
 fn emit_report_text(app: &AppHandle, id: &str, text: String, tag: &str) {
     let ev = json!({ "type": "note", "text": text, "report": tag });
     let stamped = append_event(app, id, &ev);
@@ -3046,8 +3048,8 @@ fn https_hint_for(host: &str, port: Option<u16>) -> String {
     }
 }
 
-/// collector 병합 1회 실행 — 조기(1차)·최종 공용.
-/// `report_tag`("early"|"final")는 결과 탭의 1차/최종 구분 표식이다.
+/// collector 병합 1회 실행 — 의심·실사용 공용.
+/// `report_tag`("early"|"final")는 결과 탭의 의심/실사용 구분 표식이다.
 #[allow(clippy::too_many_arguments)]
 fn run_collector_merge(
     app: &AppHandle,
@@ -3082,8 +3084,8 @@ fn run_collector_merge(
 
 /// 심층 진단 — 워커 5개를 독립 pi 세션으로 동시에 실행한 뒤 collector 가 병합.
 /// prime-agent builder(factory) 패턴의 RedCell 구현: 병렬 섹션 작성자 + fan-in 병합.
-/// 1라운드 직후 1차 리포트를 먼저 발행하고 추적 라운드는 백그라운드로 계속한다 —
-/// 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
+/// 1라운드 직후 의심진단리포트를 먼저 발행하고 추적 라운드는 백그라운드로 계속한다 —
+/// 사용자는 언제든 중지해 의심진단리포트만 받을 수 있다.
 /// 즉시 반환하며, 진행은 `engagement-event`(worker_status·노트)/`engagement-status` 로 전달된다.
 #[tauri::command]
 fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
@@ -3270,28 +3272,28 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
             return;
         }
-        // 조기 리포트 — 1라운드 결과로 1차 리포트를 먼저 발행하고, 추적 라운드는
-        // 백그라운드로 계속한다. 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
+        // 의심진단리포트 — 1라운드 결과로 먼저 발행하고, 추적 라운드는
+        // 백그라운드로 계속한다. 사용자는 언제든 중지해 의심진단리포트만 받을 수 있다.
         let mut early_published = false;
         {
             let (combined_early, ok_early) = combine_worker_outputs(&accum, 1);
             if ok_early > 0 && !is_stopped(&results) {
-                emit_note(&app, &id, format!("[sys] 1라운드 완료(워커 {ok_early}/{}) — 조기 리포트를 발행합니다…", DEEP_WORKERS.len()), None);
-                let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem));
+                emit_note(&app, &id, format!("[sys] 1라운드 완료(워커 {ok_early}/{}) — 의심진단리포트를 발행합니다…", DEEP_WORKERS.len()), None);
+                let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem, "의심진단리포트"));
                 if engine == Engine::Prime {
                     merge = prime_adapt(merge);
                 }
                 merge.push_str(&digest_c);
                 let run_tag = if engine == Engine::Prime { "merge-early".to_string() } else { format!("{piq}-merge-early") };
                 let key = format!("{id}#merge-early");
-                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 collector");
+                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "의심 collector");
                 if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
                     early_published = true;
-                    emit_note(&app, &id, "[완료] 1차 리포트 발행 — 결과 탭에서 확인하세요. 추적 라운드는 백그라운드로 계속됩니다.".to_string(), None);
+                    emit_note(&app, &id, "[완료] 의심진단리포트 발행 — 결과 탭에서 확인하세요. 추적 라운드는 백그라운드로 계속됩니다.".to_string(), None);
                 } else if outcome.aborted || read_session(&app, &id).map(|s| s.status == "stopped").unwrap_or(false) {
-                    return; // 조기 병합 중 중지 — 1차 리포트 없이 stopped 유지
+                    return; // 의심 병합 중 중지 — 리포트 없이 stopped 유지
                 } else {
-                    emit_note(&app, &id, "[sys] 1차 리포트 발행 실패 — 추적 라운드 후 최종 병합을 시도합니다.".to_string(), None);
+                    emit_note(&app, &id, "[sys] 의심진단리포트 발행 실패 — 추적 라운드 후 실사용 병합을 시도합니다.".to_string(), None);
                 }
             }
         }
@@ -3358,11 +3360,11 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
         }
 
-        // 중단됐으면 collector 없이 마감. 1차 리포트가 있으면 유지하고 done 으로
+        // 중단됐으면 collector 없이 마감. 의심진단리포트가 있으면 유지하고 done 으로
         // 마감해 사용자가 "리포트만 받고 취소" 할 수 있게 한다.
         if is_stopped(&results) {
             if early_published {
-                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 1차 리포트를 유지합니다.".to_string(), None);
+                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 의심진단리포트를 유지합니다.".to_string(), None);
                 set_status(&app, &id, "done");
                 app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
             }
@@ -3371,7 +3373,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         // collector fan-in — 워커 발견(전 라운드 누적)을 시나리오 리포트로 병합.
         let (combined, ok_n) = combine_worker_outputs(&accum, rounds_run);
         {
-            let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 최종 시나리오 리포트를 병합합니다.", DEEP_WORKERS.len()) });
+            let ev = json!({ "type": "note", "text": format!("[sys] 워커 {ok_n}/{} 완료({rounds_run}라운드) — collector 가 실사용진단리포트를 병합합니다.", DEEP_WORKERS.len()) });
             let stamped = append_event(&app, &id, &ev);
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
         }
@@ -3390,7 +3392,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
             return;
         }
-        let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem);
+        let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem, "실사용진단리포트");
         if engine == Engine::Prime {
             merge = prime_adapt(merge);
         }
@@ -3401,9 +3403,9 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         {
             let ev = json!({ "type": "note", "text": if ok {
                 if merge_outcome.failed {
-                    "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
+                    "[완료] 실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
                 } else {
-                    "[완료] 심층 진단 리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
+                    "[완료] 실사용진단리포트 병합 완료 — 결과 탭에서 확인하세요.".to_string()
                 }
             } else if merge_outcome.aborted {
                 "[중지] collector 가 중단됐습니다.".to_string()
@@ -3421,8 +3423,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 set_status(&app, &id, st);
                 app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
             } else if cur.status == "stopped" && early_published {
-                // 최종 병합 중 취소 — 1차 리포트를 유지하고 done 으로 마감한다.
-                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 1차 리포트를 유지합니다.".to_string(), None);
+                // 실사용 병합 중 취소 — 의심진단리포트를 유지하고 done 으로 마감한다.
+                emit_note(&app, &id, "[완료] 백그라운드 추적 취소 — 의심진단리포트를 유지합니다.".to_string(), None);
                 set_status(&app, &id, "done");
                 app.emit("engagement-status", json!({ "sessionId": id, "status": "done" })).ok();
             }
@@ -4258,8 +4260,9 @@ mod tests {
             assert!(inst.contains("web_fetch"), "웹 조회 수단 명시: {}", def.id);
             assert!(inst.contains("## 워커 발견"), "출력 형식 명시: {}", def.id);
         }
-        let merge = deep_merge_instruction("http://t/", "", "--- W1 ---\n- [높음] x", "");
+        let merge = deep_merge_instruction("http://t/", "", "--- W1 ---\n- [높음] x", "", "실사용진단리포트");
         assert!(merge.contains("collector"), "병합자 역할 명시");
+        assert!(merge.contains("# <서비스명> 실사용진단리포트"), "종별 제목: {merge}");
         assert!(merge.contains("### 루트 1"), "리포트 형식 포함");
         assert!(merge.contains("멘토 노트"), "멘토 노트 라벨 포함");
     }
@@ -4428,8 +4431,8 @@ mod tests {
     }
 
     /// 추적 지시문 — 라운드·자가 요약·교차 단서·추가 발견 형식 포함.
-    /// 조기 리포트용 워커 출력 병합 — 최종 병합과 동일한 규칙(분야당 6000자·빈 워커
-    /// 플레이스홀더·라운드 표기)이어야 1차/최종 리포트가 같은 품질로 나온다.
+    /// 의심 리포트용 워커 출력 병합 — 실사용 병합과 동일한 규칙(분야당 6000자·빈 워커
+    /// 플레이스홀더·라운드 표기)이어야 두 리포트가 같은 품질로 나온다.
     #[test]
     fn combine_worker_outputs_shape() {
         let mut accum = std::collections::HashMap::new();
@@ -4444,13 +4447,13 @@ mod tests {
         assert!(w2sec.chars().count() <= 6000 + 200, "분야당 6000자 절단: {}자", w2sec.chars().count());
     }
 
-    /// 조기 병합 지시문은 최종과 같은 본문에 "(1차)" 표기 지시만 덧붙인다 —
-    /// 결과 탭에서 1차/최종을 구분하는 유일한 표식이다.
+    /// 의심진단리포트 병합 지시문은 같은 본문에 의심 단계 고지만 덧붙인다 —
+    /// 결과 탭에서 의심/실사용을 구분하는 표식이다.
     #[test]
     fn early_merge_instruction_marks_preliminary() {
         let inst = early_merge_instruction("BASE".to_string());
         assert!(inst.starts_with("BASE"), "본문 보존");
-        assert!(inst.contains("(1차)"), "1차 표기: {inst}");
+        assert!(inst.contains("의심진단리포트"), "의심 표기: {inst}");
     }
 
     /// 부분 성공 판정 — 게이트웨이가 응답 말미를 자르면 pi 는 stopReason=error
