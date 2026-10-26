@@ -1159,6 +1159,29 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .au-info .au-ic { color: var(--muted); }
 .au-info .au-badge { color: var(--muted); background: var(--surface-3); }
 
+/* ── 리포트 모아보기: 세션별 발행 리포트 ─────────────────────────────────── */
+.hist-pane .report-list { overflow: visible; padding: 0; }
+.report-list { flex: 1 1 auto; min-height: 0; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; padding: 2px; }
+.rp-head { display: flex; align-items: center; gap: 10px; }
+.rp-head-txt { font-size: 11.5px; color: var(--faint); }
+.rp-head .btn { margin-left: auto; flex: none; }
+.rp-status { font-size: 11px; color: var(--muted); min-height: 0; }
+.rp-status:empty { display: none; }
+.rp-group { display: flex; flex-direction: column; gap: 7px; }
+.rp-group-head { display: flex; align-items: baseline; gap: 8px; padding: 0 2px; }
+.rp-group-head b { font-size: 12.5px; color: var(--text); }
+.rp-group-head span { font-size: 11px; color: var(--faint); font-family: var(--mono); }
+.rp-row { display: flex; align-items: center; gap: 11px; padding: 9px 12px; border-radius: 11px; background: var(--surface-2); border: 1px solid var(--line-2); }
+.rp-tag { flex: none; font-size: 10.5px; font-weight: 800; letter-spacing: 0.2px; padding: 3px 9px; border-radius: 999px; }
+.rp-early { color: var(--accent-fg); background: color-mix(in srgb, var(--accent) 15%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 38%, transparent); }
+.rp-final { color: var(--ok-fg); background: color-mix(in srgb, var(--ok) 13%, transparent); border: 1px solid color-mix(in srgb, var(--ok) 38%, transparent); }
+.rp-note { color: var(--muted); background: var(--surface-3); border: 1px solid var(--line-2); }
+.rp-manual { color: var(--accent-2-fg); background: color-mix(in srgb, var(--accent-2) 13%, transparent); border: 1px solid color-mix(in srgb, var(--accent-2) 36%, transparent); }
+.rp-main { flex: 1 1 auto; min-width: 0; }
+.rp-meta { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.rp-file { font-size: 11px; color: var(--faint); font-family: var(--mono); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.rp-actions { flex: none; display: flex; gap: 6px; }
+
 /* ── 자동 보완: 다음 조치 1클릭 지시 ───────────────────────────────────── */
 .next-actions { margin-top: 4px; }
 .ns-title { display: flex; align-items: center; gap: 10px; padding: 12px 16px; border: 1px solid color-mix(in srgb, var(--ok) 34%, var(--line-2)); background: linear-gradient(135deg, color-mix(in srgb, var(--ok) 11%, transparent), color-mix(in srgb, var(--accent-2) 7%, transparent)), var(--elev); border-radius: 12px 12px 0 0; }

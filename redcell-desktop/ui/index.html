@@ -237,10 +237,11 @@
         <header class="s-head">
           <div>
             <h3>지난 기록</h3>
-            <div class="s-sub">주소별 진단 결과와 활동 기록을 한눈에</div>
+            <div class="s-sub">주소별 진단 결과·리포트·활동 기록을 한눈에</div>
           </div>
           <div class="hist-tabs" role="tablist" aria-label="기록 보기">
             <button class="htab active" data-tab="summary" role="tab" aria-selected="true">진단 요약</button>
+            <button class="htab" data-tab="reports" role="tab" aria-selected="false">리포트</button>
             <button class="htab" data-tab="audit" role="tab" aria-selected="false">활동 기록</button>
           </div>
           <button id="histClose" class="btn btn-icon" title="닫기" aria-label="닫기"><svg class="ic"><use href="#i-x"/></svg></button>
@@ -264,6 +265,14 @@
             <button class="af-chip" data-f="diag">진단</button>
           </div>
           <div id="auditList" class="audit-list"></div>
+        </div>
+        <div id="histPaneReports" class="hist-pane hidden">
+          <div class="rp-head">
+            <span class="rp-head-txt">발행된 리포트가 세션별로 모입니다</span>
+            <button id="reportsFolderBtn" class="btn btn-ghost btn-xs" title="보고서 폴더를 탐색기에서 열기">보고서 폴더 열기</button>
+          </div>
+          <div id="reportStatus" class="rp-status"></div>
+          <div id="reportList" class="report-list"></div>
         </div>
       </div>
     </div>

@@ -591,6 +591,24 @@
       }
       // 리포트 저장(미리보기용 경로) — 실제 데스크톱에서는 Rust 측이 파일을 쓴다.
       case "write_report": return `${store.settings.redcell_dir || "(preview)"}/reports/${args.name}.${args.format || "md"}`;
+      case "reports_path": return "(preview)/reports";
+      case "list_reports": return [];
+      case "save_report_file": {
+        // 미리보기: 기록 텍스트를 파일로 다운로드하고 가짜 경로를 돌려준다.
+        const s = findById(args.session_id);
+        const ev = s && s.events.find((e) => e._seq === Number(args.seq));
+        const text = ev && ev.text ? ev.text : "";
+        if (!text) throw new Error("해당 기록을 찾을 수 없습니다");
+        const tag = ev.report || "note";
+        const blob = new Blob([text], { type: "text/markdown" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `${(s.name || "report").replace(/[\\/:*?"<>|]/g, "_")}_${tag}.md`;
+        document.body.appendChild(a); a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+        return `(preview)/reports/${a.download}`;
+      }
+      case "open_path": return null; // 미리보기는 저장 시점에 다운로드로 대신한다.
       default: console.warn("mock invoke: 알 수 없는 명령", cmd); return null;
     }
   }

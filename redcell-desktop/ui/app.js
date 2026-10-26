@@ -247,7 +247,7 @@ function setBadge(status) {
       const s = cur();
       const evs = s ? eventsOf(s) : [];
       const last = [...evs].reverse().find((e) => activityLine(e));
-      t = (last && activityLine(last)) || "살펴보는 중…";
+      t = withRound(s, (last && activityLine(last)) || "살펴보는 중…");
     }
     setActivity(t);
   }
@@ -621,6 +621,31 @@ function workerActivity(e) {
   if (e.state && e.state !== "running") return `${name} ${e.state === "done" ? "완료" : e.state === "error" ? "실패" : "중지됨"}`;
   return `${name} 살펴보는 중…`;
 }
+// 현재 진행 중인 진단 차수 — 활동 바·워커 바에 "1차 · …" 형태로 붙인다.
+// 실행 중이 아니면 null. 구 형식(추적 라운드·P0 스윕) 노트도 읽는다.
+function currentRoundLabel(s) {
+  if (!s || s.status !== "running") return null;
+  const evs = eventsOf(s);
+  for (let i = evs.length - 1; i >= 0; i--) {
+    const t = evs[i].text || "";
+    if (!t) continue;
+    let m = t.match(/추가 확인 (\d+)차 (?:시작|끝)/);
+    if (m) return `추가 확인 ${m[1]}차`;
+    m = t.match(/추적 라운드 (\d+) (?:시작|종료)/);
+    if (m) return `추가 확인 ${m[1]}차`;
+    if (/최종 리포트를 만듭니다|최종 리포트 완성|최종 리포트를 만들지 못했습니다|collector 가|실사용진단리포트|수렴|추가 확인을 마칩니다/.test(t)) return null;
+    if (/1차 리포트를 만듭니다|1차 리포트 완성|1차 확인 끝|1차 리포트를 만들지 못했습니다|의심진단리포트/.test(t)) return null;
+    if (/기본 점검 — 항목|P0 스윕.*프로브 \d+개/.test(t)) return "1차";
+    if (/기본 점검 시작|P0 자동 스윕 시작/.test(t)) return "기본 점검";
+    if (/진단 시작 — 기본 점검 후|심층 진단 시작\(/.test(t)) return "1차";
+  }
+  return null;
+}
+function withRound(s, line) {
+  const r = currentRoundLabel(s);
+  if (!r || line.startsWith(r)) return line; // 차수 안내 노트는 이미 차수를 말한다
+  return `${r} · ${line}`;
+}
 let runStartedAt = 0, elapsedTimer = null;
 function setActivity(text) {
   const bar = $("activityBar"); if (!bar || !text) return;
@@ -679,7 +704,8 @@ function renderWorkerBar(s) {
   const order = ["p0", "w1", "w2", "w3", "w4", "w5"].filter((id) => st[id]);
   if (!order.length) { bar.classList.add("hidden"); bar.innerHTML = ""; return; }
   bar.classList.remove("hidden");
-  bar.innerHTML = `<span class="wk-title">정밀 진단</span>` + order.map((id) => {
+  const round = currentRoundLabel(s);
+  bar.innerHTML = `<span class="wk-title">정밀 진단${round ? ` · ${esc(round)}` : ""}</span>` + order.map((id) => {
     const w = st[id];
     const dot = w.state === "done" ? "ok" : w.state === "error" ? "err" : w.state === "stopped" ? "stop" : "run";
     const txt = w.state === "done" ? "완료" : w.state === "error" ? "실패" : w.state === "stopped" ? "중지" : "진행 중";
@@ -693,9 +719,9 @@ function onLiveEvent(event) {
   if (event.type === "worker_status") { // 칩 갱신 + 활동 바에 진행 중 요약
     renderWorkerBar(s);
     const running = Object.values(workerStates(s)).filter((w) => w.state === "running");
-    if (running.length === 1) setActivity(`${friendlyWorker(running[0].id, running[0].label)} 살펴보는 중…`);
-    else if (running.length > 1) setActivity(`${friendlyWorker(running[0].id, running[0].label)} 등 ${running.length}곳을 함께 살펴보는 중…`);
-    else { const line = activityLine(event); if (line) setActivity(line); }
+    if (running.length === 1) setActivity(withRound(s, `${friendlyWorker(running[0].id, running[0].label)} 살펴보는 중…`));
+    else if (running.length > 1) setActivity(withRound(s, `${friendlyWorker(running[0].id, running[0].label)} 등 ${running.length}곳을 함께 살펴보는 중…`));
+    else { const line = activityLine(event); if (line) setActivity(withRound(s, line)); }
     return;
   }
   const body = $("capBody");
@@ -739,7 +765,7 @@ function onLiveEvent(event) {
 
   // 메인 패널 헤드라인 갱신 + 결과/요청은 대화창으로
   const line = activityLine(event);
-  if (line) setActivity(line);
+  if (line) setActivity(withRound(s, line));
   const ms = milestoneChat(event);
   if (ms) pushAssistant(s.id, ms);
   if (event.type === "done") hideActivity();
@@ -2390,16 +2416,17 @@ function openHistory(tab) {
   setHistoryTab(tab || "summary");
 }
 function setHistoryTab(tab) {
-  const isAudit = tab === "audit";
   document.querySelectorAll("#historyModal .htab").forEach((t) => {
     const on = t.dataset.tab === tab;
     t.classList.toggle("active", on);
     t.setAttribute("aria-selected", on ? "true" : "false");
   });
-  const sum = $("histPaneSummary"), aud = $("histPaneAudit");
-  if (sum) sum.classList.toggle("hidden", isAudit);
-  if (aud) aud.classList.toggle("hidden", !isAudit);
-  if (isAudit) renderAudit();
+  const sum = $("histPaneSummary"), aud = $("histPaneAudit"), rep = $("histPaneReports");
+  if (sum) sum.classList.toggle("hidden", tab !== "summary");
+  if (aud) aud.classList.toggle("hidden", tab !== "audit");
+  if (rep) rep.classList.toggle("hidden", tab !== "reports");
+  if (tab === "audit") renderAudit();
+  if (tab === "reports") renderReports();
 }
 
 // ── 감사 로그: 포트폴리오 전체 보안 활동 이력 ────────────────────────────────
@@ -2435,6 +2462,101 @@ function auditEntries() {
   return out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
 const AUDIT_ICON = { auth: "i-key", block: "i-ban", finding: "i-alert", diag: "i-check" };
+
+// ── 리포트 모아보기: 발행 파일 + 파일 없는 기록을 세션별로 ──────────────────────
+const REPORT_TAG_LABEL = { early: "1차", final: "최종", note: "메모", manual: "직접 저장" };
+function reportDocRows(s) {
+  // 발행 후보: report 표식 문서 + 긴 문서(추가 지시 후 정리 등). 짧은 메모는 제외.
+  return resultDocs(s).filter((d) => d.report || (d.text || "").length >= 200);
+}
+function fmtSize(n) {
+  if (n == null) return "";
+  if (n < 1024) return `${n}B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)}KB`;
+  return `${(n / 1024 / 1024).toFixed(1)}MB`;
+}
+async function renderReports() {
+  const body = $("reportList");
+  const status = $("reportStatus");
+  if (!body) return;
+  body.innerHTML = `<div class="audit-empty">불러오는 중…</div>`;
+  if (status) status.textContent = "";
+  let files = [];
+  try { files = await invoke("list_reports") || []; } catch (e) { files = []; }
+  // 세션별 묶음
+  const groups = new Map(); // sid -> { s, rows: [] }
+  const manual = [];
+  for (const f of files) {
+    if (f.manual || !f.session_id) { manual.push(f); continue; }
+    if (!groups.has(f.session_id)) groups.set(f.session_id, { s: sessions.find((x) => x.id === f.session_id) || null, rows: [] });
+    groups.get(f.session_id).rows.push({ kind: "file", tag: f.tag, ts: f.ts, file: f.file, size: f.size });
+  }
+  // 파일 없는 기록 (오래된 세션·추가 지시 후 정리) — 열 때 저장된다.
+  for (const s of sessions) {
+    for (const d of reportDocRows(s)) {
+      const tag = d.report || "note";
+      const docTs = Math.round(((d.ts != null ? d.ts : 0) || 0) / 1000);
+      const g = groups.get(s.id);
+      const covered = g && g.rows.some((r) => r.kind === "file" && r.tag === tag && Math.abs((r.ts || 0) - docTs) < 300);
+      if (covered) continue;
+      if (!groups.has(s.id)) groups.set(s.id, { s, rows: [] });
+      groups.get(s.id).rows.push({ kind: "event", tag, ts: docTs, seq: d.seq, size: (d.text || "").length });
+    }
+  }
+  const ordered = [...groups.values()]
+    .map((g) => ({ ...g, latest: Math.max(0, ...g.rows.map((r) => r.ts || 0)) }))
+    .sort((a, b) => b.latest - a.latest);
+  if (!ordered.length && !manual.length) {
+    body.innerHTML = `<div class="audit-empty">아직 발행된 리포트가 없습니다 — 진단을 실행하면 1차·최종 리포트가 여기에 모입니다.</div>`;
+    return;
+  }
+  const tagBadge = (tag) => `<span class="rp-tag rp-${tag}">${REPORT_TAG_LABEL[tag] || tag}</span>`;
+  const rowHtml = (r, sid) => `
+    <div class="rp-row">
+      ${tagBadge(r.tag)}
+      <div class="rp-main">
+        <div class="rp-meta">${r.ts ? fmtAuditTs(r.ts * 1000) : "시간 없음"}${r.size != null ? ` · ${fmtSize(r.size)}` : ""}${r.kind === "event" ? " · 파일 없음" : ""}</div>
+        ${r.file ? `<div class="rp-file" title="${esc(r.file)}">${esc(r.file.split(/[/\\]/).pop())}</div>` : ""}
+      </div>
+      <div class="rp-actions">
+        <button class="btn btn-ghost btn-xs rp-open" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-file="${esc(r.file || "")}">열기</button>
+        <button class="btn btn-ghost btn-xs rp-reveal" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-file="${esc(r.file || "")}" title="파일 위치를 탐색기에서 열기">폴더</button>
+      </div>
+    </div>`;
+  body.innerHTML = ordered.map((g) => {
+    const name = (g.s && g.s.name) || "(삭제된 작업)";
+    const tgt = g.s ? `${g.s.host || ""}${g.s.port ? ":" + g.s.port : ""}` : "";
+    const rows = [...g.rows].sort((a, b) => (b.ts || 0) - (a.ts || 0)).map((r) => rowHtml(r, g.s ? g.s.id : "")).join("");
+    return `<section class="rp-group"><header class="rp-group-head"><b>${esc(name)}</b>${tgt ? `<span>${esc(tgt)}</span>` : ""}</header>${rows}</section>`;
+  }).join("") + (manual.length ? `<section class="rp-group"><header class="rp-group-head"><b>직접 저장한 파일</b></header>${
+    manual.map((f) => rowHtml({ kind: "file", tag: "manual", ts: f.ts, file: f.file, size: f.size }, "")).join("")
+  }</section>` : "");
+  body.querySelectorAll(".rp-open").forEach((b) => { b.onclick = () => openReportRow(b.dataset, "open"); });
+  body.querySelectorAll(".rp-reveal").forEach((b) => { b.onclick = () => openReportRow(b.dataset, "reveal"); });
+}
+async function openReportRow(ds, mode) {
+  const status = $("reportStatus");
+  const say = (t) => { if (status) status.textContent = t; };
+  try {
+    let file = ds.file || "";
+    if (ds.kind === "event") {
+      say("파일로 저장하는 중…");
+      file = await invoke("save_report_file", { session_id: ds.sid, seq: Number(ds.seq) });
+      renderReports(); // 파일 행으로 바뀌었으므로 목록 새로고침
+    }
+    if (!file) { say("열 수 있는 파일이 없습니다."); return; }
+    say(mode === "reveal" ? "폴더를 여는 중…" : "리포트를 여는 중…");
+    await invoke("open_path", { path: file, mode });
+    say("");
+  } catch (e) { say(`열기 실패: ${e}`); }
+}
+async function openReportsFolder() {
+  const status = $("reportStatus");
+  try {
+    const dir = await invoke("reports_path");
+    await invoke("open_path", { path: dir, mode: "open" });
+  } catch (e) { if (status) status.textContent = `열기 실패: ${e}`; }
+}
 function renderAudit() {
   const entries = auditEntries();
   const cnt = { all: entries.length, auth: 0, block: 0, finding: 0, diag: 0 };
@@ -2468,6 +2590,7 @@ function wire() {
   $("settingsBtn").onclick = openSettings;
   $("historyBtn").onclick = () => openHistory("summary");
   $("histClose").onclick = () => $("historyModal").classList.add("hidden");
+  $("reportsFolderBtn").onclick = openReportsFolder;
   document.querySelectorAll("#historyModal .htab").forEach((t) => {
     t.onclick = () => setHistoryTab(t.dataset.tab);
   });
