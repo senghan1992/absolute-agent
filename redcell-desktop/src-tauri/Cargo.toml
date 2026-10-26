@@ -2,6 +2,11 @@
 name = "redcell-desktop"
 version = "0.1.0"
 edition = "2021"
+# 바이너리가 2개(main + bin/sweep)라 `cargo run` 대상이 모호해진다.
+# `cargo tauri dev` 의 기본 DevCommand(`cargo run --no-default-features`)가
+# --bin 없이 실행되므로 기본 실행 대상을 데스크톱 앱으로 고정한다.
+# sweep CLI 는 `cargo run --bin sweep -- ...` 으로 그대로 실행한다.
+default-run = "redcell-desktop"
 description = "RedCell Desktop — 세션별 침투테스트 로그/대화 UI (RedCell 인가 에이전트 프론트엔드)"
 authors = ["seunghwan.byun"]
 license = "MIT"
