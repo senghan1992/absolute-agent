@@ -819,7 +819,9 @@ function onLiveEvent(event) {
         reportSeenCounts[s.id] = n;
         switchView("results");
         if (s.status === "running") {
-          pushAssistant(s.id, "1차 리포트가 나왔습니다 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다.");
+          pushAssistant(s.id, event.report === "final"
+            ? "최종 리포트가 나왔습니다 — 결과 리포트 탭에서 확인하세요."
+            : "1차 리포트가 나왔습니다 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다.");
         }
       }
     }
@@ -1356,6 +1358,11 @@ function normalizeReportTitle(text, s, report) {
   return text.replace(re, `# ${head} ${kind}`);
 }
 
+// 리포트 H1 판별 — 스트리밍 조각(이어지는 뒷부분)과 새로 발행된 리포트를 구분한다.
+function hasReportTitle(t) {
+  return /^#\s+.*리포트.*$/m.test(t || "");
+}
+
 // 하위 노트는 제외하고, 실제 답변(마크다운 결과)만 모아 순서대로 보여준다.
 function resultDocs(s) {
   const out = [];
@@ -1370,33 +1377,53 @@ function resultDocs(s) {
     // 진단 세션은 진짜 리포트만: 병합 표식 문서 + 긴 정리 문서.
     // "pong" 같은 자질구레한 기록은 결과 탭에 올리지 않는다(진행 상황에는 남는다).
     if (s && s.diag && !e.worker && !e.report && t.length < 200) continue;
-    const key = e._seq != null ? e._seq : `t:${t.slice(0, 48)}`;
+    const key = e._seq != null ? `s:${e._seq}` : `t:${t.length}:${t.slice(0, 64)}:${t.slice(-32)}`;
     if (seen.has(key)) continue;
     seen.add(key);
     if (t === prevText) continue; // 같은 결과가 연속 2번 저장된 경우
     prevText = t;
-    const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null };
+    const doc = { seq: e._seq, ts: e._ts != null ? e._ts : e.ts, text: t, report: e.report || null, seqs: e._seq != null ? [e._seq] : [] };
     // 분야별 중간 발견(worker 표식)은 최종 리포트가 아니면 결과에서 제외.
     if (e.worker) { workerFallback.push(doc); continue; }
+    // 같은 표식의 연속 조각(스트리밍 분할)은 하나로 합친다 — 뒷조각은 H1이 없다.
+    // H1을 가진 새 발행(재실행 등)은 별도 문서로 유지한다.
+    const last = out.length ? out[out.length - 1] : null;
+    if (last && doc.report && last.report === doc.report && !hasReportTitle(doc.text)) {
+      last.text += "\n\n" + doc.text;
+      last.ts = doc.ts;
+      if (doc.seq != null) last.seqs.push(doc.seq);
+      continue;
+    }
     // 진단 리포트 제목은 "{세션}-{주소} {종별}"로 통일 (후속 Q&A 오적용 방지: 진단 세션+리포트형 H1만).
     if (s && s.diag) doc.text = normalizeReportTitle(t, s, doc.report);
     out.push(doc);
   }
-  // 1차·최종 두 리포트는 모두 보여준다 (통계는 최신 리포트 기준으로 별도 집계).
-  return out.length ? out : workerFallback;
+  if (!out.length) return workerFallback;
+  // 진단 세션에 발행 리포트가 있으면 표식 문서만 결과로 인정한다 — 중간 메모·
+  // 임시 정리 같은 태그 없는 기록이 리포트 통계·내보내기에 섞이지 않게 한다.
+  // 표식이 하나도 없는 구 세션은 긴 문서를 그대로 쓴다(기존 동작).
+  if (s && s.diag && out.some((d) => d.report)) return out.filter((d) => d.report);
+  // 1차·최종 두 리포트는 모두 보여준다 (통계·내보내기는 최신 리포트 기준으로 별도 집계).
+  return out;
 }
 
-// 통계 집계 대상 — 최신 리포트(태그 기준) 이후 문서만. 태그 없는 구 세션은 전체 집계(기존 동작).
+// 통계·내보내기 집계 대상 — 최신 발행 리포트 1건(전 차수 취합본)만.
+// 과거 리포트·후속 메모를 합치면 위험 수가 뻥튀기되고 내보내기가 로그 나열이 된다.
+// 태그 없는 구 세션은 전체 집계(기존 동작).
 function statsDocs(docs) {
   let li = -1;
   docs.forEach((d, i) => { if (d.report) li = i; });
-  return li < 0 ? docs : docs.slice(li);
+  return li < 0 ? docs : docs.slice(li, li + 1);
 }
 
 function resultsTabActive() {
   const rv = $("view-results");
   return !!(rv && rv.classList.contains("active"));
 }
+
+// 루트 카드 헤딩 판별 — 통계(reportStats)와 분할(segmentDiag)이 같은 집합을 센다.
+// (번호 없는 "### 루트. …" 변형도 루트로 인정한다.)
+const ROOT_HEADING_RE = /^#{1,4}\s*루트\s*\d*\.?\s*/;
 
 // ── 진단 리포트 요약: 루트별 위험도·검증 상태를 한눈에 (왼쪽 상단 등급 헤더) ──
 function reportStats(docs) {
@@ -1407,7 +1434,7 @@ function reportStats(docs) {
   for (const d of docs) {
     for (const raw of (d.text || "").split(/\r?\n/)) {
       const line = raw.trim();
-      if (/^#{1,4}\s*루트\s*\d+/.test(line)) {
+      if (ROOT_HEADING_RE.test(line)) {
         const m = line.match(/\[(치명|높음|중간|낮음)\]/);
         const key = m ? m[1] : (line.match(/(치명|높음|중간|낮음)/) || [])[1];
         const sk = sev[key] != null ? key : "낮음";
@@ -1418,10 +1445,7 @@ function reportStats(docs) {
       }
       // 검증(실측/확인/재현) 라인의 [실증]/[징후]/[가정] 을 해당 루트의 증거 상태로 반영.
       const vm = line.match(/\[(실증|징후|가정)\]/);
-      if (vm) {
-        if (/검증|실측|확인|재현/.test(line) && cur) cur.ver = vm[1];
-        ver[vm[1]]++;
-      }
+      if (vm && /검증|실측|확인|재현/.test(line) && cur) cur.ver = vm[1];
     }
   }
   // 분석은 끝났는데 '루트 N' 헤딩이 없다면(리포트 포맷 편차) 본문의 [위험도] 배지만으로
@@ -1432,8 +1456,15 @@ function reportStats(docs) {
         const re = /\[(치명|높음|중간|낮음)\]/g;
         let mm;
         while ((mm = re.exec(raw)) !== null) { sev[mm[1]]++; roots.push({ sev: mm[1], ver: "가정" }); }
+        const rv = /\[(실증|징후|가정)\]/g;
+        let mv;
+        while ((mv = rv.exec(raw)) !== null) ver[mv[1]]++;
       }
     }
+  } else {
+    // 검증 카운트는 루트별 확정 상태만 집계한다 — 본문 곳곳의 배지 언급(범위·
+    // 권고·실측 절의 인용)을 합산하면 '직접 확인' 건수가 부풀려진다.
+    for (const r of roots) ver[r.ver]++;
   }
   // 등급 = 루트별 (위험도 가중치 × 증거 가중치) 평균. 증거가 강할수록 가까이 인정된다.
   const vw = { "실증": 1.0, "징후": 0.6, "가정": 0.35 };
@@ -1621,7 +1652,7 @@ function renderJumpNav(segs) {
       return `<button class="rs-jump-chip ${cls}" data-goto="${i}" title="${esc(it.title || label(it))}">${label(it)}</button>`;
     })
     .join("");
-  return `<div class="rs-jump"><span class="rs-nav-label">바로가기</span>${chips}`;
+  return `<div class="rs-jump"><span class="rs-nav-label">바로가기</span>${chips}</div>`;
 }
 
 // ── 보고서 내보내기/복사 ─────────────────────────────────────────────────────
@@ -1748,7 +1779,8 @@ function segmentToExportHtml(name, target, text) {
 }
 
 function reportMarkdown(s) {
-  return resultDocs(s).map((d) => d.text).join("\n\n");
+  // 내보내기·복사·인쇄는 최신 발행 리포트(전 차수 취합본) 1건만 — 로그 나열이 아니다.
+  return statsDocs(resultDocs(s)).map((d) => d.text).join("\n\n");
 }
 function reportBaseName(s) {
   return ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
@@ -1861,6 +1893,11 @@ function segmentDiag(docs) {
   const flushTail = () => {
     if (tail.length) { out.push({ kind: "tail", title: "막는 방법 · 확인 내역", sev: null, text: tail.join("\n") }); tail = []; }
   };
+  // 리포트가 2건 이상(1차+최종)이면 첫 리포트에도 구분 배너를 단다 —
+  // 없으면 1차 리포트가 어떤 문서인지 카드 목록에서 알 수 없다.
+  if (docs.length > 1) {
+    out.push({ kind: "report", title: reportLabel(docs[0]), sev: null, text: "", seq: docs[0].seq, ts: docs[0].ts });
+  }
   docs.forEach((d, di) => {
     if (di > 0) { // 새 리포트 시작 — 이전 리포트 카드 마감 + 구분 배너
       flushRoot();
@@ -1870,7 +1907,7 @@ function segmentDiag(docs) {
       cur = null; seenRoot = false;
     }
     for (const raw of (d.text || "").split(/\r?\n/)) {
-      const isRoot = /^#{1,4}\s*루트\s*\d*\.?\s*/.test(raw.trim());
+      const isRoot = ROOT_HEADING_RE.test(raw.trim());
       // 루트 헤딩 → 새 루트 카드 시작
       if (isRoot) {
         if (pre.length && !seenRoot) { out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") }); pre = []; }
@@ -2547,7 +2584,9 @@ function reportDisplayTitle(s) {
 }
 function reportDocRows(s) {
   // 발행 후보: report 표식 문서 + 긴 문서(추가 지시 후 정리 등). 짧은 메모는 제외.
-  return resultDocs(s).filter((d) => d.report || (d.text || "").length >= 200);
+  return resultDocs(s)
+    .filter((d) => d.report || (d.text || "").length >= 200)
+    .map((d) => ({ ...d, seqs: d.seqs && d.seqs.length ? d.seqs : (d.seq != null ? [d.seq] : []) }));
 }
 function fmtSize(n) {
   if (n == null) return "";
@@ -2580,7 +2619,7 @@ async function renderReports() {
       const covered = g && g.rows.some((r) => r.kind === "file" && r.tag === tag && Math.abs((r.ts || 0) - docTs) < 300);
       if (covered) continue;
       if (!groups.has(s.id)) groups.set(s.id, { s, rows: [] });
-      groups.get(s.id).rows.push({ kind: "event", tag, ts: docTs, seq: d.seq, size: (d.text || "").length });
+      groups.get(s.id).rows.push({ kind: "event", tag, ts: docTs, seq: d.seq, seqs: d.seqs || [], size: (d.text || "").length });
     }
   }
   const ordered = [...groups.values()]
@@ -2599,8 +2638,8 @@ async function renderReports() {
         ${r.file ? `<div class="rp-file" title="${esc(r.file)}">${esc(r.file.split(/[/\\]/).pop())}</div>` : ""}
       </div>
       <div class="rp-actions">
-        <button class="btn btn-ghost btn-xs rp-open" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-file="${esc(r.file || "")}">열기</button>
-        <button class="btn btn-ghost btn-xs rp-reveal" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-file="${esc(r.file || "")}" title="파일 위치를 탐색기에서 열기">폴더</button>
+        <button class="btn btn-ghost btn-xs rp-open" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-seqs="${esc((r.seqs || []).join(","))}" data-file="${esc(r.file || "")}">열기</button>
+        <button class="btn btn-ghost btn-xs rp-reveal" data-kind="${r.kind}" data-sid="${esc(sid || "")}" data-seq="${r.seq ?? ""}" data-seqs="${esc((r.seqs || []).join(","))}" data-file="${esc(r.file || "")}" title="파일 위치를 탐색기에서 열기">폴더</button>
       </div>
     </div>`;
   body.innerHTML = ordered.map((g) => {
@@ -2620,7 +2659,12 @@ async function openReportRow(ds, mode) {
     let file = ds.file || "";
     if (ds.kind === "event") {
       say("파일로 저장하는 중…");
-      file = await invoke("save_report_file", { session_id: ds.sid, seq: Number(ds.seq) });
+      // 병합 문서는 조각 seq 전체를 넘겨 전문을 저장한다(첫 조각만 저장 방지).
+      const seqs = String(ds.seqs || "").split(",").map((x) => Number(x)).filter((n) => Number.isFinite(n));
+      const args = seqs.length > 1
+        ? { session_id: ds.sid, seq: seqs[0], seqs }
+        : { session_id: ds.sid, seq: Number(ds.seq) };
+      file = await invoke("save_report_file", args);
       renderReports(); // 파일 행으로 바뀌었으므로 목록 새로고침
     }
     if (!file) { say("열 수 있는 파일이 없습니다."); return; }

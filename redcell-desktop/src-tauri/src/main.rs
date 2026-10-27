@@ -730,12 +730,25 @@ fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str, ki
     )
 }
 
+/// 문자열 뒤쪽 cap 자만 남긴다 — 누적 로그는 앞이 아니라 뒤(최신 발견)가 중요하므로
+/// 앞부분을 잘라낸다. 잘린 앞부분이 있으면 머리말로 알린다.
+fn tail_chars(s: &str, cap: usize) -> String {
+    let n = s.chars().count();
+    if n <= cap {
+        return s.to_string();
+    }
+    let tail: String = s.chars().skip(n - cap).collect();
+    format!("…(앞부분 {}자 생략 — 최신 발견 위주)\n{tail}", n - cap)
+}
+
 /// 워커 출력 병합 — collector 입력용. 분야당 6000자로 절단하고 빈 워커는
-/// 플레이스홀더로 채운다. 의심·실사용 병합이 같은 규칙을 쓰도록 공용화.
+/// 플레이스홀더로 채운다. 1차·최종 병합이 같은 규칙을 쓰도록 공용화.
+/// 누적분은 뒤쪽(최신 차수)을 남긴다 — 앞쪽 절단은 새 발견을 버리게 된다.
 /// (combined, 내용 있는 워커 수) 반환.
 fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rounds_run: u32) -> (String, usize) {
     let mut combined = String::new();
     let mut ok_n = 0;
+    let span = if rounds_run <= 1 { "1차".to_string() } else { format!("1~{rounds_run}차 누적") };
     for def in DEEP_WORKERS {
         let wid = def.id;
         let body = accum.get(wid).map(|s| s.trim()).unwrap_or("");
@@ -745,9 +758,9 @@ fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rou
         let body = if body.is_empty() {
             "(이 분야는 결과를 내지 못했습니다 — 최종 리포트에서 해당 분야를 보강할 것)".to_string()
         } else {
-            body.chars().take(6000).collect::<String>()
+            tail_chars(body, COMBINE_WORKER_CAP)
         };
-        combined.push_str(&format!("\n\n--- {} ({wid}) [라운드 {rounds_run}] ---\n{body}", def.label));
+        combined.push_str(&format!("\n\n--- {} ({wid}) [{span}] ---\n{body}", def.label));
     }
     (combined, ok_n)
 }
@@ -757,20 +770,27 @@ fn early_merge_instruction(base: String) -> String {
     format!("{base}\n\n주: 이는 1차 확인 직후의 1차 리포트 병합이다. 서두에 '1차 확인 기반의 1차 리포트이며, 추가 확인이 뒤에서 계속되어 최종 리포트로 바뀔 수 있음'을 한 줄로 명시하라. 확정할 수 없는 것은 [가정]·[징후]로 정직하게 구분하라.")
 }
 
-/// 정밀 진단 추가 확인 상한 (1차 + 추가 1회 = 최대 2차).
-/// 1차 리포트가 먼저 나가고, 새로 찾은 게 없으면 1차에서 바로 끝난다.
-const DEEP_MAX_ROUNDS: u32 = 2;
-/// 추가 확인 지시문에 넣는 자가 이전 결과 발췌 상한 (문자).
+/// 정밀 진단 추가 확인 상한 (1차 + 추가 2회 = 최대 3차).
+/// 1차 리포트가 먼저 나가고, 새로 찾은 게 없으면 조기 수렴해 최종 리포트로 간다.
+const DEEP_MAX_ROUNDS: u32 = 3;
+/// 추가 확인 지시문에 넣는 자가 이전 결과 발췌 상한 (문자, 뒤쪽 우선).
 const DEEP_FOLLOWUP_TRUNC: usize = 2000;
+/// collector 입력용 워커 출력 상한 (분야당 문자, 뒤쪽 우선).
+const COMBINE_WORKER_CAP: usize = 6000;
 
 /// 워커 출력에서 발견 키 추출 — `[등급] 제목` 줄을 정규화해 순서 유지 중복 제거.
 /// 수렴 판정(신규 발견 수) + 교차 단서 전달에 쓴다.
 /// `##` 소제목은 매 라운드 새로 찍혀 신규로 오판되므로 세지 않는다.
+/// "추가 발견 없음/이상 없음" 같은 무발견 보고도 발견이 아니므로 제외한다 —
+/// 안 그러면 매 라운드 신규로 잡혀 수렴 판정이 무력화된다.
 fn extract_finding_keys(text: &str) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for line in text.lines() {
         let t = line.trim();
         if t.is_empty() {
+            continue;
+        }
+        if t.contains("추가 발견 없음") || t.contains("이상 없음") {
             continue;
         }
         let is_bullet = t.starts_with("- [")
@@ -803,7 +823,7 @@ fn deep_followup_instruction(
     cross: &str,
     target: &str,
 ) -> String {
-    let own: String = own_prior.chars().take(DEEP_FOLLOWUP_TRUNC).collect();
+    let own = tail_chars(own_prior.trim(), DEEP_FOLLOWUP_TRUNC);
     format!(
         r###"# RedCell 정밀 진단 추가 확인 {round}차 — {label} ({title})
 
@@ -832,6 +852,52 @@ fn deep_followup_instruction(
         own = if own.trim().is_empty() { "(이전 보고 없음)" } else { own.trim() },
         cross = if cross.trim().is_empty() { "(단서 없음)" } else { cross.trim() },
     )
+}
+
+/// 추가 확인 컨텍스트 — 워커별 (자가 누적, 타 분야 단서) + 단서 총합.
+/// 단서는 "다른 워커가 이번 차수에 보고한 것 중 자기가 아직 보고하지 않은 것"이다:
+/// 자가 누적 키에 없는 것만 전달해 자기 반복을 막고 분야 간 교차 검증을 살린다.
+/// 워커당 최대 6줄.
+fn build_followup_context(
+    results: &[(String, PumpOutcome)],
+    accum: &std::collections::HashMap<String, String>,
+) -> (std::collections::HashMap<String, (String, String)>, usize) {
+    let mut own_keys: std::collections::HashMap<String, std::collections::HashSet<String>> =
+        std::collections::HashMap::new();
+    for def in DEEP_WORKERS {
+        let keys: std::collections::HashSet<String> = accum
+            .get(def.id)
+            .map(|t| extract_finding_keys(t).into_iter().collect())
+            .unwrap_or_default();
+        own_keys.insert(def.id.to_string(), keys);
+    }
+    let mut ctx: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
+    let mut leads = 0usize;
+    for def in DEEP_WORKERS {
+        let empty = std::collections::HashSet::new();
+        let mine = own_keys.get(def.id).unwrap_or(&empty);
+        let mut cross_lines: Vec<String> = Vec::new();
+        for (wid, o) in results {
+            if wid == def.id || (o.failed && !has_usable_text(o)) {
+                continue;
+            }
+            for k in extract_finding_keys(&o.text) {
+                if mine.contains(&k) {
+                    continue;
+                }
+                cross_lines.push(format!("- [단서:{wid}] {k}"));
+                if cross_lines.len() >= 6 {
+                    break;
+                }
+            }
+            if cross_lines.len() >= 6 {
+                break;
+            }
+        }
+        leads += cross_lines.len();
+        ctx.insert(def.id.to_string(), (accum.get(def.id).cloned().unwrap_or_default(), cross_lines.join("\n")));
+    }
+    (ctx, leads)
 }
 
 /// 프로바이더 목록 + 자격증명 감지 상태(프론트 연동용).
@@ -3325,32 +3391,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             if is_stopped(&results) {
                 break;
             }
-            // 추가 확인 컨텍스트 — 자가 누적 + 타 분야 신규 키 (엇갈린 단서).
-            let mut ctx: std::collections::HashMap<String, (String, String)> = std::collections::HashMap::new();
-            let mut leads = 0usize;
-            for def in DEEP_WORKERS {
-                let own = accum.get(def.id).cloned().unwrap_or_default();
-                let mut cross_lines: Vec<String> = Vec::new();
-                for (wid, o) in &results {
-                    if wid == def.id || o.failed {
-                        continue;
-                    }
-                    for k in extract_finding_keys(&o.text) {
-                        if seen.contains(&k) {
-                            continue;
-                        }
-                        cross_lines.push(format!("- [단서:{wid}] {k}"));
-                        if cross_lines.len() >= 6 {
-                            break;
-                        }
-                    }
-                    if cross_lines.len() >= 6 {
-                        break;
-                    }
-                }
-                leads += cross_lines.len();
-                ctx.insert(def.id.to_string(), (own, cross_lines.join("\n")));
-            }
+            // 추가 확인 컨텍스트 — 자가 누적 + 타 분야 단서 (엇갈린 단서).
+            let (ctx, leads) = build_followup_context(&results, &accum);
             {
                 let ev = json!({ "type": "note", "text": format!("[sys] 추가 확인 {}차 시작 — 엇갈린 단서 {leads}건 확인.", round + 1) });
                 let stamped = append_event(&app, &id, &ev);
@@ -3430,6 +3472,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
         }
         {
+            let final_failed_with_early = !ok && !merge_outcome.aborted && early_published;
             let ev = json!({ "type": "note", "text": if ok {
                 if merge_outcome.failed {
                     "[완료] 최종 리포트 완성 — 결과 리포트 탭에서 확인하세요. (응답 끝부분이 잘렸을 수 있습니다)".to_string()
@@ -3438,6 +3481,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 }
             } else if merge_outcome.aborted {
                 "[중지] 최종 리포트 만들기를 중단했습니다.".to_string()
+            } else if final_failed_with_early {
+                "[완료] 최종 리포트를 만들지 못했습니다 — 1차 리포트는 결과 탭에 그대로 있습니다. 찾은 내용은 진행 상황에서도 볼 수 있습니다.".to_string()
             } else {
                 "[완료] 최종 리포트를 만들지 못했습니다 — 찾은 내용은 진행 상황에서 볼 수 있습니다.".to_string()
             }});
@@ -3445,10 +3490,12 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
         }
         // harness 메모리(prime-agent 패턴): 진단 이력 1줄을 대상별로 누적.
-        record_history(&app, &s.host, ok_n, DEEP_WORKERS.len(), ok);
+        // 최종 병합이 실패해도 1차 리포트가 있으면 사용자에게 남는 것은 성공이다.
+        let delivered = ok || early_published;
+        record_history(&app, &s.host, ok_n, DEEP_WORKERS.len(), delivered);
         if let Some(cur) = read_session(&app, &id) {
             if cur.status == "running" {
-                let st = if ok { "done" } else { "error" };
+                let st = if delivered { "done" } else { "error" };
                 set_status(&app, &id, st);
                 app.emit("engagement-status", json!({ "sessionId": id, "status": st })).ok();
             } else if cur.status == "stopped" && early_published {
@@ -3835,17 +3882,33 @@ fn list_reports(app: AppHandle) -> Vec<ReportFile> {
 
 /// 세션 기록 1건(seq)을 발행 파일로 저장하고 경로를 돌려준다 — 파일이 이미
 /// 있으면(자동 저장됨) 그대로 재사용한다. 오래된 세션의 리포트 열기용.
+/// `seqs` 가 2건 이상이면 스트리밍 분할 조각들을 순서대로 합쳐 전문으로 저장한다
+/// (첫 조각만 저장되는 잘림 방지).
 #[tauri::command]
-fn save_report_file(app: AppHandle, session_id: String, seq: i64) -> Result<String, String> {
+fn save_report_file(app: AppHandle, session_id: String, seq: i64, seqs: Option<Vec<i64>>) -> Result<String, String> {
     let s = read_session(&app, &session_id).ok_or("세션을 찾을 수 없습니다")?;
-    let ev = s.events.iter().find(|e| e.get("_seq").and_then(|v| v.as_i64()) == Some(seq)).ok_or("해당 기록을 찾을 수 없습니다")?;
-    let text = ev.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
-    if text.is_empty() {
+    let wanted: Vec<i64> = match seqs {
+        Some(v) if v.len() > 1 => v,
+        _ => vec![seq],
+    };
+    let mut parts: Vec<String> = Vec::new();
+    let mut tag = "note";
+    for q in &wanted {
+        let ev = s.events.iter().find(|e| e.get("_seq").and_then(|v| v.as_i64()) == Some(*q)).ok_or("해당 기록을 찾을 수 없습니다")?;
+        let t = ev.get("text").and_then(|v| v.as_str()).unwrap_or("").trim();
+        if !t.is_empty() {
+            parts.push(t.to_string());
+        }
+        if parts.len() == 1 {
+            tag = ev.get("report").and_then(|v| v.as_str()).unwrap_or("note");
+        }
+    }
+    let text = parts.join("\n\n");
+    if text.trim().is_empty() {
         return Err("빈 기록은 저장할 수 없습니다".into());
     }
-    let tag = ev.get("report").and_then(|v| v.as_str()).unwrap_or("note");
     let dir = reports_dir(&app);
-    Ok(write_report_file(&dir, &session_id, tag, text)?.to_string_lossy().into_owned())
+    Ok(write_report_file(&dir, &session_id, tag, text.trim())?.to_string_lossy().into_owned())
 }
 
 /// 경로 열기 — 보고서 폴더 안의 파일만 허용한다.
@@ -4345,6 +4408,109 @@ mod tests {
         std::fs::remove_file(arg.trim_start_matches('@')).ok();
     }
 
+    /// 정밀 진단은 1차 + 추가 2회 = 총 3차. 1차 뒤 1차 리포트, 3차 뒤 최종 리포트.
+    #[test]
+    fn deep_rounds_are_three_total() {
+        assert_eq!(DEEP_MAX_ROUNDS, 3, "총 라운드 수는 3이어야 한다 (1차 + 추가 2회)");
+        let followups: Vec<u32> = (1..DEEP_MAX_ROUNDS).collect();
+        assert_eq!(followups, vec![1, 2], "추가 확인은 2차·3차 두 번");
+    }
+
+    /// 발견 키: 무발견 보고("추가 발견 없음/이상 없음")는 키가 아니다.
+    /// 키로 잡히면 매 라운드 신규로 오판돼 수렴 판정이 무력화된다.
+    #[test]
+    fn finding_keys_skip_no_discovery_lines() {
+        let text = "## 워커 발견 (입력값 점검 주입 공격)\n\
+            - [높음] SQL 주입 신호 — 오류 노출 / 근거: syntax error\n\
+            - [정보] 추가 발견 없음 — 확인한 범위: /login, /search\n\
+            - [정보] 이상 없음 — 확인한 범위: 헤더 전반";
+        let keys = extract_finding_keys(text);
+        assert_eq!(keys.len(), 1, "진짜 발견 1건만 키여야 한다: {keys:?}");
+    }
+
+    /// 발견 키: `##` 소제목은 세지 않고, 중복은 순서 유지 제거한다.
+    #[test]
+    fn finding_keys_dedup_and_skip_headings() {
+        let text = "## 추가 발견 (구조 살펴보기)\n\
+            - [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문\n\
+            - [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더 원문";
+        let keys = extract_finding_keys(text);
+        assert_eq!(keys.len(), 1, "중복 발견은 1키로: {keys:?}");
+        assert!(extract_finding_keys("## 추가 발견 (구조)\n## 워커 발견 (입력)").is_empty());
+    }
+
+    /// 병합 입력 절단은 뒤쪽(최신 차수)을 남긴다 — 앞쪽 절단은 새 발견을 버린다.
+    #[test]
+    fn combine_worker_outputs_keeps_newest_round() {
+        let mut accum = std::collections::HashMap::new();
+        let old = "가".repeat(COMBINE_WORKER_CAP);
+        accum.insert("w1".to_string(), format!("{old}\n\n--- 추가 확인 3차 ---\n- [치명] 3차 신규 발견 — /admin 노출"));
+        for id in ["w2", "w3", "w4", "w5"] {
+            accum.insert(id.to_string(), "- [정보] 이상 없음 — 확인한 범위: 전부".to_string());
+        }
+        let (combined, ok_n) = combine_worker_outputs(&accum, 3);
+        assert_eq!(ok_n, 5);
+        assert!(combined.contains("3차 신규 발견"), "최신 차수 발견이 살아야 한다");
+        assert!(combined.contains("앞부분"), "절단했으면 머리말로 알려야 한다");
+        assert!(combined.contains("[1~3차 누적]"), "차수 구간 표기: {combined:?}");
+        let (early, _) = combine_worker_outputs(&accum, 1);
+        assert!(early.contains("[1차]"), "1차 병합 표기: {early:?}");
+    }
+
+    /// 빈 워커는 플레이스홀더로 채우고 ok_n 에서 제외한다.
+    #[test]
+    fn combine_worker_outputs_placeholder_for_empty() {
+        let accum = std::collections::HashMap::new();
+        let (combined, ok_n) = combine_worker_outputs(&accum, 1);
+        assert_eq!(ok_n, 0);
+        assert_eq!(combined.matches("결과를 내지 못했습니다").count(), 5);
+    }
+
+    /// tail_chars: 짧으면 그대로, 길면 뒤쪽만 + 생략 머리말.
+    #[test]
+    fn tail_chars_keeps_tail() {
+        assert_eq!(tail_chars("짧은 내용", 100), "짧은 내용");
+        let s = format!("{}끝부분", "앞".repeat(50));
+        let out = tail_chars(&s, 3);
+        assert!(out.ends_with("끝부분"), "뒤쪽이 남아야 한다: {out}");
+        assert!(out.contains("앞부분 50자 생략"), "생략 분량 표기: {out}");
+    }
+
+    /// 추가 확인 발췌도 뒤쪽(최신 보고)을 남긴다.
+    #[test]
+    fn followup_instruction_keeps_recent_prior() {
+        let def = &DEEP_WORKERS[0];
+        let prior = format!("{}최신보고", "옛날보고".repeat(1000));
+        let inst = deep_followup_instruction(def, 3, &prior, "- [단서:w2] 키", "http://t/");
+        assert!(inst.contains("추가 확인 3차"), "차수 표기: {}", inst.chars().take(80).collect::<String>());
+        assert!(inst.contains("최신보고"), "최신 보고가 지시문에 남아야 한다");
+    }
+
+    /// 교차 단서: 타 워커의 "자기가 아직 보고하지 않은" 발견만 전달한다.
+    /// 과거 버그는 전역 seen 으로 걸러 단서가 항상 0건이었다.
+    #[test]
+    fn followup_context_passes_cross_worker_leads() {
+        let w2_text = "- [높음] SQL 주입 신호 — /login 오류 노출 / 근거: syntax error".to_string();
+        let results = vec![
+            ("w1".to_string(), PumpOutcome { text: "- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더".into(), ..Default::default() }),
+            ("w2".to_string(), PumpOutcome { text: w2_text.clone(), ..Default::default() }),
+        ];
+        let mut accum = std::collections::HashMap::new();
+        accum.insert("w1".to_string(), "- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더".to_string());
+        accum.insert("w2".to_string(), w2_text);
+        let (ctx, leads) = build_followup_context(&results, &accum);
+        assert!(leads >= 2, "서로의 발견이 단서로 오가야 한다: leads={leads}");
+        let w1_cross = &ctx.get("w1").unwrap().1;
+        assert!(w1_cross.contains("[단서:w2]"), "w1 에게 w2 발견이 전달되어야 한다: {w1_cross}");
+        assert!(!w1_cross.contains("[단서:w1]"), "자기 발견은 단서에서 제외: {w1_cross}");
+        // 자기가 이미 보고한 것은 단서에서 빠진다.
+        let mut accum2 = accum.clone();
+        accum2.get_mut("w1").unwrap().push_str("\n- [높음] SQL 주입 신호 — /login 오류 노출 / 근거: syntax error");
+        let (ctx2, _) = build_followup_context(&results, &accum2);
+        assert!(!ctx2.get("w1").unwrap().1.contains("[단서:w2]"), "이미 아는 것은 단서 제외");
+    }
+
+
     /// custom + Anthropic 방식(Databricks AI Gateway): api 방언·authHeader·compat 가
     /// 기록되고 `!명령` 키가 그대로 통과해야 한다. OpenAI 방언으로 되돌리면 게이트웨이
     /// 전용 필드는 제거된다.
@@ -4769,7 +4935,7 @@ mod tests {
         let (combined, ok_n) = combine_worker_outputs(&accum, 1);
         assert_eq!(ok_n, 2, "내용 있는 분야만 계수");
         assert!(combined.contains("발견 A"), "w1 내용: {combined}");
-        assert!(combined.contains("[라운드 1]"), "라운드 표기: {combined}");
+        assert!(combined.contains("[1차]"), "라운드 표기: {combined}");
         assert!(combined.contains("결과를 내지 못했습니다"), "빈 분야 플레이스홀더: {combined}");
         let w2sec = combined.split("\n\n--- ").find(|s| s.starts_with("입력값 점검")).unwrap_or("");
         assert!(w2sec.chars().count() <= 6000 + 200, "분야당 6000자 절단: {}자", w2sec.chars().count());

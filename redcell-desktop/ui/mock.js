@@ -392,6 +392,11 @@
     { worker: "w4", label: "정보 노출 점검", title: "노출·설정 오류" },
     { worker: "w5", label: "기능 오용 점검", title: "비즈니스 로직" },
   ];
+  // 1차 리포트 미리보기 변형 — 최종본에서 루트 3을 덜어내고 1차 고지를 붙인다.
+  const DIAG_DEMO_EARLY = (DIAG_DEMO_REPORT
+    .replace(/^# .*$/m, "# 데모몰 쇼핑몰 1차 리포트")
+    .replace(/### 루트 3\.[\s\S]*?(?=## 4\.)/, "")
+    + "\n\n> 1차 확인 기반의 1차 리포트이며, 추가 확인이 뒤에서 계속되어 최종 리포트로 바뀔 수 있음.").trim();
   function simulateDeep(session) {
     const tp = session.engine === "prime" ? "prime-툴✓" : "pi-툴✓"; // 엔진별 툴 노트 접두
     const authed = !!(session.auth_cookie && session.auth_cookie.trim());
@@ -424,6 +429,9 @@
       { type: "worker_status", worker: "w4", label: "정보 노출 점검", title: "노출·설정 오류", state: "done" },
       { type: "note", worker: "w5", text: "[기능 오용 점검] ## 워커 발견 (기능 오용 점검 비즈니스 로직)\n- [중간] 쿠폰 중복 사용 가능 지점 — 상태 전이 검증 없음 / 근거: [가정] 설명 기반" },
       { type: "worker_status", worker: "w5", label: "기능 오용 점검", title: "비즈니스 로직", state: "done" },
+      { type: "note", text: "[sys] 1차 확인 끝(다섯 곳 중 5곳 응답) — 1차 리포트를 만듭니다…" },
+      { type: "text_end", text: DIAG_DEMO_EARLY, report: "early" },
+      { type: "note", text: "[완료] 1차 리포트 완성 — 결과 리포트 탭에서 확인하세요. 추가 확인은 뒤에서 계속됩니다." },
       { type: "note", text: "[sys] 추가 확인 2차 시작 — 엇갈린 단서 3건 확인." },
       { type: "note", text: "[sys] 추가 확인 2차 끝 — 새로 찾은 것 0건." },
       { type: "note", text: "[sys] 새로 찾은 것이 없어 추가 확인을 마칩니다 — 최종 리포트를 만듭니다." },
@@ -596,10 +604,11 @@
       case "save_report_file": {
         // 미리보기: 기록 텍스트를 파일로 다운로드하고 가짜 경로를 돌려준다.
         const s = findById(args.session_id);
-        const ev = s && s.events.find((e) => e._seq === Number(args.seq));
-        const text = ev && ev.text ? ev.text : "";
+        const wanted = Array.isArray(args.seqs) && args.seqs.length > 1 ? args.seqs.map(Number) : [Number(args.seq)];
+        const evs = wanted.map((q) => s && s.events.find((e) => e._seq === q)).filter(Boolean);
+        const text = evs.map((e) => (e.text || "").trim()).filter(Boolean).join("\n\n");
         if (!text) throw new Error("해당 기록을 찾을 수 없습니다");
-        const tag = ev.report || "note";
+        const tag = (evs[0] && evs[0].report) || "note";
         const blob = new Blob([text], { type: "text/markdown" });
         const a = document.createElement("a");
         a.href = URL.createObjectURL(blob);
