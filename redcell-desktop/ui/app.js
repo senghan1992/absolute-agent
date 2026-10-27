@@ -115,7 +115,7 @@ function renderActive() {
   if (chatInput) {
     chatInput.placeholder = (s && s.diag)
       ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
-      : "위에 주소를 입력하세요 · 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+      : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"";
   }
   setBadge(s.status);
   renderDangerBtn(s);
@@ -980,7 +980,7 @@ function setDiagPlaceholder() {
   const s = cur();
   ci.placeholder = (s && s.diag)
     ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
-    : "위에 주소를 입력하세요 · 예: \"하반기 합격자 목록을 파일로 뽑아줘\"";
+    : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"";
 }
 
 // ── [진단 시작] 원클릭: URL 만으로 심층 진단 (5개 분야 병렬 + 시나리오 리포트) ─
