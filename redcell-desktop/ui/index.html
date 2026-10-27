@@ -140,6 +140,13 @@
         </div>
         <div id="view-live" class="view active live">
           <div id="workerBar" class="worker-bar hidden"></div>
+          <div id="liveFilter" class="live-filter" role="tablist" aria-label="기록 필터">
+            <button class="lf-chip active" data-f="all" role="tab" aria-selected="true">전체</button>
+            <button class="lf-chip" data-f="finding" role="tab" aria-selected="false">발견</button>
+            <button class="lf-chip" data-f="alert" role="tab" aria-selected="false">차단·오류</button>
+            <span class="lf-count" id="liveFilterCount"></span>
+          </div>
+          <div class="capture-wrap">
           <div class="capture">
             <table class="cap-table">
               <thead>
@@ -155,6 +162,8 @@
               <tbody id="capBody"></tbody>
             </table>
             <div id="capEmpty" class="placeholder">대기 중 — 오른쪽 AI 도우미에게 말씀하시면 기록이 시작됩니다.</div>
+          </div>
+          <button id="tailBtn" class="tail-btn hidden" title="최신 기록으로 이동"><span>맨 아래로</span><svg class="ic"><use href="#i-chev"/></svg></button>
           </div>
           <div id="detail" class="detail">
             <div class="detail-empty">항목을 선택하면 자세한 내용이 표시됩니다.</div>
@@ -179,6 +188,12 @@
           <span id="agentState" class="agent-state">대기</span>
         </div>
         <div id="chatMessages" class="chat-messages"></div>
+        <div id="quickGoals" class="quick-goals">
+          <span class="qg-label">바로 시키기</span>
+          <button class="chip" data-goal="사용할 수 있는 API 목록 찾아서 보여줘">API 목록 찾기</button>
+          <button class="chip" data-goal="로그인 기능의 취약점을 점검해줘">로그인 점검</button>
+          <button class="chip" data-goal="지금까지 나온 결과를 초보자도 알기 쉽게 설명해줘">결과 쉽게 설명</button>
+        </div>
         <div class="composer">
           <textarea id="chatInput" rows="3" placeholder="위에 주소를 입력하세요 · 예: &quot;사용할 수 있는 API 목록 찾아서 보여줘&quot;"></textarea>
           <div class="composer-row">
@@ -427,6 +442,8 @@
         </footer>
       </div>
     </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
     <!-- 테마 토글(TAURI 유무와 무관하게 동작) -->
     <script>

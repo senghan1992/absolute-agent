@@ -44,8 +44,10 @@ function playbooksOf(s) {
 function rowFields(e, i) {
   const seq = e._seq != null ? e._seq : i;
   const time = e._ts ? clock(e._ts) : "";
-  const phase = e.phase || "—";
-  const tool = e.tool || (e.type === "finding" && e.finding ? e.finding.phase : "") || "—";
+  const phase = friendlyPhase(e.phase);
+  const toolRaw = e.tool || (e.type === "finding" && e.finding ? e.finding.phase : "") || "";
+  const tool = !toolRaw ? "—" : (e.tool ? toolLabel(e.tool) : friendlyPhase(toolRaw));
+  const toolAttr = (toolRaw && toolRaw !== tool) ? ` title="${esc(toolRaw)}"` : "";
   const msg = e.text || (e.finding ? e.finding.title : "") || JSON.stringify(e);
   let status = "";
   if (e.type === "finding") status = e.finding ? e.finding.severity : "info";
@@ -53,7 +55,7 @@ function rowFields(e, i) {
   else if (e.type === "blocked") status = "blocked";
   else if (e.type === "error") status = "error";
   else if (e.type === "authorized" || e.type === "done") status = "ok";
-  return { seq, time, phase, tool, msg, status, type: e.type || "note", sev: e.finding ? e.finding.severity : (e.severity || "") };
+  return { seq, time, phase, tool, toolAttr, msg, status, type: e.type || "note", sev: e.finding ? e.finding.severity : (e.severity || "") };
 }
 function rowHtml(e, i) {
   const f = rowFields(e, i);
@@ -64,7 +66,7 @@ function rowHtml(e, i) {
     <td class="c-seq">${f.seq}</td>
     <td class="c-time">${f.time}</td>
     <td class="c-phase">${esc(f.phase)}</td>
-    <td class="c-tool">${esc(f.tool)}</td>
+    <td class="c-tool"${f.toolAttr}>${esc(f.tool)}</td>
     <td class="c-msg">${esc(f.msg)}</td>
     <td class="c-status">${stTxt}</td>
   </tr>`;
@@ -255,16 +257,78 @@ function setBadge(status) {
 }
 
 // ── 캡처 테이블 ──────────────────────────────────────────────────────────────
+// ── 쉬운말 매핑: 표·상세의 단계/도구/유형을 사람 말로 ──────────────────────────
+const PHASE_FRIENDLY = { recon: "정찰", enumerate: "수집", exploit: "검증", post: "정리" };
+function friendlyPhase(p) { return (p && PHASE_FRIENDLY[p]) || p || "—"; }
+const EV_FRIENDLY = { finding: "발견", action: "실행", tool_result: "도구 결과", phase: "단계", note: "기록", done: "완료", blocked: "차단", error: "오류", authorized: "인가 확인", distilled: "학습 저장", text_end: "리포트", worker_status: "작업 상태" };
+
+// ── 라이브 필터 ───────────────────────────────────────────────────────────────
+let liveFilter = "all";
+function rowPassesFilter(e) {
+  if (liveFilter === "all") return true;
+  if (liveFilter === "finding") return e.type === "finding";
+  if (liveFilter === "alert") return e.type === "blocked" || e.type === "error";
+  return true;
+}
+
+// ── 꼬리 따라가기: 바닥 근처에서만 자동 스크롤 ────────────────────────────────
+let tailFollow = true;
+function syncTailBtn() {
+  const btn = $("tailBtn"); const cap = document.querySelector(".capture");
+  if (!btn || !cap) return;
+  tailFollow = (cap.scrollHeight - cap.scrollTop - cap.clientHeight) < 40;
+  btn.classList.toggle("hidden", tailFollow);
+}
+function scrollCaptureBottom() {
+  const cap = document.querySelector(".capture");
+  if (!cap) return;
+  cap.scrollTop = cap.scrollHeight;
+  tailFollow = true;
+  const btn = $("tailBtn"); if (btn) btn.classList.add("hidden");
+}
+
+// ── 토스트: 흐름을 막는 alert() 대신 벗어나지 않는 알림 ───────────────────────
+let toastTimer = null;
+function toast(msg) {
+  const el = $("toast");
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.remove("show");
+  void el.offsetWidth; // 애니메이션 재시작
+  el.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => el.classList.remove("show"), 3600);
+}
+
+// ── 채팅 미니 마크다운: 어시스턴트 답변 구조화(코드펜스·인라인·개행) ─────────
+function chatHtml(content) {
+  const parts = esc(content).split("```");
+  return parts.map((p, i) => (i % 2 === 1)
+    ? `<pre class="chat-pre">${p.replace(/^\n+|\n+$/g, "")}</pre>`
+    : inlineMd(p).replace(/\n/g, "<br>")).join("");
+}
+
+function syncSendBtn() {
+  const ci = $("chatInput"), btn = $("chatSend");
+  if (ci && btn) btn.disabled = !ci.value.trim();
+}
+
 function renderCapture(s) {
   if (resultsTabActive()) renderResults();
   renderWorkerBar(s);
   const body = $("capBody");
-  const evs = eventsOf(s).filter((e) => e.type !== "worker_status"); // 워커 상태는 상단 칩으로
+  const all = eventsOf(s).filter((e) => e.type !== "worker_status"); // 워커 상태는 상단 칩으로
+  const evs = all.filter(rowPassesFilter);
   body.innerHTML = evs.map((e, i) => rowHtml(e, i)).join("");
-  $("capEmpty").style.display = evs.length ? "none" : "block";
+  const emptyEl = $("capEmpty");
+  emptyEl.style.display = evs.length ? "none" : "block";
+  emptyEl.textContent = (!evs.length && all.length)
+    ? "조건에 맞는 기록이 없습니다 — 필터를 바꾸면 다시 볼 수 있습니다."
+    : "대기 중 — 오른쪽 AI 도우미에게 말씀하시면 기록이 시작됩니다.";
+  const cnt = $("liveFilterCount");
+  if (cnt) cnt.textContent = `기록 ${evs.length}개`;
   wireRows();
-  const cap = document.querySelector(".capture");
-  if (cap) cap.scrollTop = cap.scrollHeight;
+  scrollCaptureBottom();
   renderPiConsole(s);
 }
 
@@ -347,14 +411,14 @@ function renderDetail(ev) {
   const el = $("detail");
   if (!ev) { el.innerHTML = `<div class="detail-empty">항목을 선택하면 자세한 내용이 표시됩니다.</div>`; return; }
   const row = (k, v) => `<div class="d-row"><span class="d-k">${esc(k)}</span><span class="d-v">${esc(v)}</span></div>`;
-  let html = `<h4>${esc(ev.type || "event")}</h4>`;
+  let html = `<h4>${esc(EV_FRIENDLY[ev.type] || ev.type || "event")}</h4>`;
   if (ev.type === "finding" && ev.finding) {
     const f = ev.finding;
-    html += row("severity", f.severity) + row("phase", f.phase || "—") + row("title", f.title);
+    html += row("severity", f.severity) + row("phase", friendlyPhase(f.phase)) + row("title", f.title);
     if (f.detail) html += `<pre>${esc(f.detail)}</pre>`;
     if (f.evidence) html += `<h4 style="margin-top:10px">evidence</h4><pre>${esc(f.evidence)}</pre>`;
   } else if (ev.type === "action") {
-    html += row("tool", ev.tool || "—") + row("phase", ev.phase || "—");
+    html += row("tool", ev.tool ? toolLabel(ev.tool) : "—") + row("phase", friendlyPhase(ev.phase));
     if (ev.rationale) html += row("rationale", ev.rationale);
     // absolute-agent(pyrun): 에이전트가 스스로 작성한 파이썬 코드는 코드블록으로 보여준다.
     if (ev.tool === "python" && ev.args && typeof ev.args.code === "string") {
@@ -363,13 +427,13 @@ function renderDetail(ev) {
       html += `<h4 style="margin-top:10px">args</h4><pre>${esc(JSON.stringify(ev.args ?? {}, null, 2))}</pre>`;
     }
   } else if (ev.type === "tool_result") {
-    html += row("tool", ev.tool || "—") + row("phase", ev.phase || "—") + row("ok", String(ev.ok)) + (ev.severity ? row("severity", ev.severity) : "");
+    html += row("tool", ev.tool ? toolLabel(ev.tool) : "—") + row("phase", friendlyPhase(ev.phase)) + row("ok", ev.ok ? "성공" : "실패") + (ev.severity ? row("severity", ev.severity) : "");
     if (ev.summary) html += `<pre>${esc(ev.summary)}</pre>`;
   } else {
-    if (ev.phase) html += row("phase", ev.phase);
+    if (ev.phase) html += row("phase", friendlyPhase(ev.phase));
     html += `<pre>${esc(ev.text || "")}</pre>`;
   }
-  html += `<h4 style="margin-top:12px">raw</h4><pre>${esc(JSON.stringify(ev, null, 2))}</pre>`;
+  html += `<details class="d-raw"><summary>원본 데이터</summary><pre>${esc(JSON.stringify(ev, null, 2))}</pre></details>`;
   el.innerHTML = html;
 }
 
@@ -478,7 +542,7 @@ function renderChat() {
   const el = $("chatMessages");
   const chat = (s && s.chat) || [];
   if (!chat.length) { el.innerHTML = `<div class="placeholder">하고 싶은 일을 말씀하세요.<br/>AI가 방법을 찾아 왼쪽 진행 상황에서 보여줍니다.</div>`; return; }
-  el.innerHTML = chat.map((m) => `<div class="msg ${m.role}">${esc(m.content)}<span class="ts">${hhmm(m.ts)}</span></div>`).join("");
+  el.innerHTML = chat.map((m) => `<div class="msg ${m.role}">${m.role === "assistant" ? chatHtml(m.content) : esc(m.content)}<span class="ts">${hhmm(m.ts)}</span></div>`).join("");
   el.scrollTop = el.scrollHeight;
 }
 
@@ -724,19 +788,22 @@ function onLiveEvent(event) {
     else { const line = activityLine(event); if (line) setActivity(withRound(s, line)); }
     return;
   }
-  const body = $("capBody");
-  $("capEmpty").style.display = "none";
-  const seq = event._seq != null ? event._seq : eventsOf(s).length - 1;
-  body.insertAdjacentHTML("beforeend", rowHtml(event, seq));
-  const lastTr = body.lastElementChild;
-  if (lastTr) lastTr.onclick = () => {
-    selectedSeq = parseInt(lastTr.dataset.seq, 10);
-    document.querySelectorAll("#capBody tr").forEach((x) => x.classList.remove("sel"));
-    lastTr.classList.add("sel");
-    renderDetail(event);
-  };
-  const cap = document.querySelector(".capture");
-  if (cap) cap.scrollTop = cap.scrollHeight;
+  if (rowPassesFilter(event)) {
+    const body = $("capBody");
+    $("capEmpty").style.display = "none";
+    const seq = event._seq != null ? event._seq : eventsOf(s).length - 1;
+    body.insertAdjacentHTML("beforeend", rowHtml(event, seq));
+    const lastTr = body.lastElementChild;
+    if (lastTr) lastTr.onclick = () => {
+      selectedSeq = parseInt(lastTr.dataset.seq, 10);
+      document.querySelectorAll("#capBody tr").forEach((x) => x.classList.remove("sel"));
+      lastTr.classList.add("sel");
+      renderDetail(event);
+    };
+    const cnt = $("liveFilterCount");
+    if (cnt) cnt.textContent = `기록 ${$("capBody").children.length}개`;
+    if (tailFollow) scrollCaptureBottom();
+  }
 
   // pi CLI 화면(터미널)으로 동일 이벤트를 스트리밍.
   if (s) renderPiConsole(s);
@@ -897,7 +964,7 @@ async function ensureTargetAuthorized() {
 
 async function runEngagement() {
   const s = cur(); if (!s) return;
-  if (!s.host && !$("shHost").value.trim()) { alert("주소를 먼저 입력하세요."); return; }
+  if (!s.host && !$("shHost").value.trim()) { toast("주소를 먼저 입력하세요."); return; }
   await persistHeader();
   if (!activeProvider()) { showProviderModal(); return; } // 미설정 → 모달로 설정 유도
   await ensureTargetAuthorized();
@@ -917,7 +984,7 @@ async function runEngagement() {
     const fresh = await invoke("get_session", { id: s.id });
     if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
     renderChat();
-    alert(msg); // 스폰 실패(전형적: Windows npx 문제, redcell 경로/의존성)를 즉시 알린다
+    toast(msg); // 스폰 실패(전형적: Windows npx 문제, redcell 경로/의존성)를 즉시 알린다
   }
 }
 
@@ -953,6 +1020,7 @@ async function sendChat() {
   if (!text) return;
   if (!activeProvider()) { showProviderModal(); return; } // 입력 보존 + 설정 유도
   input.value = "";
+  syncSendBtn();
   await persistHeader({ goal: text });
   await invoke("append_chat", { id: s.id, role: "user", content: text });
   const host = $("shHost").value.trim();
@@ -1024,12 +1092,12 @@ async function beginDeepDiagnosis(s) {
     const f2 = await invoke("get_session", { id: s.id });
     if (f2) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = f2; }
     renderChat();
-    alert(msg);
+    toast(msg);
   }
 }
 async function runDiagnose() {
   const s = cur(); if (!s) return;
-  if (!s.host && !$("shHost").value.trim()) { alert("먼저 위에 진단할 주소를 입력하세요."); return; }
+  if (!s.host && !$("shHost").value.trim()) { toast("먼저 위에 진단할 주소를 입력하세요."); return; }
   await persistHeader();
   if (!activeProvider()) { showProviderModal(); return; } // 입력 보존 + 설정 유도
   const s2 = cur();
@@ -2669,8 +2737,42 @@ function wire() {
     const b = e.target.closest(".chip");
     if (!b) return;
     $("chatInput").value = b.dataset.goal || b.textContent.trim();
+    syncSendBtn();
     sendChat();
   });
+  // 꼬리 따라가기 + 맨 아래로 버튼
+  const capEl = document.querySelector(".capture");
+  if (capEl) capEl.addEventListener("scroll", () => syncTailBtn(), { passive: true });
+  const tailBtn = $("tailBtn");
+  if (tailBtn) tailBtn.onclick = scrollCaptureBottom;
+  // 라이브 필터 칩
+  document.querySelectorAll("#liveFilter .lf-chip").forEach((chip) => {
+    chip.onclick = () => {
+      liveFilter = chip.dataset.f || "all";
+      document.querySelectorAll("#liveFilter .lf-chip").forEach((c) => {
+        const on = c === chip;
+        c.classList.toggle("active", on);
+        c.setAttribute("aria-selected", String(on));
+      });
+      renderCapture(cur());
+    };
+  });
+  // 주소 입력에서 Enter → 진단 시작 (실행 중에는 중지 방지)
+  ["shName", "shHost", "shPort"].forEach((id) => {
+    const inp = $(id);
+    if (inp) inp.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") {
+        e.preventDefault();
+        if (cur() && cur().status === "running") return;
+        const db = $("diagBtn");
+        if (db) db.click();
+      }
+    });
+  });
+  // 보내기 버튼 활성 상태
+  const chatInputEl = $("chatInput");
+  if (chatInputEl) chatInputEl.addEventListener("input", syncSendBtn);
+  syncSendBtn();
   ["shName", "shHost", "shPort", "shProvider", "shEngine", "shCookie"].forEach((id) => $(id) && $(id).addEventListener("change", () => persistHeader()));
   document.querySelectorAll(".subtab").forEach((btn) => { btn.onclick = () => switchView(btn.dataset.view); });
   // 시뮬레이션 플레이어 컨트롤 (결과 탭 전체 위임 — 재렌더 후에도 유지)
@@ -2696,7 +2798,7 @@ function wire() {
       e.preventDefault();
       const goal = ns.dataset.goal || "";
       const s = cur();
-      if (s && !s.host) { alert("먼저 위에 주소를 입력하세요."); return; }
+      if (s && !s.host) { toast("먼저 위에 주소를 입력하세요."); return; }
       if (!activeProvider()) { showProviderModal(); return; }
       const ci = $("chatInput");
       if (ci) ci.value = goal ? `이 문제를 고쳐줘: ${goal}` : goal;

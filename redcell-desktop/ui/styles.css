@@ -762,7 +762,7 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 /* ── 라이브 캡처: 출발 안내 시간표 ── */
 .live { flex: 1 1 auto; min-height: 0; flex-direction: column; }
 .capture { flex: 1 1 auto; min-height: 0; overflow-y: auto; position: relative; }
-.cap-table { width: 100%; border-collapse: collapse; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
+.cap-table { width: 100%; border-collapse: collapse; table-layout: fixed; font-family: var(--mono); font-size: 12px; font-variant-numeric: tabular-nums; }
 .cap-table thead th {
   position: sticky; top: 0; z-index: 2;
   text-align: left; font-weight: 700; color: var(--faint); text-transform: uppercase; letter-spacing: 0.5px; font-size: 10px;
@@ -771,14 +771,19 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .c-seq { width: 46px; text-align: right !important; }
 .c-time { width: 82px; }
 .c-phase { width: 94px; }
-.c-tool { width: 112px; }
+.c-tool { width: 148px; }
 .c-status { width: 98px; }
 .cap-table tbody tr { border-bottom: 1px solid var(--line); cursor: pointer; }
 .cap-table tbody tr:hover { background: var(--row-hover); }
 .cap-table tbody tr.sel { background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
 .cap-table td { padding: 6px 10px; vertical-align: top; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cap-table td.c-seq { text-align: right; color: var(--faint); }
-.cap-table td.c-msg { white-space: normal; color: var(--text); max-width: 0; }
+/* 내용 셀은 3줄 미리보기로 — 선택한 행만 전문 펼침 */
+.cap-table td.c-msg {
+  white-space: normal; color: var(--text);
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 3; overflow: hidden;
+}
+.cap-table tr.sel td.c-msg { -webkit-line-clamp: unset; }
 .cap-table td.c-phase { color: var(--sev-low-fg); }
 .cap-table td.c-tool { color: var(--text); }
 /* 새로 들어온 발견 행은 잉크가 스며들듯 나타난다 */
@@ -1338,6 +1343,65 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .diag-field.field-evidence .df-body { display: block; width: 100%; }
 .ev-pre { margin: 2px 0 0; padding: 8px 11px; font-family: var(--mono); font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text); background: var(--surface-3); border: 1px solid var(--line); border-radius: 8px; }
 .diag-field.field-repro .df-body { font-family: var(--mono); font-size: 11.5px; }
+
+/* ── 라이브 필터: 기록 종류 고르기 ─────────────────────────────────────────── */
+.live-filter { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); flex: none; }
+.lf-chip {
+  font: inherit; font-size: 11.5px; font-weight: 600; cursor: pointer;
+  border: 1px solid var(--line-2); border-radius: 999px; padding: 4px 12px;
+  background: var(--surface-2); color: var(--muted); transition: all 0.13s;
+}
+.lf-chip:hover { color: var(--text); border-color: var(--faint); }
+.lf-chip.active { background: color-mix(in srgb, var(--accent) 16%, var(--surface-2)); border-color: color-mix(in srgb, var(--accent) 45%, transparent); color: var(--text); }
+.lf-count { margin-left: auto; font-size: 11px; color: var(--faint); font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+/* ── 캡처 래퍼 + 맨 아래로 버튼 ────────────────────────────────────────────── */
+.capture-wrap { flex: 1 1 auto; min-height: 0; position: relative; display: flex; flex-direction: column; }
+.capture-wrap .capture { flex: 1 1 auto; }
+.tail-btn {
+  position: absolute; right: 14px; bottom: 12px; z-index: 5;
+  display: inline-flex; align-items: center; gap: 6px;
+  font: inherit; font-size: 11.5px; font-weight: 700; cursor: pointer;
+  color: var(--text); background: var(--elev); border: 1px solid var(--line-2); border-radius: 999px;
+  padding: 6px 12px; box-shadow: var(--shadow-1); transition: border-color 0.13s;
+}
+.tail-btn:hover { border-color: var(--accent); }
+.tail-btn .ic { width: 13px; height: 13px; transform: rotate(90deg); }
+
+/* ── 토스트: 흐름을 막지 않는 알림 ─────────────────────────────────────────── */
+.toast {
+  position: fixed; left: 50%; bottom: 26px; z-index: 200;
+  transform: translate(-50%, 12px); opacity: 0; pointer-events: none;
+  max-width: min(560px, 90vw); padding: 10px 16px; border-radius: 11px;
+  background: var(--elev); border: 1px solid var(--line-2); color: var(--text);
+  font-size: 12.5px; font-weight: 600; box-shadow: var(--shadow-2);
+  transition: transform 0.22s var(--ease-run), opacity 0.22s ease;
+}
+.toast.show { transform: translate(-50%, 0); opacity: 1; }
+
+/* ── 상세 원본 데이터 접기 ─────────────────────────────────────────────────── */
+.d-raw { margin-top: 12px; }
+.d-raw summary {
+  cursor: pointer; font-size: 11px; color: var(--faint); text-transform: uppercase;
+  letter-spacing: 0.6px; font-weight: 700; list-style: none; display: inline-flex; align-items: center; gap: 6px;
+}
+.d-raw summary::-webkit-details-marker { display: none; }
+.d-raw summary::before { content: ""; width: 7px; height: 7px; border-right: 1.6px solid var(--faint); border-bottom: 1.6px solid var(--faint); transform: rotate(-45deg); transition: transform 0.15s ease; }
+.d-raw[open] summary::before { transform: rotate(45deg); }
+.d-raw summary:hover { color: var(--text); }
+.d-raw pre { margin-top: 8px; }
+
+/* ── 채팅 마크다운 ─────────────────────────────────────────────────────────── */
+.msg.assistant { white-space: normal; }
+.msg.assistant strong { color: var(--text); }
+.msg.assistant em { color: var(--muted); }
+.msg.assistant code { font-family: var(--mono); font-size: 11.5px; }
+.msg.assistant a { color: var(--accent-fg); }
+.chat-pre {
+  margin: 8px 0 2px; padding: 8px 10px; font-family: var(--mono); font-size: 11.5px; line-height: 1.55;
+  white-space: pre-wrap; word-break: break-word; color: var(--text);
+  background: var(--surface-2); border: 1px solid var(--line-2); border-radius: 8px;
+}
 
 
 
