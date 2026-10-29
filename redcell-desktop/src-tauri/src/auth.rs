@@ -8,7 +8,7 @@
 // 어긋나도 실행 시점에 엔진 쪽 검증이 fail-closed 로 다시 확인한다.
 
 use serde::Serialize;
-use std::net::{IpAddr, Ipv4Addr};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 use std::path::PathBuf;
 
 #[derive(Serialize, Clone, Default)]
@@ -51,10 +51,26 @@ pub fn default_list_path() -> PathBuf {
     home_dir().join("authorization.list")
 }
 
+/// 인가 기한 만료 — until(YYYY-MM-DD)이 오늘보다 이전이면 참.
+/// 파싱 실패(loader 검증 통과 후 도달 불가)는 미지정 취급.
+pub fn is_expired(auth: &AuthList) -> bool {
+    match auth.until.as_deref() {
+        Some(d) if d.len() == 10 => {
+            let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
+            today.as_str() > d
+        }
+        _ => false,
+    }
+}
+
 /// 호스트 인가 판정 — prime-agent 반응형 게이트용 (데스크톱 내장 매처).
-/// 규칙: deny 우선 → allow(정확·`*.` 와일드카드·IPv4 CIDR) → 그 외 차단.
+/// 규칙: 기한 만료 → 차단 / deny 우선 → allow(정확·`*.` 와일드카드·IPv4/IPv6 CIDR) → 그 외 차단.
 /// 빈 allows 는 전부 차단(fail-closed). 대소문자 무시.
+/// 포트 검사는 `is_host_port_allowed` 가 담당한다 (호출자가 포트 맥락을 함께 넘긴다).
 pub fn is_host_allowed(auth: &AuthList, host: &str) -> bool {
+    if is_expired(auth) {
+        return false;
+    }
     let h = host.trim().trim_end_matches('.').to_lowercase();
     if h.is_empty() {
         return false;
@@ -63,6 +79,22 @@ pub fn is_host_allowed(auth: &AuthList, host: &str) -> bool {
         return false;
     }
     auth.allows.iter().any(|a| target_matches(a, &h))
+}
+
+/// 호스트+포트 인가 판정 — `ports:` 지시자 집행점.
+/// 지시자 없음 → 호스트 게이트만. 포트 맥락 없음(None) → 호스트 게이트만
+/// 적용한다: 추출 단계가 명시 포트·스킴 기본값·port 키를 채우므로, None 은
+/// "알 수 없음"이지 우회가 아니다. 베어 호스트 언급까지 차단하면 정상 정찰이
+/// 죽으므로 허용하되, 이 한계는 스킬 지침(전체 URL 사용 강제)으로 좁힌다.
+pub fn is_host_port_allowed(auth: &AuthList, host: &str, port: Option<u16>) -> bool {
+    if !is_host_allowed(auth, host) {
+        return false;
+    }
+    match (&auth.ports, port) {
+        (None, _) => true,
+        (_, None) => true,
+        (Some(list), Some(p)) => list.contains(&p),
+    }
 }
 
 fn target_matches(pattern: &str, host: &str) -> bool {
@@ -77,11 +109,17 @@ fn target_matches(pattern: &str, host: &str) -> bool {
             && host.as_bytes()[host.len() - suffix.len() - 1] == b'.';
     }
     if let Some((net, bits)) = p.split_once('/') {
-        if let (Ok(ip), Ok(addr)) = (net.parse::<Ipv4Addr>(), host.parse::<Ipv4Addr>()) {
-            if let Ok(b) = bits.parse::<u32>() {
+        if let Ok(b) = bits.parse::<u32>() {
+            if let (Ok(ip), Ok(addr)) = (net.parse::<Ipv4Addr>(), host.parse::<Ipv4Addr>()) {
                 if b <= 32 {
                     let mask = if b == 0 { 0u32 } else { u32::MAX << (32 - b) };
                     return (u32::from(ip) & mask) == (u32::from(addr) & mask);
+                }
+            }
+            if let (Ok(ip), Ok(addr)) = (net.parse::<Ipv6Addr>(), host.parse::<Ipv6Addr>()) {
+                if b <= 128 {
+                    let mask = if b == 0 { 0u128 } else { u128::MAX << (128 - b) };
+                    return (u128::from(ip) & mask) == (u128::from(addr) & mask);
                 }
             }
         }
@@ -101,11 +139,14 @@ pub fn validate_target(value: &str) -> Result<(), String> {
         let b: u32 = bits
             .trim()
             .parse()
-            .map_err(|_| format!("잘못된 CIDR: '{v}' — IPv4/CIDR 형식(예: 10.0.0.0/24)이어야 합니다."))?;
-        if ip.parse::<Ipv4Addr>().is_err() || b > 32 {
-            return Err(format!("잘못된 CIDR: '{v}' — IPv4/CIDR 형식(예: 10.0.0.0/24)이어야 합니다."));
+            .map_err(|_| format!("잘못된 CIDR: '{v}' — IP/CIDR 형식(예: 10.0.0.0/24, 2001:db8::/32)이어야 합니다."))?;
+        if ip.parse::<Ipv4Addr>().is_ok() && b <= 32 {
+            return Ok(());
         }
-        return Ok(());
+        if ip.parse::<Ipv6Addr>().is_ok() && b <= 128 {
+            return Ok(());
+        }
+        return Err(format!("잘못된 CIDR: '{v}' — IP/CIDR 형식(예: 10.0.0.0/24, 2001:db8::/32)이어야 합니다."));
     }
     if v.parse::<IpAddr>().is_ok() {
         return Ok(()); // IPv4 / IPv6
@@ -249,7 +290,12 @@ pub fn load(path: &PathBuf) -> AuthList {
             }
             out.until = until;
             out.ports = ports;
-            if allow_count == 0 {
+            if is_expired(&out) {
+                out.warn = Some(format!(
+                    "인가 기한(until {})이 지났습니다 — 모든 대상이 차단됩니다. 기한을 갱신하세요.",
+                    out.until.as_deref().unwrap_or("")
+                ));
+            } else if allow_count == 0 {
                 out.warn = Some("허용 대상이 하나도 없습니다. 아래에서 IP를 추가하세요.".into());
             }
         }
@@ -369,6 +415,47 @@ pub fn ensure_allowed(path: &PathBuf, host: &str) -> Result<(bool, String), Stri
     Ok((true, target))
 }
 
+/// 호스트 DNS 해석 — 중복 제거된 IP 문자열 목록. 실패 시 빈 목록.
+pub fn resolve_ips(host: &str) -> Vec<String> {
+    use std::net::ToSocketAddrs;
+    let mut seen: Vec<String> = Vec::new();
+    if host.is_empty() {
+        return seen;
+    }
+    let Ok(addrs) = (host, 80u16).to_socket_addrs() else {
+        return seen;
+    };
+    for a in addrs {
+        let ip = a.ip().to_string();
+        if !seen.contains(&ip) {
+            seen.push(ip);
+        }
+    }
+    seen
+}
+
+/// DNS 드리프트(TOCTOU) 판정 — 지금 해석된 IP 중 인가 목록에 없는 것만 반환.
+/// 이름 자체가 인가된 상태에서 새 IP 가 나오면 리바인딩 의심.
+/// IP 리터럴 입력·해석 실패(빈 목록)는 빈 결과 (판정 불가 — 조용히 통과).
+pub fn dns_drifted(host: &str, allows: &[String], resolved: &[String]) -> Vec<String> {
+    use std::net::IpAddr;
+    if host.trim().is_empty() || resolved.is_empty() {
+        return Vec::new();
+    }
+    if host.trim().parse::<IpAddr>().is_ok() {
+        return Vec::new(); // 리터럴은 리바인딩 불가
+    }
+    let h = host.trim().to_lowercase();
+    let name_allowed = allows.iter().any(|a| {
+        let t = a.trim().trim_start_matches('!').to_lowercase();
+        t == h || (t.strip_prefix("*.").map(|suf| h.len() > suf.len() + 1 && h.ends_with(suf)).unwrap_or(false))
+    });
+    if !name_allowed {
+        return Vec::new(); // 이름 자체가 인가 안 됐으면 게이트가 별도 차단
+    }
+    resolved.iter().filter(|ip| !allows.iter().any(|a| a.trim() == ip.as_str())).cloned().collect()
+}
+
 /// host 를 DNS 로 해석해 나온 IP 를 인가 목록에 추가한다(중복 제외).
 /// 반환: (새로 추가한 IP, 이미 목록에 있던 IP).
 ///
@@ -382,17 +469,7 @@ pub fn resolve_and_allow(path: &PathBuf, host: &str, current_allows: &[String]) 
     if host.is_empty() {
         return (added, known);
     }
-    use std::net::ToSocketAddrs;
-    let mut seen: Vec<String> = Vec::new();
-    let Ok(addrs) = (host, 80u16).to_socket_addrs() else {
-        return (added, known);
-    };
-    for a in addrs {
-        let ip = a.ip().to_string();
-        if seen.contains(&ip) {
-            continue;
-        }
-        seen.push(ip.clone());
+    for ip in resolve_ips(host) {
         if current_allows.iter().any(|x| x == &ip) {
             known.push(ip);
         } else if add(path, &ip, false).is_ok() {
@@ -588,6 +665,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn dns_drift_shapes() {
+        let allows = vec!["demo.local".to_string(), "10.0.0.5".to_string()];
+        // 새 IP 출현 → 드리프트.
+        let d = dns_drifted("demo.local", &allows, &["10.0.0.5".to_string(), "10.9.9.9".to_string()]);
+        assert_eq!(d, vec!["10.9.9.9".to_string()]);
+        // 전부 목록 내 → 정상.
+        assert!(dns_drifted("demo.local", &allows, &["10.0.0.5".to_string()]).is_empty());
+        // 리터럴·미인가 이름·해석 실패 → 빈 결과.
+        assert!(dns_drifted("10.0.0.5", &allows, &["10.0.0.5".to_string()]).is_empty());
+        assert!(dns_drifted("evil.local", &allows, &["10.9.9.9".to_string()]).is_empty());
+        assert!(dns_drifted("demo.local", &allows, &[]).is_empty());
+        // localhost 는 해석 가능 (hosts 파일 — 네트워크 불필요).
+        assert!(!resolve_ips("localhost").is_empty());
+    }
+
+    #[test]
+    fn host_allowed_ipv6_cidr() {
+        let a = auth_list(&["2001:db8::/32", "::1"], &[]);
+        assert!(is_host_allowed(&a, "2001:db8::1"));
+        assert!(is_host_allowed(&a, "2001:db8:ffff::99"));
+        assert!(!is_host_allowed(&a, "2001:db9::1"));
+        assert!(is_host_allowed(&a, "::1"));
+        assert!(is_host_allowed(&a, "2001:DB8::1"), "대소문자 무시");
+        assert!(validate_target("2001:db8::/32").is_ok());
+        assert!(validate_target("2001:db8::/129").is_err());
+        assert!(validate_target("10.0.0.0/33").is_err());
+    }
+
+    #[test]
+    fn until_expiry_blocks_all() {
+        let mut a = auth_list(&["10.0.0.5"], &[]);
+        assert!(!is_expired(&a), "미지정은 만료 아님");
+        a.until = Some("2999-01-01".into());
+        assert!(!is_expired(&a));
+        assert!(is_host_allowed(&a, "10.0.0.5"));
+        a.until = Some("2000-01-01".into());
+        assert!(is_expired(&a));
+        assert!(!is_host_allowed(&a, "10.0.0.5"), "만료 시 전부 차단");
+    }
+
     /// 호스트 인가 판정 — prime-agent 반응형 게이트의 판정 근거.
     /// 정확 일치·와일드카드·CIDR·deny 우선·빈 목록 fail-closed.
     #[test]
@@ -622,5 +740,18 @@ mod tests {
         let empty = auth_list(&[], &[]);
         assert!(!is_host_allowed(&empty, "10.0.0.1")); // 빈 목록 = 전부 차단
         assert!(!is_host_allowed(&empty, "anything.local"));
+    }
+
+    #[test]
+    fn host_port_gate_shapes() {
+        let mut a = auth_list(&["demo.vulnlab.local"], &[]);
+        a.ports = Some(vec![80, 443]);
+        assert!(is_host_port_allowed(&a, "demo.vulnlab.local", Some(443)));
+        assert!(is_host_port_allowed(&a, "demo.vulnlab.local", Some(80)));
+        assert!(!is_host_port_allowed(&a, "demo.vulnlab.local", Some(8080)), "인가 밖 포트 차단");
+        assert!(!is_host_port_allowed(&a, "evil.com", Some(443)), "호스트 게이트 유지");
+        assert!(is_host_port_allowed(&a, "demo.vulnlab.local", None), "포트 맥락 없음은 호스트 게이트만");
+        let b = auth_list(&["demo.vulnlab.local"], &[]);
+        assert!(is_host_port_allowed(&b, "demo.vulnlab.local", Some(3306)), "지시자 없으면 포트 무제한");
     }
 }

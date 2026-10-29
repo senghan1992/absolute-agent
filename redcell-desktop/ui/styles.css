@@ -776,6 +776,17 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .cap-table tbody tr { border-bottom: 1px solid var(--line); cursor: pointer; }
 .cap-table tbody tr:hover { background: var(--row-hover); }
 .cap-table tbody tr.sel { background: color-mix(in srgb, var(--accent) 13%, transparent); box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 45%, transparent); }
+.cap-table tr.run-sep td { text-align: center; font-size: 11px; font-weight: 700; color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent); padding: 3px 8px; letter-spacing: 1px; }
+.mem-panel { margin: 6px 0; border: 1px solid var(--border); border-radius: 8px; padding: 4px 10px; font-size: 12px; }
+.mem-panel summary { cursor: pointer; font-weight: 700; }
+.mem-count { color: var(--muted); font-weight: 400; }
+.mem-list { display: flex; flex-direction: column; gap: 4px; margin: 6px 0; max-height: 160px; overflow: auto; }
+.mem-item { display: flex; gap: 6px; align-items: baseline; border-bottom: 1px dashed var(--border); padding: 2px 0; }
+.mem-kind { font-size: 10.5px; font-weight: 700; padding: 0 6px; border-radius: 999px; background: var(--chip-bg, #eef); white-space: nowrap; }
+.mem-text { flex: 1; white-space: pre-wrap; word-break: break-word; }
+.mem-del { border: none; background: none; cursor: pointer; color: var(--muted); }
+.mem-add { display: flex; gap: 6px; margin: 4px 0 6px; }
+.mem-add input { flex: 1; }
 .cap-table td { padding: 6px 10px; vertical-align: top; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .cap-table td.c-seq { text-align: right; color: var(--faint); }
 /* 내용 셀은 3줄 미리보기로 — 선택한 행만 전문 펼침 */

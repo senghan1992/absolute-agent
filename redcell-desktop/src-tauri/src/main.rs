@@ -10,9 +10,9 @@
 
 #![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader};
+use std::io::{BufRead, BufReader, Read as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
@@ -24,177 +24,19 @@ use serde_json::{json, Value};
 use tauri::{AppHandle, Emitter, Manager};
 use uuid::Uuid;
 
+use session_store::*;
+use deep_instr::*;
+
 mod auth;
+mod deep_instr;
 mod probes;
 mod risk;
-
-/// 세션 파일 read-modify-write 직렬화용 락(stdout/stderr 스레드 경합 방지).
-struct IoGuard(Mutex<()>);
+mod session_store;
 
 /// 실행 중인 redcell 자식 프로세스 레지스트리(세션 id → Child). 중지 시 kill 용도.
 struct Procs(Mutex<HashMap<String, Child>>);
 
-#[derive(Serialize, Deserialize, Clone)]
-struct ChatMessage {
-    role: String, // "user" | "assistant" | "system"
-    content: String,
-    ts: String,
-}
 
-#[derive(Serialize, Deserialize, Clone)]
-struct Session {
-    id: String,
-    name: String,
-    host: String,
-    #[serde(default)]
-    port: Option<u16>,
-    #[serde(default)]
-    goal: String,
-    #[serde(default = "default_provider")]
-    provider: String,
-    #[serde(default = "default_mode")]
-    mode: String, // tools(고정 툴박스 오케스트레이터) | python(absolute-agent RLM)
-    #[serde(default)]
-    max: bool, // 공격 최대 모드(tools) — 전수 커버리지 + opt-in 전체 + python_exec
-    #[serde(default)]
-    diag: bool, // 서비스 진단 모드 — 설명 기반 공격 포인트/개선 권고 리포트
-    #[serde(default)]
-    deep: bool, // 정밀 진단 — 병렬 5분야 + fan-in 병합 (prime-agent builder 패턴)
-    #[serde(default)]
-    engine: String, // 실행 엔진: ""|"pi" = pi-coding-agent, "prime" = prime-agent(Rust 하네스)
-    #[serde(default)]
-    auth_cookie: String, // 로그인 영역 점검용 세션 쿠키 (Cookie 헤더 값, 사용자가 붙여넣음)
-    #[serde(default)]
-    danger_consent: bool, // 위험 검사 동의 (모달 명시 동의, 세션별, 철회 가능)
-    #[serde(default)]
-    danger_consented_at: String, // 동의 시각 (RFC3339, 감사 추적용)
-    #[serde(default)]
-    piq: String, // prime 모드: pi 세션 id(연속 대화 유지)
-    #[serde(default = "status_idle")]
-    status: String, // idle | running | done | error
-    created_at: String,
-    updated_at: String,
-    #[serde(default)]
-    chat: Vec<ChatMessage>,
-    #[serde(default)]
-    events: Vec<Value>,
-}
-
-fn default_provider() -> String {
-    String::new() // mock 프로바이더는 존재하지 않는다 — 미지정 = 선택 안 함
-}
-fn default_mode() -> String {
-    // 기본은 prime-agent(pi) 직접 실행 — 위에 대상 URL/호스트를 넣고 지시하면 CLI 처럼 쓴다.
-    "prime".into()
-}
-fn status_idle() -> String {
-    "idle".into()
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-struct ProviderConn {
-    #[serde(default)]
-    api_key: String,
-    #[serde(default)]
-    base_url: String,
-    #[serde(default)]
-    model: String,
-    /// pi models.json 의 API 방언 — ""(기본)=openai-completions, "anthropic-messages".
-    /// custom 카드에서 선택한다 (Databricks AI Gateway 같은 Anthropic 경로용).
-    #[serde(default)]
-    api: String,
-}
-
-#[derive(Serialize, Deserialize, Clone, Default)]
-struct Settings {
-    #[serde(default)]
-    redcell_dir: String,
-    #[serde(default)]
-    auth_path: String,
-    #[serde(default)]
-    default_provider: String,
-    /// 사용자가 데스크톱 설정에서 직접 입력한 연결 정보(API 키/base URL/모델).
-    /// 세션 실행 시 자식 프로세스의 환경변수로 주입된다.
-    #[serde(default)]
-    providers: HashMap<String, ProviderConn>,
-}
-
-fn now() -> String {
-    Utc::now().to_rfc3339()
-}
-
-// ── 경로 헬퍼 ────────────────────────────────────────────────────────────────
-fn root(app: &AppHandle) -> PathBuf {
-    let dir = app.path().app_data_dir().unwrap_or_else(|_| PathBuf::from("."));
-    fs::create_dir_all(&dir).ok();
-    dir
-}
-fn sessions_dir(app: &AppHandle) -> PathBuf {
-    let d = root(app).join("sessions");
-    fs::create_dir_all(&d).ok();
-    d
-}
-fn settings_file(app: &AppHandle) -> PathBuf {
-    root(app).join("settings.json")
-}
-fn session_file(app: &AppHandle, id: &str) -> PathBuf {
-    sessions_dir(app).join(format!("{id}.json"))
-}
-
-fn read_session(app: &AppHandle, id: &str) -> Option<Session> {
-    let txt = fs::read_to_string(session_file(app, id)).ok()?;
-    serde_json::from_str(&txt).ok()
-}
-
-fn write_session_locked(app: &AppHandle, s: &Session) {
-    let guard = app.state::<IoGuard>();
-    let _lock = guard.0.lock().unwrap();
-    if let Ok(txt) = serde_json::to_string_pretty(s) {
-        fs::write(session_file(app, &s.id), txt).ok();
-    }
-}
-
-/// 세션에 이벤트 하나를 append (읽기-수정-쓰기를 락으로 원자화).
-/// 이벤트에 `_ts`(epoch millis)·`_seq`(순번)를 찍어 UI 의 캡처 테이블이
-/// 시간·순번 컬럼을 그릴 수 있게 한다. 저장된 값과 동일한 stamped 이벤트를 반환한다.
-fn append_event(app: &AppHandle, id: &str, ev: &Value) -> Value {
-    let guard = app.state::<IoGuard>();
-    let _lock = guard.0.lock().unwrap();
-    let p = session_file(app, id);
-    let mut stamped = ev.clone();
-    let Some(mut s) = fs::read_to_string(&p)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Session>(&t).ok())
-    else {
-        return stamped;
-    };
-    if let Some(obj) = stamped.as_object_mut() {
-        obj.entry("_ts").or_insert(json!(Utc::now().timestamp_millis()));
-        obj.entry("_seq").or_insert(json!(s.events.len()));
-    }
-    s.events.push(stamped.clone());
-    s.updated_at = now();
-    if let Ok(txt) = serde_json::to_string_pretty(&s) {
-        fs::write(p, txt).ok();
-    }
-    stamped
-}
-
-fn set_status(app: &AppHandle, id: &str, status: &str) {
-    let guard = app.state::<IoGuard>();
-    let _lock = guard.0.lock().unwrap();
-    let p = session_file(app, id);
-    if let Some(mut s) = fs::read_to_string(&p)
-        .ok()
-        .and_then(|t| serde_json::from_str::<Session>(&t).ok())
-    {
-        s.status = status.to_string();
-        s.updated_at = now();
-        if let Ok(txt) = serde_json::to_string_pretty(&s) {
-            fs::write(p, txt).ok();
-        }
-    }
-}
 
 /// redcell 프로젝트 위치 추정: 환경변수 → cwd 상대 → 실행파일 상위 경로.
 fn guess_redcell_dir() -> Option<String> {
@@ -307,7 +149,9 @@ fn list_sessions(app: AppHandle) -> Vec<Session> {
                     .ok()
                     .and_then(|t| serde_json::from_str::<Session>(&t).ok())
                 {
-                    out.push(s);
+                    // 요약만 돌려준다 — 이벤트·채팅은 get_session 으로 필요할 때만 로드.
+                    // (세션 수가 늘어도 탭/대시보드 초기 로딩이 무거워지지 않게)
+                    out.push(Session { events: Vec::new(), chat: Vec::new(), ..s });
                 }
             }
         }
@@ -445,7 +289,13 @@ fn set_danger_consent(app: AppHandle, id: String, consent: bool) -> Option<Sessi
 fn delete_session(app: AppHandle, id: String) -> Result<(), String> {
     let guard = app.state::<IoGuard>();
     let _lock = guard.0.lock().unwrap();
-    fs::remove_file(session_file(&app, &id)).map_err(|e| e.to_string())
+    fs::remove_file(session_file(&app, &id)).map_err(|e| e.to_string())?;
+    // 이벤트 NDJSON 이 남으면 삭제한 세션의 기록이 다시 생긴다 — 함께 제거.
+    match fs::remove_file(events_file(&app, &id)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -497,370 +347,80 @@ const PROVIDER_CATALOG: &[ProviderMeta] = &[
     ProviderMeta { name: "custom", kind: "openai-compat", note: "임의 OpenAI 호환 엔드포인트 — vLLM·LM Studio·원격 ollama 등", default_model: "", env_keys: &["REDCELL_OPENAI_API_KEY"], base_url: "", needs_base: true },
 ];
 
-/// 서비스 진단 역할 + 실측 정찰 지시 (단일 진단·심층 collector 공용 토대).
-const DIAG_ROLE: &str = r#"# RedCell 서비스 진단 — 시니어 해커 멘토
-
-당신은 10년차 시니어 해커다. 지금 주니어 해커를 가르치듯, 이 서비스에서
-**실제로 해킹이 어떻게 가능한지** 시나리오 단위로 보여주고, 각 시나리오마다
-"왜 가능한지(원리)"와 "어떻게 막는지(구체적 코드·설정)"를 함께 설명한다.
-독자는 해킹을 모르는 서비스 담당자 + 주니어 보안 담당자다.
-
-대상 URL 이 주어졌으면 보고서를 쓰기 전에 **반드시** 아래 실측 정찰을 먼저
-수행하고, 확보한 실제 응답·헤더·상태로 서비스 모델을 세운다.
-(P0 자동 스윕 증거([P-###])가 함께 주어지면 그것을 우선 사용하고, 빈틈만
-아래 순서로 보완한다 — 이미 커버된 항목의 재프로브는 시간 낭비다.)
-
-## 실측 정찰 순서 (URL 이 주어진 경우 — 보고서 작성 전 반드시)
-모든 요청은 web_fetch, 비파괴 GET/HEAD 로만 한다:
-① 홈페이지 GET + 응답 헤더 — 기술스택·서버·보안 헤더 점검
-   (Content-Security-Policy, Strict-Transport-Security, X-Frame-Options,
-   X-Content-Type-Options, Referrer-Policy, Server, X-Powered-By)
-② 쿠키 플래그 (HttpOnly/Secure/SameSite) 점검
-③ 홈페이지의 링크·폼·스크립트·JS 번들에서 엔드포인트·파라미터·API 수집(공격 표면)
-④ 흔한 민감/설계 경로를 각각 한 번씩 프로브: /robots.txt, /.well-known/security.txt,
-   /sitemap.xml, /openapi.json, /swagger, /admin, /login, /api, /health, /.env,
-   /.git/HEAD, /config, /favicon.ico, /server-status
-⑤ 리다이렉트·HTTPS 강제·응답 코드(200/301/302/403/404/500)로 배포·접근통제 정황 파악
-⑥ JS 번들·openapi 문서에서 API 키·토큰·내부 URL 같은 비밀 문자열 탐색
-정찰에서 실제로 본 것을 근거로만 단정하고, 못 본 것은 [가정] 으로 표기한다."#;
-
-/// 리포트 형식 + 집필 원칙 (단일 진단·심층 collector 공용).
-const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를 지킨다 — UI 가 자동 시각화한다)
-# <서비스명> 진단 리포트
-## 0. 한눈에 보기 (맨 앞 요약 표)
-  3줄 요약: 비전문가도 이해하는 "그래서 뭐가 위험한가" 3줄 (등급·최대 피해·급한 조치)
-  | 루트 | 위험도 | 공격 방법 | 탈취 정보 | 보완 요약 |
-  (각 시나리오를 한 행으로 — 비전문가도 표 하나로 전체 그림을 본다)
-  P0 자동 스윕 요약 1줄: "자동 스윕 N개 프로브·M건 발견" + 심각도 분포.
-  (시나리오에는 관련 증거 ID를 [P-###] 형태로 반드시 인용한다)
-## 1. 진단 범위 및 가정
-  - 기술 스택·아키텍처 추정 (설명에 없는 부분은 [가정] 으로 표시)
-  - 진단 경계: 설명 기반 판단 vs 실측 확인
-## 2. 공격 표면 (Attack Surface)
-  인증·세션·권한 / 입력 처리 / 데이터 흐름 / 외부 연동 / 배포·설정 / 비즈니스 로직
-  각 표면의 노출 경로와 진입점(예상 엔드포인트·함수·플로우)
-## 3. 공격 시나리오 (위험도 순 — 시니어가 주니어에게 가르치듯 구체적으로)
-  각 시나리오는 **반드시 아래 고정 형식**으로 작성한다 — UI 가 '공격 흐름
-  다이어그램'·'단계 시뮬레이션'·'멘토 노트'·'탈취 정보 태그'로 시각화하므로
-  라벨 줄을 정확히 지켜라:
-
-  ### 루트 1. <공격 시나리오 이름> [높음]
-  위험도: 높음                  (치명|높음|중간|낮음 중 하나)
-  진입점: <공격자가 처음 닿는 지점 — URL/엔드포인트/화면/파일 등>
-  공격 흐름: 공격자 → <진입점> → (<취약점/공격 기법>) → <중간 결과> → (<탈취>) → <최종 피해>
-             예: 공격자 → 로그인 폼 → (SQL 주입) → 인증 우회 → (관리자 세션 탈취) →
-             전체 사용자 개인정보 열람
-             (→ 로 구분된 단계들. 취약점 단계는 ( ) 로, 정보 유출 단계도 ( ) 로 표기)
-  탈취 정보: 이메일 주소, 비밀번호 해시, 세션 토큰, 결제 카드 정보
-             (쉼표로 구분 — 무엇이 새는지 구체적일수록 좋음)
-  공격 방법: 구체적 기법·페이로드 예시·도구 (주니어가 따라 할 수 있을 정도로)
-  멘토 노트: 왜 이 공격이 가능한지 원리 설명 — 주니어를 가르치듯 쉽게, 2~4문장
-             (예: "로그인 입력값을 SQL 문장에 그대로 이어붙이면, 공격자의 입력이
-             코드가 된다. 그래서 참이 되는 조건을 넣으면 비밀번호 없이도 …")
-  증거: 실제 확인한 응답·헤더·본문 발췌 1~3줄 (원문 그대로, 민감값은 뒤 4자리만)
-  영향: 비즈니스 영향 (한 줄 — "결국 무엇이 어떻게 새는가")
-  시뮬레이션: (UI 가 '이렇게 하면 → 이렇게 된다' 단계 재생 플레이어로 시각화)
-    1. <공격자 행동 — 요청·페이로드·조작> → <시스템 결과/응답>
-    2. <다음 행동> → <다음 결과>
-    (숫자 번호 + '→' 한 쌍으로 2~4단계. 행동은 주니어가 따라 할 수 있을 만큼
-    구체적으로 — 예: "id 에 ' OR '1'='1 입력 후 로그인 클릭 → 관리자 쿠키 발급 응답")
-  검증: [실증] <어떻게 확인했는지 — web_fetch 실측 응답 근거>
-        [징후] <부분 확인·정황 — 헤더, 설정, 오류 노출 등>
-        [가정] <설명 기반 추론 — 실측 불가 사유>
-        [실증]은 P0 증거 + P1 재확인(verify-*)이 있거나 직접 재현에 성공했을 때만 사용한다.
-        (셋 중 하나만. URL 이 주어졌으면 핵심 루트는 실측 재현을 시도해 [실증]으로
-        올리고, 재현 실패 시 [가정]으로 유지한다. 게으른 추측 금지)
-  보완: 미리 막는 방법 — 복붙 가능한 코드·설정 예시를 포함해 2~5줄
-        (코드·설정·프로세스 수준, 우회 가능성과 한계 포함)
-
-  참고할 공격 기법 pool (여기서 뽑지 말고 서비스에 맞게 창의적으로 조합하라):
-  주입류(SQLi·NoSQLi·명령·SSRF·SSTI), 인증·세션(JWT·OAuth·쿠키·토큰), 권한(IDOR·
-  수평/수직 상승), 파일 업로드·경로, XXE·역직렬화, 레이스 컨디션, 캐시 오염, 요청
-  스머글링, 비즈니스 로직 남용(할인·쿼터·순서·상태), 개인정보 노출, 유니코드·인코딩
-  우회, 체인 공격(XSS→CSRF→관리자 권한 등), 재시도/타이밍 공격
-## 4. 개선·보완 권고 (우선순위)
-  각 항목: **우선순위(P0~P3) · 문제 · 구체적 보완 방법(복붙 가능한 코드·설정 포함) ·
-  검증 방법**
-## 5. 실측 확인 (URL 이 주어진 경우) — 정밀 검증 단계
-  먼저 P0 자동 스윕 결과(프로브 수·발견 수·심각도 분포)를 3~5줄로 요약하고,
-  각 시나리오의 검증 항목에 관련 증거 ID([P-###])를 명시한다. P0 증거와
-  모순되는 시나리오는 삭제하거나 [가정]으로 강등한다.
-  `verify-*`(P1 재확인 확정)와 `auth-inject`(로그인 injection 시도 결과) 발견이
-  있으면 반드시 대응 시나리오로 작성한다 — 시도가 있었는데 리포트에서 빠지면 안 된다.
-  위험도 높음/치명 시나리오는 반드시 web_fetch 로 **재현을 시도**하고(요청·응답·
-  헤더·쿠키를 실제로 확인), 각 시나리오의 검증 상태를 갱신한다:
-  - 재현 성공 → [실증] 으로 상향 (근거: 실제 응답 원문 기재)
-  - 부분 확인(오류 노출·헤더·설정 파일 등) → [징후]
-  - 재현 불가/미시도 → [가정] 유지 (어떤 시도를 했는지 기재)
-  재현 동작은 비파괴(읽기·폼 검증 정도)로 제한하고, 실측 전후의 차이와 남은 미확인
-  항목을 정리한다.
-
-## 집필 원칙
-- **비전문가 친화**: 시나리오마다 "결국 무엇이 어떻게 새는가"를 흐름·탈취 정보로
-  한눈에 보이게 한다. 전문 용어는 괄호로 풀어 쓴다(예: (SQL 주입 = 입력값으로
-  DB 질의를 조작)).
-- **멘토링**: 모든 시나리오에 멘토 노트(왜 가능한지 원리)를 붙인다 — 리포트를 읽은
-  주니어가 다음엔 스스로 찾을 수 있어야 한다.
-- **창의성**: 잘 알려진 취약점뿐 아니라 조합·비즈니스 로직·운영 방식에서 나오는
-  공격 시나리오를 발굴한다. 공격자 관점에서 "실제로 어떻게 성공하는가"를 구체적으로.
-- **보완 중심**: 모든 공격 시나리오마다 반드시 "미리 막는 방법"을 복붙 가능한 수준으로
-  제시한다 — 진단 리포트가 곧 개선 지침이 되도록.
-- **정밀 검증**: 추측(가정)과 실측(실증)을 절대 섞지 않는다. 근거 없이 단정하거나
-  위험도를 부풀리지 말 것 — 증거가 부족하면 [징후]나 [가정]으로 정직하게 낮춘다.
-  검증 상태가 [실증]인 시나리오만 "확인된 취약점"으로 표현한다.
-- 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만."#;
-
-/// 정밀 진단 분야 정의 — prime-agent builder(factory) 패턴의 워커/섹션에 대응.
-/// 각 분야는 독립 pi 세션으로 동시에 실행되고, 병합 단계에서 결과를 합친다.
-struct DeepWorkerDef {
-    id: &'static str,    // pi 세션 접미사 + 이벤트 태그
-    label: &'static str, // UI 칩·로그 표시 (쉬운 이름)
-    title: &'static str, // 담당 분야
-    brief: &'static str, // 워커 전용 임무 지시
-}
-const DEEP_WORKERS: &[DeepWorkerDef] = &[
-    DeepWorkerDef {
-        id: "w1",
-        label: "구조 살펴보기",
-        title: "표면 정찰",
-        brief: "홈페이지·헤더·쿠키·TLS·리다이렉트·민감 경로(/robots.txt, /.well-known/security.txt, /sitemap.xml, /openapi.json, /swagger, /admin, /login, /api, /health, /.env, /.git/HEAD, /server-status)를 비파괴 GET/HEAD 로 전수 조사하고, 링크·폼·스크립트·JS 번들에서 엔드포인트·파라미터·API 를 수집한다. 보안 헤더·쿠키 플래그 누락을 빠짐없이 기록한다.",
-    },
-    DeepWorkerDef {
-        id: "w2",
-        label: "입력값 점검",
-        title: "주입 공격",
-        brief: "수집된 엔드포인트·파라미터에 SQL 주입·XSS(반사형, 무해 마커)·SSTI·SSRF·OS 명령 주입·경로 조작 신호를 비파괴 프로브로 탐지한다. 오류 메시지 노출·산술 평가·지연 응답 같은 신호를 증거 원문과 함께 기록한다. 파괴적 페이로드·대량 요청은 금지. 단, P0 증거에 danger-write(쓰기 검증)가 있으면 그 결과를 인용해 체인 시나리오(웹셸 경로·정리 여부 포함)를 작성한다.",
-    },
-    DeepWorkerDef {
-        id: "w3",
-        label: "로그인·권한 점검",
-        title: "인증·세션·권한",
-        brief: "로그인·회원가입·토큰(JWT/쿠키/OAuth) 흐름을 분석한다: 세션 고정·예측 가능성, 로그아웃 무효화, 탈취 시 영향, 무차별 대입 방어(레이트리밋·잠금), IDOR·수평/수직 권한 상승 신호를 비파괴 범위에서 확인하고 기록한다. P0 증거에 danger-creds(기본자격)·danger-idor(인접 확정)이 있으면 인용해 권한 탈취 체인을 작성한다(비밀번호 원문은 절대 복기하지 마라).",
-    },
-    DeepWorkerDef {
-        id: "w4",
-        label: "정보 노출 점검",
-        title: "노출·설정 오류",
-        brief: "노출된 비밀·설정 오류를 찾는다: /.env·백업 파일·설정 파일, /.git, JS 번들·openapi 문서 속 API 키·토큰·내부 URL, 디버그·관리자 페이지, CORS 와일드카드, 상세 오류 스택 노출. P0의 upload-surface(업로드 폼)·methods(쓰기 메서드)·method-override 증거를 인용해 설정 보완안(실제 업로드·PUT 발송 없이)을 제시한다. 발견 원문(민감값 마스킹)을 증거로 기록한다.",
-    },
-    DeepWorkerDef {
-        id: "w5",
-        label: "기능 오용 점검",
-        title: "비즈니스 로직",
-        brief: "서비스 설명과 실제 화면·API 흐름을 대조해 비즈니스 로직 남용 포인트를 발굴한다: 가격·할인·쿼터·순서·상태 전이 조작, 레이스 컨디션 가능 지점, 권한 단계 건너뛰기, 악용 가능한 정상 기능. 각 포인트마다 악용 시나리오 초안을 기록한다.",
-    },
-];
-
-/// 정밀 진단 분야용 지시문 — 독립 세션에서 한 분야만 깊게 파고든다.
-fn deep_worker_instruction(
-    def: &DeepWorkerDef,
-    target: &str,
-    goal: &str,
-    https_hint: &str,
-    mem: &str,
-) -> String {
-    format!(
-        r#"# RedCell 정밀 진단 워커 — {label} ({title})
-
-당신은 시니어 해커 팀의 '{title}' 담당 전문가다. 아래 대상을 맡은 분야에서만
-깊게 파고들어 발견 사항을 정리한다. 다른 워커가 다른 분야를 동시에 맡고 있으니
-네 분야 외에는 손대지 마라.
-
-대상 사이트(인가됨): {target}
-{https_hint}
-서비스 설명: {goal}
-
-## 임무
-{brief}
-
-## 규칙
-- 모든 웹 조회는 web_fetch 툴로, 비파괴 GET/HEAD(폼 검증 정도의 POST 허용)로만.
-- 실제로 확인한 것만 증거(응답·헤더·본문 발췌, 민감값은 뒤 4자리만)와 함께 기록.
-- 못 본 것은 [가정] 으로 표기하고 단정하지 마라.
-- 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니다.
-{mem}
-## 출력 형식 (반드시 지킨다 — 병합 단계에서 합친다)
-## 워커 발견 ({label} {title})
-- [치명|높음|중간|낮음|정보] <발견 제목> — <한 줄 설명> / 근거: <증거 발췌 또는 [가정]>
-(발견마다 한 줄, 최대 12줄. 발견이 없으면 "- [정보] 이상 없음 — <확인한 범위>" 한 줄)"#,
-        label = def.label,
-        title = def.title,
-        target = target,
-        https_hint = https_hint,
-        goal = if goal.trim().is_empty() { "(설명 없음 — 실측으로 파악)" } else { goal.trim() },
-        brief = def.brief,
-        mem = mem,
-    )
+/// 추가 확인 컨텍스트 — 워커별 (자가 누적, 타 분야 단서) + 단서 총합.
+/// 단서는 "다른 워커가 이번 차수에 보고한 것 중 자기가 아직 보고하지 않은 것"이다:
+/// 자가 누적 키에 없는 것만 전달해 자기 반복을 막고 분야 간 교차 검증을 살린다.
+/// 워커당 최대 6줄.
+/// 밴딧 수확 집계 — 이번 라운드 워커별 신규 발견 수 (`seen` 이전 기준).
+/// 내림차순·동점 id 순 (결정적). 세션 한정 학습 — 메모리에만 존재한다.
+fn bandit_yields(
+    results: &[(String, PumpOutcome)],
+    seen: &std::collections::HashSet<String>,
+) -> Vec<(String, usize)> {
+    let mut y: Vec<(String, usize)> = results
+        .iter()
+        .map(|(wid, o)| {
+            let n = if o.failed && !has_usable_text(o) {
+                0
+            } else {
+                extract_finding_keys(&o.text).into_iter().filter(|k| !seen.contains(k)).count()
+            };
+            (wid.clone(), n)
+        })
+        .collect();
+    y.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    y
 }
 
-/// 정밀 진단 병합자용 지시문 — 분야별 발견을 결과 리포트로 fan-in.
-/// `kind` 는 리포트 종별 ("1차 리포트" | "최종 리포트") — 역할 문구와 H1 에 반영된다.
-fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str, kind: &str) -> String {
-    let spec = REPORT_SPEC.replacen("# <서비스명> 진단 리포트", &format!("# <서비스명> {kind}"), 1);
-    format!(
-        r#"{DIAG_ROLE}
-
-당신은 정밀 진단의 {kind} 작성자(병합 담당)다. 5명의 분야별 워커가 같은
-대상을 동시에 진단한 결과(아래)가 주어졌다. 이를 병합·검증해 {kind} 1개를
-작성한다.
-
-대상 사이트(인가됨): {target}
-
-## 서비스 설명
-
-{goal}
-
-## 워커 발견 (5개 분야 — 중복 제거하고 병합할 것)
-
-{outputs}
-{mem}
-## 병합 규칙
-1. 중복 발견은 하나로 합치고, 서로 연결되는 발견은 체인 시나리오(XSS→세션 탈취→
-   관리자 권한 등)로 엮는다 — 단일 발견 나열이 아니라 **공격 시나리오**가 주인공이다.
-2. 위험도 높음/치명 후보는 web_fetch 로 비파괴 재현을 시도해 [실증]/[징후]로
-   확정한다. 재현 못 하면 [가정]으로 정직하게 둔다.
-3. 워커가 놓친 분야(비즈니스 로직 조합 등)가 보이면 1~2개 시나리오를 보강한다.
-4. 아래 리포트 형식·집필 원칙을 정확히 지킨다.
-
-{spec}"#,
-        target = target,
-        goal = if goal.trim().is_empty() { "(설명 없음 — 워커 실측 기반)" } else { goal.trim() },
-        outputs = outputs,
-        mem = mem,
-    )
-}
-
-/// 문자열 뒤쪽 cap 자만 남긴다 — 누적 로그는 앞이 아니라 뒤(최신 발견)가 중요하므로
-/// 앞부분을 잘라낸다. 잘린 앞부분이 있으면 머리말로 알린다.
-fn tail_chars(s: &str, cap: usize) -> String {
-    let n = s.chars().count();
-    if n <= cap {
-        return s.to_string();
+/// 밴딧 집중 지시 — 수확 1위 심화·0수확 전환 (전원 0이면 무음).
+fn bandit_focus_lines(yields: &[(String, usize)]) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    let max = yields.iter().map(|(_, n)| *n).max().unwrap_or(0);
+    if max == 0 {
+        return out;
     }
-    let tail: String = s.chars().skip(n - cap).collect();
-    format!("…(앞부분 {}자 생략 — 최신 발견 위주)\n{tail}", n - cap)
-}
-
-/// 워커 출력 병합 — collector 입력용. 분야당 6000자로 절단하고 빈 워커는
-/// 플레이스홀더로 채운다. 1차·최종 병합이 같은 규칙을 쓰도록 공용화.
-/// 누적분은 뒤쪽(최신 차수)을 남긴다 — 앞쪽 절단은 새 발견을 버리게 된다.
-/// (combined, 내용 있는 워커 수) 반환.
-fn combine_worker_outputs(accum: &std::collections::HashMap<String, String>, rounds_run: u32) -> (String, usize) {
-    let mut combined = String::new();
-    let mut ok_n = 0;
-    let span = if rounds_run <= 1 { "1차".to_string() } else { format!("1~{rounds_run}차 누적") };
-    for def in DEEP_WORKERS {
-        let wid = def.id;
-        let body = accum.get(wid).map(|s| s.trim()).unwrap_or("");
-        if !body.is_empty() {
-            ok_n += 1;
-        }
-        let body = if body.is_empty() {
-            "(이 분야는 결과를 내지 못했습니다 — 최종 리포트에서 해당 분야를 보강할 것)".to_string()
-        } else {
-            tail_chars(body, COMBINE_WORKER_CAP)
-        };
-        combined.push_str(&format!("\n\n--- {} ({wid}) [{span}] ---\n{body}", def.label));
-    }
-    (combined, ok_n)
-}
-
-/// 1차 리포트 병합 지시문 — 같은 본문에 1차 단계 고지만 덧붙인다.
-fn early_merge_instruction(base: String) -> String {
-    format!("{base}\n\n주: 이는 1차 확인 직후의 1차 리포트 병합이다. 서두에 '1차 확인 기반의 1차 리포트이며, 추가 확인이 뒤에서 계속되어 최종 리포트로 바뀔 수 있음'을 한 줄로 명시하라. 확정할 수 없는 것은 [가정]·[징후]로 정직하게 구분하라.")
-}
-
-/// 정밀 진단 추가 확인 상한 (1차 + 추가 2회 = 최대 3차).
-/// 1차 리포트가 먼저 나가고, 새로 찾은 게 없으면 조기 수렴해 최종 리포트로 간다.
-const DEEP_MAX_ROUNDS: u32 = 3;
-/// 추가 확인 지시문에 넣는 자가 이전 결과 발췌 상한 (문자, 뒤쪽 우선).
-const DEEP_FOLLOWUP_TRUNC: usize = 2000;
-/// collector 입력용 워커 출력 상한 (분야당 문자, 뒤쪽 우선).
-const COMBINE_WORKER_CAP: usize = 6000;
-
-/// 워커 출력에서 발견 키 추출 — `[등급] 제목` 줄을 정규화해 순서 유지 중복 제거.
-/// 수렴 판정(신규 발견 수) + 교차 단서 전달에 쓴다.
-/// `##` 소제목은 매 라운드 새로 찍혀 신규로 오판되므로 세지 않는다.
-/// "추가 발견 없음/이상 없음" 같은 무발견 보고도 발견이 아니므로 제외한다 —
-/// 안 그러면 매 라운드 신규로 잡혀 수렴 판정이 무력화된다.
-fn extract_finding_keys(text: &str) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    for line in text.lines() {
-        let t = line.trim();
-        if t.is_empty() {
-            continue;
-        }
-        if t.contains("추가 발견 없음") || t.contains("이상 없음") {
-            continue;
-        }
-        let is_bullet = t.starts_with("- [")
-            || t.starts_with("* [")
-            || t.contains("[치명]")
-            || t.contains("[높음]")
-            || t.contains("[중간]")
-            || t.contains("[낮음]");
-        if !is_bullet {
-            continue;
-        }
-        let norm: String = t
-            .to_lowercase()
-            .chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '-' | '#' | '*' | '/' | ':' | '(' | ')'))
-            .take(80)
-            .collect();
-        if norm.chars().count() >= 8 && !out.contains(&norm) {
-            out.push(norm);
+    for (wid, n) in yields {
+        if *n == max {
+            out.insert(wid.clone(), format!("[집중] 수확 1위(신규 {n}건) — 심화 우선, [가정] 승격에 집중하라."));
+        } else if *n == 0 {
+            out.insert(wid.clone(), "[전환] 수확 없음 — 새 표면 개척으로 전환하고 반복을 멈춰라.".to_string());
         }
     }
     out
 }
 
-/// 추가 확인 지시문 — 자가 이전 결과 + 타 워커 단서를 물고 추가 발견만 노린다.
-fn deep_followup_instruction(
-    def: &DeepWorkerDef,
-    round: u32,
-    own_prior: &str,
-    cross: &str,
-    target: &str,
-) -> String {
-    let own = tail_chars(own_prior.trim(), DEEP_FOLLOWUP_TRUNC);
+/// 세션 플레이북 — P1/위험 확정 + 체인 단서 (이번 실행 한정, 저장 없음).
+/// 빈 스윕이면 빈 문자열 (지시문 오염 방지).
+fn session_playbook_block(sweep: &probes::ProbeReport) -> String {
+    let mut lines: Vec<String> = Vec::new();
+    for h in sweep
+        .hits
+        .iter()
+        .filter(|h| {
+            (h.category.starts_with("verify-") || h.category.starts_with("danger-"))
+                && (h.severity == "high" || h.severity == "critical")
+        })
+        .take(6)
+    {
+        let t: String = h.title.chars().take(80).collect();
+        lines.push(format!("- [{}] [{}] {}", h.id, h.severity, t.trim()));
+    }
+    for c in probes::chain_hints(&sweep.hits).into_iter().take(3) {
+        lines.push(c);
+    }
+    if lines.is_empty() {
+        return String::new();
+    }
     format!(
-        r###"# RedCell 정밀 진단 추가 확인 {round}차 — {label} ({title})
-
-너는 같은 대상을 계속 파고 있는 '{title}' 담당 전문가다. 이전 턴의 대화·P0 증거는
-그대로 이어진다. 새로 실측·추론해서 **추가 발견만** 보고한다. 이미 보고한 것은
-반복하지 마라.
-
-대상 사이트(인가됨): {target}
-
-## 네 이전 보고 (요약 — 반복 금지)
-{own}
-
-## 다른 분야의 단서 (네 분야와 엮일 수 있음)
-{cross}
-
-## 확인 규칙
-- 위 단서 중 네 분야와 연결되는 것을 우선 확인하고, 네 이전 보고의 [가정] 은
-  web_fetch 비파괴 재현으로 [실증]/[징후] 승격을 시도한다.
-- 그래도 새 게 없으면 "- [정보] 추가 발견 없음 — <확인한 범위>" 한 줄만.
-- 출력 형식: "## 추가 발견 ({label})" + 발견마다 "- [등급] 제목 — 설명 / 근거: …"
-  (최대 8줄)"###,
-        round = round,
-        label = def.label,
-        title = def.title,
-        target = target,
-        own = if own.trim().is_empty() { "(이전 보고 없음)" } else { own.trim() },
-        cross = if cross.trim().is_empty() { "(단서 없음)" } else { cross.trim() },
+        "\n\n## 세션 플레이북 (이번 실행 확정 — 세션 한정, 저장 안 됨)\n{}\n규칙: 확정 항목은 재프로브하지 말고 체인 심화·빈틈 보완에 집중하라.",
+        lines.join("\n")
     )
 }
 
-/// 추가 확인 컨텍스트 — 워커별 (자가 누적, 타 분야 단서) + 단서 총합.
-/// 단서는 "다른 워커가 이번 차수에 보고한 것 중 자기가 아직 보고하지 않은 것"이다:
-/// 자가 누적 키에 없는 것만 전달해 자기 반복을 막고 분야 간 교차 검증을 살린다.
-/// 워커당 최대 6줄.
 fn build_followup_context(
     results: &[(String, PumpOutcome)],
     accum: &std::collections::HashMap<String, String>,
+    focus: &std::collections::HashMap<String, String>,
 ) -> (std::collections::HashMap<String, (String, String)>, usize) {
     let mut own_keys: std::collections::HashMap<String, std::collections::HashSet<String>> =
         std::collections::HashMap::new();
@@ -895,7 +455,13 @@ fn build_followup_context(
             }
         }
         leads += cross_lines.len();
-        ctx.insert(def.id.to_string(), (accum.get(def.id).cloned().unwrap_or_default(), cross_lines.join("\n")));
+        let cross_body = cross_lines.join("\n");
+        let cross = match focus.get(def.id) {
+            Some(f) if cross_body.is_empty() => f.clone(),
+            Some(f) => format!("{f}\n{cross_body}"),
+            None => cross_body,
+        };
+        ctx.insert(def.id.to_string(), (accum.get(def.id).cloned().unwrap_or_default(), cross));
     }
     (ctx, leads)
 }
@@ -1667,37 +1233,72 @@ fn session_engine(s: &Session) -> Engine {
     }
 }
 
-/// 툴 호출 인자에서 대상 호스트들을 추출한다 (반응형 스코프 게이트용).
+/// 포트 숫자 파싱 — 1..=65535 만 인정 (0·음수·오버플로우는 맥락 없음 취급).
+fn parse_port(s: &str) -> Option<u16> {
+    match s.trim().parse::<u16>() {
+        Ok(p) if p != 0 => Some(p),
+        _ => None,
+    }
+}
+
+/// `host[:port]`·`[v6][:port]` 분리 — 브라켓 인식 (네이키드 `split(':')` 은
+/// IPv6 을 깨뜨려 게이트를 우회시키므로 금지).
+/// 콜론 없거나 둘 이상(브라켓 없는 IPv6)이면 통째로 호스트·포트 None.
+fn split_host_port(token: &str) -> (String, Option<u16>) {
+    let t = token.trim();
+    if let Some(inner) = t.strip_prefix('[') {
+        if let Some(end) = inner.find(']') {
+            let port = inner[end + 1..].strip_prefix(':').and_then(parse_port);
+            return (inner[..end].to_string(), port);
+        }
+        return (inner.trim_end_matches(']').to_string(), None);
+    }
+    if t.matches(':').count() == 1 {
+        let (h, p) = t.split_once(':').unwrap_or((t, ""));
+        return (h.to_string(), parse_port(p));
+    }
+    (t.to_string(), None)
+}
+
+/// 툴 호출 인자에서 (호스트, 포트) 대상들을 추출한다 (반응형 스코프 게이트용).
 /// 수집원: http(s) URL·IPv4 리터럴(전체 직렬화 스캔) + host/hostname/url/target/domain
-/// 키의 베어 값. 소문자 정규화·포트 제거·중복 제거. 대상 없는 순수 로컬 호출은 빈 벡터.
-fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |h: String| {
+/// 키의 베어 값. 포트 맥락: 명시 `:port` → 스킴 기본값(https 443/http 80) →
+/// 동행 `port` 숫자 키 → 없으면 None. 소문자 정규화·(호스트,포트) 중복 제거.
+/// 같은 호스트에 알려진 포트가 하나라도 있으면 None 항목은 버린다(알려진 쪽이 이긴다).
+/// 대상 없는 순수 로컬 호출은 빈 벡터.
+fn extract_targets(args: &Value) -> Vec<(String, Option<u16>)> {
+    let mut out: Vec<(String, Option<u16>)> = Vec::new();
+    let mut push = |h: String, port: Option<u16>| {
         let h = h.trim().trim_end_matches('.').to_lowercase();
-        if !h.is_empty() && !out.contains(&h) {
-            out.push(h);
+        if !h.is_empty() && !out.contains(&(h.clone(), port)) {
+            out.push((h, port));
         }
     };
     // 1) URL 스킴 스캔.
     let s = args.to_string();
-    for needle in ["https://", "http://"] {
+    for (needle, default_port) in [("https://", 443), ("http://", 80)] {
         let mut rest = s.as_str();
         while let Some(pos) = rest.find(needle) {
             let after = &rest[pos + needle.len()..];
-            let host = after
+            let token = after
                 .split(['/', '?', '#', '"', '\'', ' ', '\t', '\n', ')', ']', '}'].as_ref())
                 .next()
                 .unwrap_or("");
-            let host = host.split('@').next_back().unwrap_or(host); // userinfo 제거
-            let host = host.split(':').next().unwrap_or(host); // 포트 제거
-            let host = host.trim_matches(|c| c == '[' || c == ']');
+            // ']' 이 구분자에 잘려 `[::1` 처럼 올 수 있어 원문에서 브라켓을 복원한다.
+            let token = if token.starts_with('[') && !token.contains(']') {
+                after.split(['/', '?', '#', '"', '\'', ' ', '\t', '\n', ')', '}'].as_ref()).next().unwrap_or(token)
+            } else {
+                token
+            };
+            let token = token.split('@').next_back().unwrap_or(token); // userinfo 제거
+            let (host, port) = split_host_port(token);
             if !host.is_empty() {
-                push(host.to_string());
+                push(host, port.or(Some(default_port)));
             }
             rest = after;
         }
     }
-    // 2) IPv4 리터럴 스캔.
+    // 2) IPv4 리터럴 스캔 (+ 뒤따르는 `:port`).
     let bytes = s.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
@@ -1709,7 +1310,16 @@ fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
             let tok = &s[i..j];
             let parts: Vec<&str> = tok.split('.').collect();
             if parts.len() == 4 && parts.iter().all(|p| !p.is_empty() && p.len() <= 3 && p.parse::<u8>().is_ok()) {
-                push(tok.to_string());
+                let port = if bytes.get(j) == Some(&b':') {
+                    let mut k = j + 1;
+                    while k < bytes.len() && bytes[k].is_ascii_digit() && k - j < 7 {
+                        k += 1;
+                    }
+                    parse_port(&s[j + 1..k])
+                } else {
+                    None
+                };
+                push(tok.to_string(), port);
             }
             i = j;
         } else {
@@ -1718,45 +1328,122 @@ fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
     }
     // 3) host 계열 키의 베어 값 (스킴 없는 도메인·IP).
     if let Some(obj) = args.as_object() {
+        let sibling_port = obj.get("port").and_then(|v| v.as_u64()).and_then(|p| {
+            if (1..=65535).contains(&p) {
+                Some(p as u16)
+            } else {
+                None
+            }
+        });
         for key in ["host", "hostname", "url", "target", "domain", "server"] {
             if let Some(v) = obj.get(key).and_then(|v| v.as_str()) {
                 let mut h = v.trim().to_string();
-                for needle in ["https://", "http://"] {
+                let mut scheme_default = None;
+                for (needle, default_port) in [("https://", 443), ("http://", 80)] {
                     if let Some(pos) = h.find(needle) {
                         h = h[pos + needle.len()..].to_string();
+                        scheme_default = Some(default_port);
                     }
                 }
                 h = h.split(['/', '?', '#'].as_ref()).next().unwrap_or("").to_string();
                 h = h.split('@').next_back().unwrap_or(&h).to_string();
-                // 포트 제거 — 단 IPv6 리터럴(:: 포함)은 통째로 둔다.
-                if h.matches(':').count() <= 1 {
-                    h = h.split(':').next().unwrap_or(&h).to_string();
-                }
-                h = h.trim_matches(|c| c == '[' || c == ']').to_string();
-                if !h.is_empty() && !h.contains(char::is_whitespace) {
-                    push(h);
+                let (host, port) = split_host_port(&h);
+                let host = host.trim_matches(|c| c == '[' || c == ']').to_string();
+                if !host.is_empty() && !host.contains(char::is_whitespace) {
+                    push(host, port.or(sibling_port).or(scheme_default));
                 }
             }
+        }
+    }
+    // 알려진 포트가 있으면 같은 호스트의 None 항목 제거.
+    let known: std::collections::HashSet<String> =
+        out.iter().filter(|(_, p)| p.is_some()).map(|(h, _)| h.clone()).collect();
+    out.retain(|(h, p)| p.is_some() || !known.contains(h));
+    out
+}
+
+/// 툴 호출 인자에서 대상 호스트들을 추출한다 — `extract_targets` 의 호스트 투영.
+/// 포트 맥락이 필요하면 `extract_targets` 를 직접 쓴다.
+fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for (h, _) in extract_targets(args) {
+        if !out.contains(&h) {
+            out.push(h);
         }
     }
     out
 }
 
+/// 네트워크 도달 가능 툴 판정 — 이름에 실행·통신 계열 토큰이 있으면 참.
+/// 반응형 게이트의 fail-closed 분기에만 쓴다 (인자 해석 불가 시 차단 여부).
+fn tool_may_reach_network(tool_name: &str) -> bool {
+    let n = tool_name.to_lowercase();
+    [
+        "fetch", "web", "http", "curl", "wget", "python", "repl", "exec", "bash", "shell", "run",
+        "command", "code", "script", "request", "socket", "net", "dns", "resolve", "browser",
+        "navigate", "goto", "tcp", "udp", "connect", "download", "upload", "terminal",
+    ]
+    .iter()
+    .any(|k| n.contains(k))
+}
+
 /// 반응형 스코프 게이트 판정 — prime-agent 엔진용 (pi는 확장 훅이 사전 차단).
-/// 인가 밖 호스트가 하나라도 있으면 위반 사유를 돌려주고, 호출자는 프로세스를 kill 한다.
+/// 인가 밖 호스트·포트가 하나라도 있으면 위반 사유를 돌려주고, 호출자는 프로세스를 kill 한다.
+/// `ports:` 지시자는 명시 포트·스킴 기본값·port 키 맥락에서만 집행된다
+/// (포트 맥락 없는 베어 언급은 호스트 게이트만 — 과잉 차단 방지).
 /// YAML scope 는 데스크톱이 해석할 수 없어 kill 하지 않는다(스킬 수준 제약만 + 경고).
+/// fail-closed: 네트워크 가능 툴인데 인자가 비어 해석 불가하면(프로토콜 변경 등)
+/// 대상을 확인할 수 없으므로 차단한다. 인자가 멀쩡한데 호스트가 없는 순수 로컬
+/// 호출(bash ls 등)은 기존대로 통과한다.
 fn decide_tool_violation(auth: &auth::AuthList, tool_name: &str, args: &Value) -> Option<String> {
     if auth.yaml {
         return None;
     }
-    for host in extract_hosts(tool_name, args) {
+    for (host, port) in extract_targets(args) {
         if !auth::is_host_allowed(auth, &host) {
             return Some(format!(
                 "RedCell scope 위반(반응형 게이트): {tool_name} → {host} — 인가 목록에 없어 prime-agent 프로세스를 중단합니다."
             ));
         }
+        if !auth::is_host_port_allowed(auth, &host, port) {
+            let p = port.map(|p| p.to_string()).unwrap_or_else(|| "?".into());
+            let allow = auth.ports.as_deref().unwrap_or(&[]).iter().map(|x| x.to_string()).collect::<Vec<_>>().join(",");
+            return Some(format!(
+                "RedCell scope 위반(반응형 게이트): {tool_name} → {host}:{p} — 인가 포트({allow}) 밖이라 prime-agent 프로세스를 중단합니다."
+            ));
+        }
+    }
+    if args.is_null() && tool_may_reach_network(tool_name) {
+        return Some(format!(
+            "RedCell scope 위반(반응형 게이트): {tool_name} — 호출 인자를 해석할 수 없어 대상을 확인할 수 없습니다 (엔진 프로토콜 변경 가능). 안전을 위해 prime-agent 프로세스를 중단합니다."
+        ));
     }
     None
+}
+
+/// 결과측 탐지 — 툴 결과 텍스트에 인가 밖 대상이 나오면 목록 반환 (정렬·중복 제거).
+/// 호스트 위반은 `host`, 인가 호스트의 인가 밖 포트는 `host:port` 로 표시한다.
+/// 경고용(차단 아님). YAML scope 는 해석 불가라 빈 목록.
+fn out_of_scope_hosts_in_text(text: &str, auth: &auth::AuthList) -> Vec<String> {
+    if auth.yaml {
+        return Vec::new();
+    }
+    let v = Value::String(text.to_string());
+    let mut out: Vec<String> = extract_targets(&v)
+        .into_iter()
+        .filter_map(|(h, port)| {
+            if !auth::is_host_allowed(auth, &h) {
+                Some(h)
+            } else if !auth::is_host_port_allowed(auth, &h, port) {
+                Some(format!("{h}:{}", port.unwrap_or(0)))
+            } else {
+                None
+            }
+        })
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// prime-agent 주입용 스코프 스킬 템플릿 — 실행마다 인가 목록을 채워 --skill 로 전달.
@@ -1778,9 +1465,14 @@ Every network touch MUST stay inside this scope — no exceptions.
 ## Deny targets (never touch, even if allow-listed above)
 {DENIES}
 
+## Allowed ports
+{PORTS}
+
 ## Rules
 - Touch ONLY the allow targets above. If a redirect, link, or API response
   points outside them, STOP that branch and report it as out-of-scope.
+- Touch ONLY the allowed ports above (explicit :port and URL scheme defaults
+  both count — other ports stop the run even on allow-listed hosts).
 - If NO allow target is listed, touch NOTHING on the network — local reasoning only.
 - Web recon uses `python_repl` with urllib/requests: read-only GET/HEAD,
   10s timeout, at most 40 paths per host. No POST/PUT/DELETE, no brute force,
@@ -1788,11 +1480,15 @@ Every network touch MUST stay inside this scope — no exceptions.
 - Always use full `http(s)://host/...` URLs so the harness gate can audit them.
 - This machine's filesystem (bash/read/edit/write outside the session work dir)
   is NOT a target — never snoop the local computer; write deliverables only.
+  Your $HOME is an isolated directory (only .prime config is shared) — stray
+  writes outside the work dir are quarantined there and reported, never hidden.
+- NEVER use `websearch.run` (touches out-of-scope search engines) or `rlm.spawn`
+  (subagents escape per-call scope audit) — do all work in this session's REPL.
 - Report format is dictated by the task prompt, not this skill.
 "#;
 
 /// 스코프 스킬 생성 — prime 세션 디렉터리에 SKILL.md 를 쓰고 경로를 돌려준다.
-fn write_scope_skill(dir: &Path, allows: &[String], denies: &[String]) -> Result<PathBuf, String> {
+fn write_scope_skill(dir: &Path, allows: &[String], denies: &[String], ports: Option<&[u16]>) -> Result<PathBuf, String> {
     fs::create_dir_all(dir).map_err(|e| format!("스킬 디렉터리 생성 실패: {e}"))?;
     let fmt = |xs: &[String]| {
         if xs.is_empty() {
@@ -1801,9 +1497,14 @@ fn write_scope_skill(dir: &Path, allows: &[String], denies: &[String]) -> Result
             xs.iter().map(|x| format!("- {x}")).collect::<Vec<_>>().join("\n")
         }
     };
+    let ports_text = match ports {
+        None => "(제한 없음 — 호스트 범위만 적용)".to_string(),
+        Some(ps) => ps.iter().map(|p| format!("- {p}")).collect::<Vec<_>>().join("\n"),
+    };
     let text = SCOPE_SKILL_TEMPLATE
         .replacen("{ALLOWS}", &fmt(allows), 1)
-        .replacen("{DENIES}", &fmt(denies), 1);
+        .replacen("{DENIES}", &fmt(denies), 1)
+        .replacen("{PORTS}", &ports_text, 1);
     let path = dir.join("SKILL.md");
     fs::write(&path, text).map_err(|e| format!("스킬 기록 실패: {e}"))?;
     Ok(path)
@@ -1841,8 +1542,200 @@ fn prime_session_dir(app: &AppHandle, id: &str, tag: &str) -> PathBuf {
     d
 }
 
+/// prime 전담 HOME — `<sdir>/home` 을 만들고 `.prime` 만 실제 설정으로 연결한다.
+/// prime 자식의 HOME 을 여기로 두면 `~/.bashrc`·`~/loot` 같은 work dir 밖 기록이
+/// 격리되어 사후 감사(audit_prime_homes)에 걸린다. Unix 전용 — Windows 는 None.
+/// /tmp·/var/tmp 절대경로 기록은 막지 못한다(잔여 한계 — 스킬 금지 + 감사 병기).
+#[cfg(unix)]
+fn setup_prime_home(sdir: &Path) -> Option<PathBuf> {
+    let fake = sdir.join("home");
+    fs::create_dir_all(&fake).ok()?;
+    let real_prime = user_home()?.join(".prime");
+    if real_prime.is_dir() {
+        let link = fake.join(".prime");
+        if fs::symlink_metadata(&link).is_ok() {
+            fs::remove_file(&link).ok()?;
+        }
+        std::os::unix::fs::symlink(&real_prime, &link).ok()?;
+    }
+    Some(fake)
+}
+#[cfg(not(unix))]
+fn setup_prime_home(_sdir: &Path) -> Option<PathBuf> {
+    None
+}
+
+/// 전담 HOME 안의 stray 기록 목록 (상대경로, 최대 200개) — `.prime` 링크는 따라가지 않는다.
+fn prime_home_strays(home: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut stack = vec![home.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= 200 {
+            break;
+        }
+        let Ok(rd) = fs::read_dir(&dir) else { continue };
+        for e in rd.flatten() {
+            if out.len() >= 200 {
+                break;
+            }
+            let p = e.path();
+            let Ok(md) = fs::symlink_metadata(&p) else { continue };
+            if md.file_type().is_symlink() {
+                continue; // .prime 링크 — 내용 감사 제외
+            }
+            if md.is_dir() {
+                stack.push(p);
+                continue;
+            }
+            if let Ok(rel) = p.strip_prefix(home) {
+                out.push(rel.to_string_lossy().to_string());
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// 실행 창 temp 기록 — temp 디렉터리에서 run 시작 이후 수정된 파일 (최대 8).
+/// 자사·도구 패턴은 제외한다. 무관한 시스템 파일도 걸릴 수 있어 참고용으로만 보고한다.
+fn temp_window_files_in(dir: &Path, start: std::time::SystemTime) -> Vec<String> {
+    let mut out = Vec::new();
+    let Ok(rd) = fs::read_dir(dir) else { return out };
+    for e in rd.flatten() {
+        if out.len() >= 8 {
+            break;
+        }
+        let p = e.path();
+        let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if name.is_empty() {
+            continue;
+        }
+        let ours = [
+            "redcell-", "rc-", "prime-", ".prime", "kernel-", "pip-", "tmp", ".dotnet",
+            "cargo-", "rustc", "npm-", "node-", "vscode-", "playwright", ".com.google",
+            "sentry-", "dotnet-", "hsperfdata_", ".org.chromium",
+        ];
+        if ours.iter().any(|pat| name.starts_with(pat)) {
+            continue;
+        }
+        let Ok(md) = fs::symlink_metadata(&p) else { continue };
+        if md.is_dir() {
+            continue;
+        }
+        match md.modified() {
+            Ok(mt) if mt > start => out.push(name.to_string()),
+            _ => {}
+        }
+    }
+    out.sort();
+    out
+}
+
+/// /tmp 실행 창 감사 — 참고용 1회 보고 (무관 파일 가능이라 경고가 아닌 참고).
+fn audit_temp_window(app: &AppHandle, id: &str, start: std::time::SystemTime) {
+    let files = temp_window_files_in(&std::env::temp_dir(), start);
+    if files.is_empty() {
+        return;
+    }
+    emit_note(
+        app,
+        id,
+        format!("[sys] 참고: 실행 중 /tmp 기록 {}건({}) — 무관한 시스템 파일일 수 있음.", files.len(), files.join(",")),
+        None,
+    );
+}
+
+/// prime 전담 HOME 사후 감사 — 세션의 전 태그 home 을 훑어 stray 기록을 1회 보고한다.
+fn audit_prime_homes(app: &AppHandle, id: &str) {
+    let base = root(app).join("prime-sessions").join(id);
+    let Ok(rd) = fs::read_dir(&base) else { return };
+    let mut hits: Vec<String> = Vec::new();
+    for e in rd.flatten() {
+        if hits.len() >= 8 {
+            break;
+        }
+        let tagdir = e.path();
+        if !tagdir.is_dir() {
+            continue;
+        }
+        let tag = tagdir.file_name().and_then(|n| n.to_str()).unwrap_or("?");
+        for s in prime_home_strays(&tagdir.join("home")) {
+            hits.push(format!("{tag}/~/{s}"));
+            if hits.len() >= 8 {
+                break;
+            }
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    let shown = hits.iter().take(5).cloned().collect::<Vec<_>>().join(", ");
+    let more = if hits.len() > 5 { format!(" 외 {}건", hits.len() - 5) } else { String::new() };
+    emit_note(
+        app,
+        id,
+        format!("[sys] 주의: 작업 폴더 밖 기록 {n}건 — 전담 HOME 에 격리되어 보고만 합니다: {shown}{more}.", n = hits.len()),
+        None,
+    );
+}
+
 fn prime_session_has_history(dir: &Path) -> bool {
     fs::read_dir(dir).map(|mut rd| rd.any(|_| true)).unwrap_or(false)
+}
+
+/// prime 자율 병합 활성화 — REDCELL_PRIME_AUTONOMOUS=1 일 때만.
+/// collector(merge/merge-early) 실행에 --autonomous + 게이트를 붙여 리포트 저장을
+/// 자가검증한다. 기본 off (실험적 — 플래그 파싱은 가짜 키 프로브로 확인).
+fn prime_autonomous_enabled() -> bool {
+    std::env::var("REDCELL_PRIME_AUTONOMOUS").map(|v| v.trim() == "1").unwrap_or(false)
+}
+
+/// collector 자가검증 게이트 스크립트 — report.md 존재 + 최소 구조(## 헤더).
+/// prime --autonomous-gate 로 넘긴다. 성공 시 스크립트 경로 반환.
+fn write_collector_gate(session_dir: &Path) -> Option<PathBuf> {
+    let work = session_dir.join("work");
+    fs::create_dir_all(&work).ok()?;
+    let gate = session_dir.join("gate.sh");
+    let body = format!(
+        "#!/bin/sh\n# RedCell collector gate — report.md 자가검증.\ntest -s '{}' && grep -q '^## ' '{}'\n",
+        work.join("report.md").to_string_lossy(),
+        work.join("report.md").to_string_lossy(),
+    );
+    fs::write(&gate, body).ok()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gate, fs::Permissions::from_mode(0o755)).ok()?;
+    }
+    Some(gate)
+}
+
+/// collector 자가검증 저장 지시 — 게이트가 검사할 report.md 저장을 명시한다.
+fn autonomous_report_block(workdir: &Path) -> String {
+    format!(
+        "\n\n## 자가검증 저장 (필수)\n텍스트 출력 전에 리포트 전체를 `{p}` 절대경로에 저장한다\n(edit.run, 상대경로 금지). 하네스 게이트가 이 파일의 존재·구조(## 헤더)를 검사하고,\n미달이면 자동 재시도한다.",
+        p = workdir.join("report.md").to_string_lossy(),
+    )
+}
+
+/// merge 계열 실행인지 — run_tag 는 "{세션id}-{태그}" 형식이다.
+fn is_merge_run_tag(run_tag: &str) -> bool {
+    run_tag.ends_with("-merge") || run_tag.ends_with("-merge-early")
+}
+
+/// prime 스폰 시차(ms) — 5워커 동시 스폰의 커널·LLM 버스트 분산.
+/// 커널 부팅 실측 0.9초로 크지 않으나, LLM 레이트리밋·초기 경합 완화에 유효.
+/// REDCELL_PRIME_SPAWN_STAGGER_MS (기본 1500, 0이면 해제).
+fn prime_spawn_stagger_ms() -> u64 {
+    std::env::var("REDCELL_PRIME_SPAWN_STAGGER_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(1500)
+}
+
+/// 워커 스폰 순서 — w1→0, w2→1 … (시차 곱셈용, 파싱 실패 0).
+fn worker_spawn_index(worker_id: &str) -> u64 {
+    worker_id.strip_prefix('w').and_then(|n| n.parse::<u64>().ok()).map(|n| n.saturating_sub(1)).unwrap_or(0)
 }
 
 /// prime-agent 실행 인자 조립 — --mode json --print --skill --session-dir [--continue].
@@ -1868,6 +1761,9 @@ fn prime_run_args(
         "--mode".into(),
         "json".into(),
         "--print".into(),
+        // 시작 네트워크 작업(업데이트 확인 등) 생략 — 부팅 단축 + 텔레메트리/노이즈 차단.
+        // 가짜 키 프로브로 모델 경로 동일성 확인 (인증 단계 실패 동일).
+        "--offline".into(),
         prompt_arg,
         "--skill".into(),
         skill.to_string_lossy().into_owned(),
@@ -1876,6 +1772,16 @@ fn prime_run_args(
     ];
     if cont {
         args.push("--continue".into());
+    }
+    // 자율 병합 (실험적, env 게이트) — merge 계열에만 게이트를 붙인다.
+    if prime_autonomous_enabled() && is_merge_run_tag(&run_tag) {
+        if let Some(gate) = write_collector_gate(session_dir) {
+            args.push("--autonomous".into());
+            args.push("--autonomous-max-turns".into());
+            args.push("6".into());
+            args.push("--autonomous-gate".into());
+            args.push(gate.to_string_lossy().into_owned());
+        }
     }
     args.push("--provider".into());
     args.push(provider.to_string());
@@ -1906,11 +1812,14 @@ fn prime_run_args(
     Ok((bin, args))
 }
 
-/// prime-agent 도구 안내 — web_fetch 이 없고 python_repl 이 유일 통로이므로(실측),
-/// urllib 읽기 전용 패턴을 지시문에 덧붙인다 (진단·워커·collector 공용).
+/// prime-agent 도구 안내 v2 — prime 은 단일 `python_repl` + REPL 내 PTC(prime-agent
+/// prompt 실측) 구조다. urllib 순차만 가르치던 v1 과 달리 bash() 병렬·REPL 영속·
+/// 결과물 파일 규칙까지 가르친다 (진단·워커·collector 공용).
 const PRIME_TOOLING: &str = r#"## prime-agent 도구 사용법 (반드시 준수)
-- 이 환경에는 web_fetch 같은 웹 도구가 없다. 웹 조회는 **python_repl 하나**로만 한다.
-- 패턴 (읽기 전용 GET/HEAD, 타임아웃 10초):
+- 이 환경의 유일한 툴은 **python_repl**(지속 CPython REPL)이다. bash·파일·검색은
+  REPL 안의 함수로 쓴다. `web_fetch` 같은 웹 도구는 없다.
+- REPL 상태는 유지된다: 세션·쿠키·변수를 다음 블록에서 재사용하고, 같은 조회 반복 금지.
+- 웹 조회 패턴 A — urllib (읽기 전용 GET/HEAD, 타임아웃 10초):
   ```python
   import urllib.request
   req = urllib.request.Request("https://대상/...", headers={"user-agent": "Mozilla/5.0 (RedCell authorized-agent)"}, method="GET")
@@ -1918,15 +1827,43 @@ const PRIME_TOOLING: &str = r#"## prime-agent 도구 사용법 (반드시 준수
   print(res.status, res.headers.get_content_type())
   print(res.read(400_000).decode("utf-8", "replace"))
   ```
-- 헤더·쿠키 원문이 필요하면 `res.headers.as_string()` 를 출력한다.
+  헤더·쿠키 원문이 필요하면 `res.headers.as_string()` 를 출력한다.
+- 웹 조회 패턴 B — bash() 병렬 (여러 경로를 동시에, 타임아웃·실패 격리):
+  ```python
+  hs = [bash(f"curl -sS -m 10 -o /dev/null -w '%{{http_code}} %{{url_effective}}\\n' 'https://대상/경로{i}'") for i in range(10)]
+  rs = [(await h).output for h in hs]  # 전부 띄우고 한꺼번에 기다린다 (순차 await 금지). 결과는 .output 으로 꺼낸다 (핸들 자체에 .strip() 없음 — 실측)
+  # 오래 걸리면 handle.kill() 로 정리하고 다음으로. 절대 무한 대기 금지.
+  ```
+  curl 규칙: `-sS -m 10` 필수, 헤더 필요 시 `-D -`, JSON 은 `| jq` 로 축약.
+  출력이 크면 `.tail(50)` 로 자르고, 전체는 파일에만 저장한다.
+- 결과물은 `edit.run` 으로 작업 폴더에만 쓴다. 발견·리포트는 지시된 JSON/MD
+  파일명 그대로 저장한다 (상대경로 금지 — 지시문의 절대경로를 쓴다).
 - POST/PUT/DELETE·브루트포스·파괴적 페이로드·대량 요청 금지. 인가 밖 URL 은 시도조차 금지.
-- 로컬 파일(bash·read·edit·write)은 결과물 저장 외에 건드리지 않는다.
+- `websearch.run` 사용 금지 (스코프 밖 검색엔진 접촉). `rlm.spawn` 사용 금지
+  (서브에이전트는 호출 단위 감사를 벗어난다) — 모든 작업은 이 세션 REPL 에서.
+- URL 은 항상 전체 `http(s)://host/...` 리터럴로 쓴다 (f-string 조립·변수 은닉 금지 —
+  하네스 게이트가 감사한다).
 "#;
 
 /// 단일 턴 지시문 조립 — pi/prime 공용. prime 은 web_fetch 언급을 python_repl+urllib 로
 /// 치환하고 PRIME_TOOLING 을 덧붙인다 (prime-agent 에 web_fetch 이 없음 — 실측).
 fn prime_adapt(instruction: String) -> String {
     format!("{}\n{PRIME_TOOLING}", instruction.replace("web_fetch", "python_repl+urllib"))
+}
+
+/// 심층 정찰 규율 — REPL 영속을 살리는 단일 블록 원칙 (워커·추적·병합 전용).
+/// prime 은 턴마다 fresh kernel 이라 상태가 끊기므로, 한 실행 안에서는 블록을 모아
+/// 세션·쿠키·수집 변수를 유지하게 한다. 자유 채팅에는 붙이지 않는다.
+const PRIME_DEEP_RECON: &str = r#"## 심층 정찰 규율 (REPL 영속 활용)
+- 정찰은 되도록 한 python_repl 블록에 모아라: 세션 객체·쿠키·수집 변수를 블록 안에
+  유지하고, 같은 대상·같은 경로의 재조회를 반복하지 마라.
+- 여러 경로는 패턴 B(병렬 bash)로 한 번에 — 순차 반복 호출 금지.
+- 발견은 텍스트 출력 전에 findings JSON 파일부터 저장한다 (구조화 저장 블록 참조).
+"#;
+
+/// 심층용 adapt — 기본 치환 + 도구 안내 + 정찰 규율.
+fn prime_adapt_deep(instruction: String) -> String {
+    format!("{}\n{PRIME_DEEP_RECON}", prime_adapt(instruction))
 }
 
 fn turn_instruction(app: &AppHandle, s: &Session, engine: Engine) -> String {
@@ -2017,9 +1954,11 @@ fn run_prime(
         let app = app.clone();
         let id = id.to_string();
         let prefix = prep.tool_prefix;
+        let run_start = std::time::SystemTime::now();
         thread::spawn(move || {
             let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, None);
             finalize_run(&app, &id, &outcome, "pi");
+            audit_temp_window(&app, &id, run_start);
         });
     }
     Ok(())
@@ -2112,6 +2051,8 @@ fn build_netfilter_spec(allows: &[String], denies: &[String], extra_hosts: &[Str
 
 /// 선행 차단 env 조립 — Linux + .so 존재 시에만 비어 있지 않음.
 /// 비어 있으면 호출자가 기존 방어(pi 훅 / 반응형 킬게이트)로 동작한다.
+/// .so 프리필터는 호스트 단위만 차단한다 — `ports:` 지시자는 반응형 게이트·
+/// 결과측 탐지·기계 대조·스킬 지침에서 집행된다 (원시 소켓의 포트 우회는 잔여 위험).
 fn netfilter_extra_env(
     app: &AppHandle,
     id: &str,
@@ -2196,7 +2137,7 @@ fn prepare_engine_run(
         Engine::Prime => {
             let auth = auth::load(&resolve_app_auth_path(app));
             let sdir = prime_session_dir(app, id, run_tag);
-            let skill = write_scope_skill(&sdir.join("redcell-scope"), &auth.allows, &auth.denies)?;
+            let skill = write_scope_skill(&sdir.join("redcell-scope"), &auth.allows, &auth.denies, auth.ports.as_deref())?;
             let cont = prime_session_has_history(&sdir);
             let (bin, args) = prime_run_args(settings, provider, &skill, &sdir, cont, instruction)?;
             if auth.yaml && !quiet {
@@ -2209,6 +2150,10 @@ fn prepare_engine_run(
             let nf = netfilter_extra_env(app, id, &auth, provider, settings);
             emit_netfilter_note(app, id, !nf.is_empty());
             extra_env.extend(nf);
+            // 전담 HOME 격리 — work dir 밖 기록을 분리해 사후 감사한다 (Unix).
+            if let Some(fake) = setup_prime_home(&sdir) {
+                extra_env.push(("HOME".to_string(), fake.to_string_lossy().into_owned()));
+            }
             Ok(PreparedRun {
                 prog: bin,
                 args,
@@ -2263,9 +2208,9 @@ fn preflight_llm_check(
     let outcome = match rx.recv_timeout(timeout) {
         Ok(o) => o,
         Err(_) => {
-            // 시간 초과 — 자식을 정리하고 실패로 마감.
+            // 시간 초과 — 자식 트리 전체를 정리하고 실패로 마감.
             if let Some(mut c) = app.state::<Procs>().0.lock().unwrap().remove(&key) {
-                let _ = c.kill();
+                kill_engine_child(&mut c);
             }
             return Err(format!(
                 "모델 연결 확인(핑) 시간 초과 ({:?}) — '{provider}' 엔드포인트가 응답하지 않습니다. 네트워크·base URL 을 확인하세요.",
@@ -2325,8 +2270,45 @@ fn pi_cli_version(settings: &Settings) -> String {
     }
 }
 
-/// 앱이 요구하는 pi 버전 — 이보다 낮으면 앱 전용 폴더에 이 버전을 설치해 쓴다.
-const PI_PINNED_VERSION: &str = "1.4.0";
+/// 엔진 버전 핀 — `redcell-desktop/engines.json`이 단일 출처 (업스트림 추적).
+/// `REDCELL_ENGINES_JSON` 환경변수로 파일 경로를 오버라이드할 수 있다.
+/// 새 pi/prime-agent 릴리스 적용 절차는 `redcell-desktop/docs/ENGINE_UPGRADE.md`.
+const ENGINES_JSON_EMBED: &str = include_str!("../../engines.json");
+
+fn engines_doc() -> Value {
+    if let Ok(p) = std::env::var("REDCELL_ENGINES_JSON") {
+        if let Ok(t) = fs::read_to_string(p.trim()) {
+            if let Ok(v) = serde_json::from_str::<Value>(&t) {
+                return v;
+            }
+        }
+    }
+    serde_json::from_str(ENGINES_JSON_EMBED).unwrap_or(Value::Null)
+}
+
+fn engine_pin(engine: &str, key: &str, fallback: &str) -> String {
+    engines_doc()
+        .get(engine)
+        .and_then(|e| e.get(key))
+        .and_then(|v| v.as_str())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
+/// 앱이 요구하는 pi 버전 — 이보다 낮으면 앱 전용 폴더에 고정 버전을 설치해 쓴다.
+fn pi_pinned_version() -> String {
+    engine_pin("pi", "pinned", "1.4.0")
+}
+fn pi_min_version() -> String {
+    engine_pin("pi", "min", "1.4.0")
+}
+fn prime_pinned_version() -> String {
+    engine_pin("prime_agent", "pinned", "0.10.0")
+}
+fn prime_min_version() -> String {
+    engine_pin("prime_agent", "min", "0.10.0")
+}
 
 /// 앱 전용 pi 설치 위치 — 시스템 전역 pi 를 건드리지 않는다.
 fn managed_pi_dir() -> Option<PathBuf> {
@@ -2354,7 +2336,7 @@ fn install_managed_pi() -> Result<(), String> {
     fs::create_dir_all(&dir).map_err(|e| format!("설치 폴더 생성 실패: {e}"))?;
     let npm = first_on_path(if cfg!(windows) { "npm.cmd" } else { "npm" })
         .ok_or("npm 을 PATH 에서 찾을 수 없습니다 — Node.js 설치를 확인하세요.")?;
-    let spec = format!("@earendil-works/pi-coding-agent@{PI_PINNED_VERSION}");
+    let spec = format!("@earendil-works/pi-coding-agent@{}", pi_pinned_version());
     let mut cmd = if cfg!(windows) {
         let comspec = std::env::var_os("COMSPEC").unwrap_or_else(|| "cmd.exe".into());
         let mut c = Command::new(comspec);
@@ -2397,13 +2379,14 @@ fn install_managed_pi() -> Result<(), String> {
 /// 실패해도 진단은 기존 pi 로 계속 시도한다(수동 설치 명령만 안내).
 fn ensure_pinned_pi(app: &AppHandle, id: &str, settings: &Settings) {
     let ver = pi_cli_version(settings);
-    if pi_version_at_least(&ver, PI_PINNED_VERSION) {
+    let pinned = pi_pinned_version();
+    if pi_version_at_least(&ver, &pinned) {
         return;
     }
     emit_note(
         app,
         id,
-        format!("[sys] pi {ver} 는 구버전입니다 — 앱 전용 폴더(~/.redcell/pi)에 pi {PI_PINNED_VERSION} 을 설치합니다 (최초 1회, 1~2분)."),
+        format!("[sys] pi {ver} 는 구버전입니다 — 앱 전용 폴더(~/.redcell/pi)에 pi {pinned} 을 설치합니다 (최초 1회, 1~2분)."),
         None,
     );
     match install_managed_pi() {
@@ -2412,10 +2395,32 @@ fn ensure_pinned_pi(app: &AppHandle, id: &str, settings: &Settings) {
             app,
             id,
             format!(
-                "[sys] pi {PI_PINNED_VERSION} 자동 설치 실패 — {e}\n수동 설치: npm i -g @earendil-works/pi-coding-agent@{PI_PINNED_VERSION}"
+                "[sys] pi {pinned} 자동 설치 실패 — {e}\n수동 설치: npm i -g @earendil-works/pi-coding-agent@{pinned}"
             ),
             None,
         ),
+    }
+}
+
+/// 정밀 진단 시작 전 prime-agent 버전 확인 — 최소 버전보다 낮으면 경고를 남긴다.
+/// prime 은 npm managed 설치 경로가 없어(릴리스 바이너리) 자동 설치는 하지 않고,
+/// 업그레이드 안내만 한다. 실패해도 진단은 계속 시도한다.
+fn warn_stale_prime(app: &AppHandle, id: &str) {
+    let bin = match prime_agent_path() {
+        Ok(b) => b,
+        Err(_) => return, // 미설치 — prime 엔진을 고를 때 별도 안내
+    };
+    let ver = prime_version(&bin).unwrap_or_else(|| "미확인".to_string());
+    let min = prime_min_version();
+    if !pi_version_at_least(&ver, &min) {
+        emit_note(
+            app,
+            id,
+            format!(
+                "[sys] 주의: prime-agent {ver} 는 최소 요구({min})보다 낮습니다 — 구버전에서는 세션 연속·모델 인식이 다르게 동작할 수 있습니다. 최신 릴리스로 교체를 권장합니다 (https://github.com/PrimeIntellect-ai/prime-agent/releases)."
+            ),
+            None,
+        );
     }
 }
 
@@ -2429,6 +2434,13 @@ fn classify_ping_failure(settings: &Settings, provider: &str, ping_error: &str) 
     let conn = settings.providers.get(provider).cloned().unwrap_or_default();
     let key = conn.api_key.trim().to_string();
     let mut lines = vec![format!("핑 오류: {ping_error}")];
+    // prime-agent 계약 파손 (0.10 실측): --api-key 를 무시하고 모델을 못 찾는다.
+    if ping_error.contains("No models available") {
+        lines.push(
+            "원인: prime-agent 가 모델을 찾지 못했습니다 — prime 은 --api-key 플래그를 무시합니다. 설정(⚙) > 프로바이더에서 이 카드를 다시 저장해 ~/.prime/agent/models.json 을 동기화하고, 모델명이 정확한지 확인하세요. (custom/ollama·lge-aigw 는 카드 저장이 필수입니다)".into(),
+        );
+        return lines.join("\n");
+    }
     if key.is_empty() {
         lines.push(
             "원인: API 키 미설정 — 설정(⚙) > 프로바이더 > 이 카드에 토큰을 붙여넣고 연결 저장을 누르세요.".into(),
@@ -2513,8 +2525,13 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
             .unwrap_or_default();
         let model_part = if model.is_empty() { String::new() } else { format!("/ {model}") };
         let detail = if outcome.error.is_empty() { String::new() } else { format!(" 마지막 오류: {}", outcome.error) };
+        let prime_hint = if engine_label == "prime-agent" && outcome.error.contains("No models available") {
+            " prime-agent 는 --api-key 를 무시하므로, 설정(⚙) > 프로바이더에서 카드를 다시 저장해 모델 목록을 동기화하세요."
+        } else {
+            ""
+        };
         format!(
-            " — AI 모델 '{p}'{model_part} 연결을 점검하세요 (설정(⚙) > 모델 연결에서 연결 테스트).{detail}"
+            " — AI 모델 '{p}'{model_part} 연결을 점검하세요 (설정(⚙) > 모델 연결에서 연결 테스트).{detail}{prime_hint}"
         )
     };
     let ev2 = json!({ "type": "note", "text": if outcome.aborted {
@@ -2544,6 +2561,38 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
 }
 
 /// prime-agent 단일 턴 — 스코프 스킬 주입 + 반응형 킬게이트 + 세션 dir 연속대화.
+/// prime-agent 대화 연속성 — 0.10 은 --session-dir 에 저장하지 않고 --continue 가
+/// 새 세션을 발급하는 것으로 실측됐다. 대신 앱이 보관한 채팅 기록(최근 6개·3000자)을
+/// 지시문 앞에 인계 블록으로 붙여 무상태 연속 대화를 보장한다 (pi 엔진은 네이티브
+/// --session-id 를 쓰므로 이 경로를 타지 않는다).
+fn prime_carry_context(app: &AppHandle, id: &str) -> String {
+    let s = match read_session(app, id) {
+        Some(s) => s,
+        None => return String::new(),
+    };
+    let turns: Vec<String> = s
+        .chat
+        .iter()
+        .filter(|m| m.role == "user" || m.role == "assistant")
+        .rev()
+        .take(6)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .map(|m| {
+            let who = if m.role == "user" { "사용자" } else { "어시스턴트" };
+            let body: String = m.content.chars().take(800).collect();
+            format!("- {who}: {body}")
+        })
+        .collect();
+    if turns.is_empty() {
+        return String::new();
+    }
+    let joined = turns.join("\n");
+    let clipped: String = joined.chars().take(3000).collect();
+    format!("## 이전 대화 인계 (같은 작업의 앞부분 — 이어서 답하라)\n{clipped}")
+}
+
 fn run_prime_agent(
     app: &AppHandle,
     id: &str,
@@ -2551,10 +2600,19 @@ fn run_prime_agent(
     settings: &Settings,
     provider: &str,
 ) -> Result<(), String> {
+    let run_start = std::time::SystemTime::now();
     let mut instruction = turn_instruction(app, s, Engine::Prime);
     if s.diag && !s.host.trim().is_empty() {
         let sweep = run_p0_sweep(app, id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
         instruction.push_str(&p0_evidence_block(&sweep, 6000));
+    }
+    // prime 무상태 연속 대화 — 앞 턴 기록이 있으면 인계 블록을 앞에 붙인다.
+    let carry = prime_carry_context(app, id);
+    if !carry.is_empty() {
+        instruction = format!("{carry}\n\n{instruction}");
+        let ev = json!({ "type": "note", "text": "[sys] prime-agent 연속 대화 — 이전 대화 맥락을 인계했습니다." });
+        let stamped = append_event(app, id, &ev);
+        app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
 
     let ev3 = json!({ "type": "note", "text": "[sys] 안전장치: prime-agent 의 모든 동작을 점검 대상 목록으로 검사하고 벗어나면 중단합니다(이번 작업만)." });
@@ -2583,6 +2641,8 @@ fn run_prime_agent(
         thread::spawn(move || {
             let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, None);
             finalize_run(&app, &id, &outcome, "prime-agent");
+            audit_prime_homes(&app, &id);
+            audit_temp_window(&app, &id, run_start);
         });
     }
     Ok(())
@@ -2692,6 +2752,12 @@ fn launch_child(
     err_hint: &str,
 ) -> Result<(Child, PiPipes), String> {
     let mut cmd = Command::new(prog);
+    #[cfg(unix)]
+    {
+        // 자식을 프로세스 그룹 리더로 — kill_engine_child 가 자손까지 정리한다.
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd.current_dir(cwd);
     cmd.args(args);
     // 인가 게이트 명시 활성화: pi 확장의 tool_call 훅이 이 세션에서만 fail-closed 로 동작한다.
@@ -2711,6 +2777,56 @@ fn launch_child(
     let out = child.stdout.take().map(BufReader::new).ok_or("stdout 파이프 실패")?;
     let err = child.stderr.take().map(BufReader::new).ok_or("stderr 파이프 실패")?;
     Ok((child, PiPipes { out, err }))
+}
+
+/// 엔진 자식 + 자손 전체 종료 — 위반 차단·중지·프리플라이트 초과 시 쓴다.
+/// 단일 kill 이면 고아가 된 curl·python 자식이 탈취를 완수할 수 있어, Unix 에서는
+/// launch_child 가 지정한 프로세스 그룹 전체에 SIGTERM(1.5초 내 미종료 시 SIGKILL)을
+/// 보낸다. setsid 로 그룹을 이탈한 자손은 남을 수 있다(잔여 한계).
+/// 반드시 launch_child 경유 자식(그룹 리더)에만 쓸 것 — 그 외 단발 프로브는 plain kill.
+fn kill_engine_child(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        // 이미 끝났으면 그룹 시그널을 보내지 않는다 (pid 재사용 오폭 방지).
+        if child.try_wait().ok().flatten().is_some() {
+            return;
+        }
+        let pgid = child.id() as i32;
+        unsafe {
+            libc::killpg(pgid, libc::SIGTERM);
+        }
+        let start = std::time::Instant::now();
+        while start.elapsed() < std::time::Duration::from_millis(1500) {
+            match child.try_wait() {
+                Ok(Some(_)) => return,
+                _ => std::thread::sleep(std::time::Duration::from_millis(100)),
+            }
+        }
+        unsafe {
+            libc::killpg(pgid, libc::SIGKILL);
+        }
+        let _ = child.wait();
+    }
+    #[cfg(not(unix))]
+    {
+        // Windows: taskkill /T (트리) 우선, 실패 시 단일 kill. macOS 는 단일 kill(잔여).
+        #[cfg(windows)]
+        {
+            let args = taskkill_tree_args(child.id());
+            let tk = Command::new("taskkill").args(&args).output();
+            if tk.map(|o| o.status.success()).unwrap_or(false) {
+                let _ = child.wait();
+                return;
+            }
+        }
+        let _ = child.kill();
+    }
+}
+
+/// taskkill 트리 종료 인자 — /PID <pid> /T /F.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn taskkill_tree_args(pid: u32) -> Vec<String> {
+    vec!["/PID".to_string(), pid.to_string(), "/T".to_string(), "/F".to_string()]
 }
 
 
@@ -2745,7 +2861,7 @@ struct PumpOutcome {
     text: String, // 어시스턴트 텍스트 전체 누적 (워커 발견·collector 입력용)
     failed: bool, // stopReason=error / exit≠0 계열
     aborted: bool, // stopReason=aborted / settled(aborted) / 중지 kill
-    settled: bool, // agent_settled 수신 (pi 1.3 정식 완료 신호)
+    settled: bool, // agent_settled(pi) / agent_end(prime 0.10) 수신
     blocked: bool, // 반응형 스코프 게이트 발동 (인가 밖 툴 호출로 kill)
     error: String, // 마지막 LLM/실행 오류 메시지 — 사전 점검·마감 안내에 쓴다
 }
@@ -2804,6 +2920,29 @@ fn flush_assistant_text(
     *last_text = Some(t);
 }
 
+/// tool_execution_end → (실패 여부, " Nms" 접미사).
+/// pi: 최상위 isError/durationMs. prime 0.10 실측: 둘 다 없고
+/// result.details.status('ok' 외=실패)/durationMs 에 있다.
+fn tool_end_status(ev: &Value) -> (bool, String) {
+    let det = ev.get("result").and_then(|r| r.get("details"));
+    let is_err = ev
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or_else(|| {
+            det.and_then(|d| d.get("status"))
+                .and_then(|s| s.as_str())
+                .map(|s| s != "ok")
+                .unwrap_or(false)
+        });
+    let dur = ev
+        .get("durationMs")
+        .or_else(|| det.and_then(|d| d.get("durationMs")))
+        .and_then(|v| v.as_u64())
+        .map(|ms| format!(" {ms}ms"))
+        .unwrap_or_default();
+    (is_err, dur)
+}
+
 /// tool_execution_end.result → 한 줄 요약 (content 첫 텍스트 우선, 없으면 details).
 fn tool_result_summary(ev: &Value) -> String {
     let r = ev.get("result");
@@ -2854,8 +2993,9 @@ fn stderr_line_visible(line: &str) -> bool {
 }
 
 /// pi/prime-agent json 이벤트 스트림 펌프 — stdout 은 인라인, stderr 는 내부 스레드.
-/// pi 1.3.0 json 프로토콜(docs/json.md) 기준 (prime-agent 0.10 실측 동일):
-///   text_delta/text_end + tool_execution_start/end + message_end(stopReason) + agent_settled.
+/// pi 1.3.0 json 프로토콜(docs/json.md) 기준. prime-agent 0.10 실측 차이:
+///   중첩 text_end 없음(버퍼+message_end 로 회수), 터미널은 agent_end(agent_settled 없음),
+///   tool_execution_end 에 isError/durationMs 없음 → result.details.status/durationMs 로 판정.
 ///   최상위 {"type":"error"} 이벤트는 존재하지 않는다 — 실패는 message_end 의
 ///   stopReason=error|aborted + errorMessage, stderr, exit 코드로 판단한다.
 /// `tool_prefix` 는 툴 노트 표시 ("pi-툴" | "prime-툴"). `enforce` 가 있으면
@@ -2895,6 +3035,10 @@ fn pump_pi_stdio(
     };
     let mut buf = String::new();
     let mut last_text: Option<String> = None; // text_end/message_end 중복 노트 방지
+    // 업스트림 프로토콜 변경 조기 감지 — 모르는 이벤트 종류를 세어 마지막에 1회 보고한다.
+    let mut unknown_types: HashMap<String, u64> = HashMap::new();
+    // 결과측 탐지 — 이미 경고한 호스트 (실행당 5종 상한).
+    let mut result_warned: HashSet<String> = HashSet::new();
     for line in out.lines().map_while(Result::ok) {
         let line = line.trim();
         if line.is_empty() {
@@ -2919,7 +3063,10 @@ fn pump_pi_stdio(
                                 .lock()
                                 .unwrap()
                                 .get_mut(&enf.proc_key)
-                                .map(|c| c.kill().is_ok())
+                                .map(|c| {
+                                    kill_engine_child(c);
+                                    true
+                                })
                                 .unwrap_or(false);
                             outcome.failed = true;
                             outcome.blocked = true;
@@ -2935,15 +3082,30 @@ fn pump_pi_stdio(
             }
             "tool_execution_end" => {
                 let name = ev.get("toolName").and_then(|n| n.as_str()).unwrap_or("tool");
-                let is_err = ev.get("isError").and_then(|v| v.as_bool()).unwrap_or(false);
-                let dur = ev
-                    .get("durationMs")
-                    .and_then(|v| v.as_u64())
-                    .map(|ms| format!(" {ms}ms"))
-                    .unwrap_or_default();
+                let (is_err, dur) = tool_end_status(&ev);
                 let summary = tool_result_summary(&ev);
                 let mark = if is_err { "✗" } else { "✓" };
                 emit_note(app, id, format!("[{tool_prefix}{mark}] {name}{dur}{summary}"), worker.as_ref());
+                // 결과측 탐지 (반응형 게이트): 결과에 인가 밖 호스트가 나오면 경고만.
+                // 동적 URL(f-string 조립 등)로 요청 게이트를 우회한 접촉의 사후망이다.
+                if let Some(enf) = enforce.as_ref() {
+                    if result_warned.len() < 5 {
+                        let body = ev.get("result").map(|r| r.to_string()).unwrap_or_default();
+                        for h in out_of_scope_hosts_in_text(&body, &enf.auth) {
+                            if result_warned.len() >= 5 {
+                                break;
+                            }
+                            if result_warned.insert(h.clone()) {
+                                emit_note(
+                                    app,
+                                    id,
+                                    format!("[경고] 결과에서 인가 밖 접촉 흔적 — {h} (동적 URL 우회 가능성에 대한 신호, 차단은 아님)"),
+                                    worker.as_ref(),
+                                );
+                            }
+                        }
+                    }
+                }
             }
             "message_update" => {
                 if let Some(ae) = ev.get("assistantMessageEvent") {
@@ -2954,7 +3116,10 @@ fn pump_pi_stdio(
                             }
                         }
                         Some("text_end") => {
-                            let b = buf.clone();
+                            // pi 권장: text_end 의 authoritative content 를 우선 사용하고,
+                            // 없으면 누적 버퍼로 폴백한다 (provider 정정 반영).
+                            let authoritative = ae.get("content").and_then(|c| c.as_str()).unwrap_or("").trim();
+                            let b = if authoritative.is_empty() { buf.clone() } else { authoritative.to_string() };
                             flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
                             buf.clear();
                         }
@@ -2985,6 +3150,15 @@ fn pump_pi_stdio(
                             outcome.aborted = true;
                             emit_note(app, id, "[중지] pi 실행이 중단됐습니다.".to_string(), worker.as_ref());
                         }
+                        Some("length") => {
+                            // 출력 길이 제한으로 잘림 — 잘린 리포트를 정상으로 오인하지 않게 경고한다.
+                            emit_note(
+                                app,
+                                id,
+                                "[sys] 주의: AI 응답이 길이 제한으로 잘렸을 수 있습니다 — 리포트 끝부분이 비었으면 다시 실행하세요.".to_string(),
+                                worker.as_ref(),
+                            );
+                        }
                         _ => {}
                     }
                     if m.get("role").and_then(|r| r.as_str()) == Some("assistant") {
@@ -3007,6 +3181,10 @@ fn pump_pi_stdio(
                     emit_note(app, id, "[중지] 실행이 중단됐습니다.".to_string(), worker.as_ref());
                 }
             }
+            "agent_end" => {
+                // prime-agent 0.10 터미널 이벤트 (agent_settled 를 보내지 않음 — 실측).
+                outcome.settled = true;
+            }
             "error" => {
                 // 레거시 폴백 — 현 프로토콜에 최상위 error 는 없지만 무시하지 않는다.
                 outcome.failed = true;
@@ -3014,12 +3192,32 @@ fn pump_pi_stdio(
                 outcome.error = text.clone();
                 emit_note(app, id, format!("[오류] {text}"), worker.as_ref());
             }
-            _ => {}
+            // 알려진 무시 이벤트(세션 헤더·턴 경계·usage 등)는 조용히 넘긴다.
+            "session" | "agent_start" | "turn_start" | "turn_end" | "message_start"
+            | "thinking_delta" | "thinking_end" | "tool_execution_update" | "compaction_start"
+            | "compaction_end" | "auto_retry" | "usage" | "queue_update" | "toolcall_start"
+            | "toolcall_end" => {}
+            other => {
+                // 진짜로 모르는 이벤트만 계수 — 업스트림 프로토콜 변경 조기 감지용.
+                let key = if other.is_empty() { "(빈 type)" } else { other };
+                *unknown_types.entry(key.to_string()).or_insert(0) += 1;
+            }
         }
     }
     if !buf.trim().is_empty() {
         let b = buf.clone();
         flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
+    }
+    if !unknown_types.is_empty() {
+        let mut kinds: Vec<(&String, &u64)> = unknown_types.iter().collect();
+        kinds.sort_by(|a, b| b.1.cmp(a.1));
+        let desc = kinds.iter().take(5).map(|(k, n)| format!("{k}×{n}")).collect::<Vec<_>>().join(", ");
+        emit_note(
+            app,
+            id,
+            format!("[sys] 참고: 엔진이 보낸 새 형식 이벤트 {desc} — 무시하고 진행했습니다. pi/prime-agent 를 업데이트했다면 RedCell 호환 확인이 필요할 수 있습니다 (engines.json)."),
+            worker.as_ref(),
+        );
     }
     let _ = err_handle.join();
     outcome
@@ -3098,8 +3296,14 @@ fn run_p0_sweep(app: &AppHandle, id: &str, host: &str, port: Option<u16>, cookie
 
 /// P0 증거 주입 블록 — 워커/collector/단일 진단 지시문 끝에 덧붙인다.
 fn p0_evidence_block(rep: &probes::ProbeReport, cap_chars: usize) -> String {
+    let chains = probes::chain_hints(&rep.hits);
+    let chain_sec = if chains.is_empty() {
+        String::new()
+    } else {
+        format!("\n\n### 체인 단서 (공격 시나리오 씨앗 — ID 인용)\n{}", chains.join("\n"))
+    };
     format!(
-        "\n\n## P0 자동 스윕 증거 (실측 확정 — ID 인용 필수)\n{}\n규칙: 위 [P-###] 증거는 확정 실측이다. 관련 시나리오에 ID를 반드시 인용하고, 이미 커버된 항목은 재프로브하지 말고 체인·악용 추론과 빈틈 보완에 집중하라.",
+        "\n\n## P0 자동 스윕 증거 (실측 확정 — ID 인용 필수)\n{}\n규칙: 위 [P-###] 증거는 확정 실측이다. 관련 시나리오에 ID를 반드시 인용하고, 이미 커버된 항목은 재프로브하지 말고 체인·악용 추론과 빈틈 보완에 집중하라.{chain_sec}",
         probes::evidence_digest(rep, cap_chars)
     )
 }
@@ -3137,6 +3341,243 @@ fn https_hint_for(host: &str, port: Option<u16>) -> String {
 /// 리포트 병합 1회 실행 — 1차·최종 공용.
 /// `report_tag`("early"|"final")는 결과 탭의 1차/최종 구분 표식이다.
 #[allow(clippy::too_many_arguments)]
+/// 워커 구조화 발견 선독 — findings JSON 을 읽어 병합 프롬프트에 붙인다.
+/// 파일이 없으면 빈 문자열 (워커 텍스트 출력 폴백). 디렉터리 주입형이라 테스트 가능.
+fn collect_findings_block_in_dirs(
+    prime_id_dir: &Path,
+    sess_dir: &Path,
+    engine: Engine,
+    piq: &str,
+) -> String {
+    let mut files: Vec<(String, PathBuf)> = Vec::new();
+    if engine == Engine::Prime {
+        for def in DEEP_WORKERS {
+            files.push((
+                format!("{} ({})", def.id, def.label),
+                prime_id_dir.join(def.id).join("work").join(findings_filename(def.id)),
+            ));
+        }
+    } else {
+        let prefix = format!("findings-{piq}-");
+        if let Ok(rd) = fs::read_dir(sess_dir) {
+            let mut names: Vec<String> = rd
+                .flatten()
+                .filter_map(|e| e.file_name().into_string().ok())
+                .filter(|n| n.starts_with(&prefix) && n.ends_with(".json"))
+                .collect();
+            names.sort();
+            for n in names {
+                files.push((n.clone(), sess_dir.join(n)));
+            }
+        }
+    }
+    let mut parts: Vec<String> = Vec::new();
+    let mut total = 0usize;
+    for (label, path) in files {
+        if total >= 6000 {
+            break;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else { continue };
+        let raw = raw.trim();
+        if raw.is_empty() {
+            continue;
+        }
+        let parsed_ok = serde_json::from_str::<Value>(raw).is_ok();
+        let clipped: String = raw.chars().take(1500).collect();
+        total += clipped.len();
+        parts.push(format!("--- {label} [{}] ---\n{clipped}", if parsed_ok { "JSON 파싱됨" } else { "파싱 실패 — 원문 참고" }));
+    }
+    if parts.is_empty() {
+        return String::new();
+    }
+    format!(
+        "\n\n## 워커 구조화 발견 (findings JSON — 텍스트 출력보다 우선 병합)\n아래는 각 워커가 저장한 발견 JSON 이다. 텍스트 출력과 모순되면 JSON 을 우선하고,\n빠진 등급·증거는 텍스트에서 보완한다.\n\n{}",
+        parts.join("\n\n")
+    )
+}
+
+fn collect_findings_block(app: &AppHandle, id: &str, engine: Engine, piq: &str) -> String {
+    collect_findings_block_in_dirs(&root(app).join("prime-sessions").join(id), &sessions_dir(app), engine, piq)
+}
+
+/// 기계 대조 — [실증] 자기채점의 기계망. 주장 URL 을 하네스가 직접 재요청해
+/// 증거 발췌 출현을 확인하고, 존재하지 않는 [P-###] 인용(환각)을 검출한다.
+#[derive(Debug, Clone)]
+enum ClaimVerdict {
+    Confirmed,
+    Mismatch(String),
+    Skipped(String),
+}
+
+#[derive(Debug, Clone)]
+struct ClaimCheck {
+    route: String,
+    url: String,
+    verdict: ClaimVerdict,
+}
+
+#[derive(Debug, Default)]
+struct VerifyReport {
+    checks: Vec<ClaimCheck>,
+    unknown_ids: Vec<String>,
+}
+
+fn url_host(url: &str) -> Option<String> {
+    let rest = url.split_once("://")?.1;
+    let hostport = rest.split('/').next()?;
+    if let Some(b) = hostport.strip_prefix('[') {
+        b.split(']').next().map(|h| h.to_lowercase())
+    } else {
+        hostport.split(':').next().map(|h| h.to_lowercase())
+    }
+}
+
+fn url_scheme(url: &str) -> Option<&str> {
+    let s = url.split_once("://")?.0;
+    if s == "http" || s == "https" {
+        Some(s)
+    } else {
+        None
+    }
+}
+
+/// URL 포트 — 명시 `:port` 우선, 없으면 스킴 기본값(https 443/http 80).
+fn url_port(url: &str) -> Option<u16> {
+    let rest = url.split_once("://")?.1;
+    let hostport = rest.split('/').next()?;
+    let (_, explicit) = split_host_port(hostport);
+    explicit.or(match url_scheme(url) {
+        Some("https") => Some(443),
+        Some("http") => Some(80),
+        _ => None,
+    })
+}
+
+/// 동일 호스트 절대화 — Location 이 상대경로면 base 와 결합, 절대는 호스트 일치 시만.
+fn absolutize_same_host(base: &str, loc: &str) -> Option<String> {
+    let loc = loc.trim();
+    if loc.starts_with('/') && !loc.starts_with("//") {
+        let scheme = url_scheme(base)?;
+        // 포트 보존 — base 의 host:port 를 살린다.
+        let rest = base.split_once("://")?.1;
+        let hostport = rest.split('/').next()?;
+        return Some(format!("{scheme}://{hostport}{loc}"));
+    }
+    if url_scheme(loc).is_some() {
+        if url_host(loc) == url_host(base) {
+            return Some(loc.to_string());
+        }
+    }
+    None
+}
+
+/// 대조 재요청 — GET 1회 + 동일 호스트 리다이렉트 1홉, 8초·200KB 상한.
+fn verify_fetch(url: &str, cookie: &str) -> Result<(u16, String, String), String> {
+    let agent: ureq::Agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(8))
+        .timeout_read(std::time::Duration::from_secs(8))
+        .timeout_write(std::time::Duration::from_secs(8))
+        .redirects(0)
+        .user_agent("Mozilla/5.0 (RedCell authorized-agent; verify)")
+        .build();
+    let mut target = url.to_string();
+    for _ in 0..2 {
+        let mut req = agent.get(&target);
+        if !cookie.trim().is_empty() {
+            req = req.set("Cookie", cookie.trim());
+        }
+        let resp = match req.call() {
+            Ok(r) => r,
+            Err(ureq::Error::Status(_, r)) => r,
+            Err(e) => return Err(e.to_string()),
+        };
+        let status = resp.status();
+        if (300..400).contains(&status) {
+            let loc = resp.header("Location").unwrap_or("").to_string();
+            if let Some(next) = absolutize_same_host(&target, &loc) {
+                target = next;
+                continue;
+            }
+            return Err(format!("리다이렉트 추적 불가 ({status})"));
+        }
+        let mut hs = String::new();
+        for name in resp.headers_names() {
+            for v in resp.all(&name) {
+                hs.push_str(&format!("{name}: {v}\n"));
+            }
+        }
+        let mut buf = Vec::new();
+        resp.into_reader()
+            .take(200_000)
+            .read_to_end(&mut buf)
+            .map_err(|e| e.to_string())?;
+        return Ok((status, hs, String::from_utf8_lossy(&buf).into_owned()));
+    }
+    Err("리다이렉트 과다".into())
+}
+
+fn verify_report_claims(
+    text: &str,
+    valid_ids: &HashSet<String>,
+    auth: &auth::AuthList,
+    cookie: &str,
+) -> VerifyReport {
+    let unknown_ids = unknown_p_ids(text, valid_ids);
+    let mut checks = Vec::new();
+    for c in extract_evidence_claims(text) {
+        let verdict = match url_host(&c.url) {
+            None => ClaimVerdict::Skipped("URL 파싱 불가".into()),
+            Some(_) if url_scheme(&c.url).is_none() => ClaimVerdict::Skipped("http(s) 아님".into()),
+            Some(h) if !auth::is_host_port_allowed(auth, &h, url_port(&c.url)) => {
+                ClaimVerdict::Skipped("인가 밖 URL".into())
+            }
+            Some(_) => match verify_fetch(&c.url, cookie) {
+                Err(e) => ClaimVerdict::Skipped(format!("재요청 실패: {}", e.chars().take(80).collect::<String>())),
+                Ok((st, hs, body)) => {
+                    if excerpt_matches(&body, &hs, &c.excerpt) {
+                        ClaimVerdict::Confirmed
+                    } else {
+                        ClaimVerdict::Mismatch(format!("HTTP {st} — 발췌 미출현"))
+                    }
+                }
+            },
+        };
+        checks.push(ClaimCheck { route: c.route, url: c.url, verdict });
+    }
+    VerifyReport { checks, unknown_ids }
+}
+
+fn verify_report_block(rep: &VerifyReport) -> String {
+    if rep.checks.is_empty() && rep.unknown_ids.is_empty() {
+        return String::new();
+    }
+    let mut lines = vec!["\n\n## 기계 대조 결과 (하네스 실측 — 병합 규칙 4 적용)".to_string()];
+    for c in &rep.checks {
+        let mark = match &c.verdict {
+            ClaimVerdict::Confirmed => "확인".to_string(),
+            ClaimVerdict::Mismatch(w) => format!("불일치 ({w})"),
+            ClaimVerdict::Skipped(w) => format!("미시도 ({w})"),
+        };
+        lines.push(format!("- [{mark}] {} — {}", c.route.chars().take(60).collect::<String>(), c.url));
+    }
+    if !rep.unknown_ids.is_empty() {
+        lines.push(format!("- [환각 P-ID] 존재하지 않는 인용: {} — 삭제할 것", rep.unknown_ids.join(", ")));
+    }
+    lines.join("\n")
+}
+
+fn verify_note_line(rep: &VerifyReport) -> String {
+    let cf = rep.checks.iter().filter(|c| matches!(c.verdict, ClaimVerdict::Confirmed)).count();
+    let mm = rep.checks.iter().filter(|c| matches!(c.verdict, ClaimVerdict::Mismatch(_))).count();
+    let sk = rep.checks.len() - cf - mm;
+    let mut s = format!("[sys] 기계 대조 끝 — 주장 {}건 중 확인 {}건·불일치 {}건·미시도 {}건", rep.checks.len(), cf, mm, sk);
+    if !rep.unknown_ids.is_empty() {
+        s.push_str(&format!(" · 환각 P-ID {}건({})", rep.unknown_ids.len(), rep.unknown_ids.join(",")));
+    }
+    s.push('.');
+    s
+}
+
 fn run_collector_merge(
     app: &AppHandle,
     id: &str,
@@ -3149,7 +3590,16 @@ fn run_collector_merge(
     proc_key: &str,
     report_tag: &str,
     label: &str,
+    piq: &str,
 ) -> PumpOutcome {
+    // 구조화 선독 — findings JSON 이 있으면 병합 프롬프트에 덧붙인다.
+    let block = collect_findings_block(app, id, engine, piq);
+    let mut instruction = if block.is_empty() { instruction } else { format!("{instruction}{block}") };
+    // 자율 병합 — 게이트가 검사할 report.md 저장을 지시한다 (prime 전용).
+    if engine == Engine::Prime && prime_autonomous_enabled() {
+        let work = prime_session_dir(app, id, run_tag).join("work");
+        instruction.push_str(&autonomous_report_block(&work));
+    }
     match prepare_engine_run(app, id, engine, settings, provider, redcell, run_tag, instruction, true) {
         Ok(prep) => match spawn_prepared(&prep, provider, settings) {
             Ok((child, pipes)) => {
@@ -3200,7 +3650,14 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     let s = ensure_piq(&app, &s);
     let piq = s.piq.clone();
     let target = target_url(&s.host, s.port);
-    let https_hint = https_hint_for(&s.host, s.port);
+    let mut https_hint = https_hint_for(&s.host, s.port);
+    // 로그인 쿠키 맥락을 워커에 고지 — W3(로그인 점검)는 P0 인증 증거를 우선 인용한다.
+    if !s.auth_cookie.trim().is_empty() {
+        if !https_hint.is_empty() {
+            https_hint.push(' ');
+        }
+        https_hint.push_str("로그인 쿠키 적용됨 — P0가 인증 영역까지 스윕했으니 인증 관련 증거([P-###] auth-*/jwt-*/세션)를 우선 인용하고, 비로그인 가정 시나리오는 쓰지 마라.");
+    }
     let goal = if s.goal.trim().is_empty() {
         "이 서비스의 보안 진단 리포트를 작성해줘.".to_string()
     } else {
@@ -3211,6 +3668,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
     // 동기 프리플라이트 — 엔진 바이너리 미설치면 즉시 Err.
     if engine == Engine::Prime {
         prime_agent_path()?;
+        warn_stale_prime(&app, &id);
     } else {
         prime_cli_path(&redcell)?;
         ensure_pinned_pi(&app, &id, &settings);
@@ -3234,6 +3692,8 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         let nf = netfilter_extra_env(&app, &id, &auth, &provider, &settings);
         emit_netfilter_note(&app, &id, !nf.is_empty());
     }
+    // DNS 드리프트(TOCTOU) 실행 시점 확인 — 경고 또는 핀 강제 중단.
+    dns_drift_check(&app, &id, &s.host)?;
 
     set_status(&app, &id, "running");
     app.emit("engagement-status", json!({ "sessionId": id, "status": "running" })).ok();
@@ -3243,6 +3703,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
     }
 
+    let deep_start = std::time::SystemTime::now();
     thread::spawn(move || {
         // 기본 점검: 결정적 대량 확인을 먼저 실행하고 증거를 다섯 분야·병합에게 나눠준다.
         let sweep = run_p0_sweep(&app, &id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
@@ -3252,6 +3713,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         }
         let digest_w = p0_evidence_block(&sweep, 6000);
         let digest_c = p0_evidence_block(&sweep, 12000);
+        let playbook = session_playbook_block(&sweep);
         // 워커 실행 클로저 — round 0 = 1차, 1+ = 추가 확인 (동일 세션 연속).
         let run_round = |round: u32, ctx: &std::collections::HashMap<String, (String, String)>| -> Vec<(String, PumpOutcome)> {
             for def in DEEP_WORKERS {
@@ -3272,22 +3734,38 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 let https_hint = https_hint.clone();
                 let mem = mem.clone();
                 let digest_w = digest_w.clone();
+                let playbook = playbook.clone();
                 let (own_prior, cross) = ctx.get(def.id).cloned().unwrap_or_default();
                 handles.push(thread::spawn(move || -> (String, PumpOutcome) {
                     let tag = WorkerTag { id: def.id.to_string(), label: def.label.to_string() };
+                    // 구조화 발견 파일 절대경로 — 워커가 JSON 을 저장하고 collector 가 읽는다.
+                    let findings_path = if engine == Engine::Prime {
+                        prime_session_dir(&app, &id, def.id).join("work").join(findings_filename(def.id)).to_string_lossy().into_owned()
+                    } else {
+                        sessions_dir(&app).join(findings_filename(&format!("{piq}-{}", def.id))).to_string_lossy().into_owned()
+                    };
                     let mut instruction = if round == 0 {
-                        let mut i = deep_worker_instruction(def, &target, &goal, &https_hint, &mem);
+                        let mut i = deep_worker_instruction(def, &target, &goal, &https_hint, &mem, &findings_path);
                         i.push_str(&digest_w);
                         i
                     } else {
-                        deep_followup_instruction(def, round + 1, &own_prior, &cross, &target)
+                        let mut i = deep_followup_instruction(def, round + 1, &own_prior, &cross, &target, &findings_path);
+                        i.push_str(&playbook);
+                        i
                     };
                     if engine == Engine::Prime {
-                        instruction = prime_adapt(instruction);
+                        instruction = prime_adapt_deep(instruction);
                     }
                     // 라운드가 바뀌어도 세션은 유지 (pi session-id / prime session-dir 연속).
                     let run_tag = if engine == Engine::Prime { def.id.to_string() } else { format!("{piq}-{}", def.id) };
                     let key = format!("{id}#{}", def.id);
+                    // prime 스폰 시차 — 커널 셋업 경합 완화 (pi는 불필요).
+                    if engine == Engine::Prime {
+                        let wait = prime_spawn_stagger_ms().saturating_mul(worker_spawn_index(def.id));
+                        if wait > 0 {
+                            thread::sleep(std::time::Duration::from_millis(wait.min(15_000)));
+                        }
+                    }
                     let outcome = match prepare_engine_run(&app, &id, engine, &settings, &provider, &redcell, &run_tag, instruction, true) {
                         Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
                             Ok((child, pipes)) => {
@@ -3360,20 +3838,23 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         // 1차 리포트 — 1차 확인 결과로 먼저 발행하고, 추가 확인은
         // 뒤에서 계속한다. 사용자는 언제든 중지해 1차 리포트만 받을 수 있다.
         let mut early_published = false;
+        let mut early_text = String::new();
         {
             let (combined_early, ok_early) = combine_worker_outputs(&accum, 1);
             if ok_early > 0 && !is_stopped(&results) {
                 emit_note(&app, &id, format!("[sys] 1차 확인 끝(다섯 곳 중 {ok_early}곳 응답) — 1차 리포트를 만듭니다…"), None);
                 let mut merge = early_merge_instruction(deep_merge_instruction(&target, &goal, &combined_early, &mem, "1차 리포트"));
                 if engine == Engine::Prime {
-                    merge = prime_adapt(merge);
+                    merge = prime_adapt_deep(merge);
                 }
                 merge.push_str(&digest_c);
+                merge.push_str(&playbook);
                 let run_tag = if engine == Engine::Prime { "merge-early".to_string() } else { format!("{piq}-merge-early") };
                 let key = format!("{id}#merge-early");
-                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트");
+                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트", &piq);
                 if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
                     early_published = true;
+                    early_text = outcome.text.trim().to_string();
                     // 발행 파일 자동 저장 — 실패하면 한 줄로 알린다(열 때 저장됨).
                     if let Err(e) = write_report_file(&reports_dir(&app), &id, "early", outcome.text.trim()) {
                         emit_note(&app, &id, format!("[sys] 1차 리포트 자동 저장 실패({e}) — 결과 탭에서 MD로 저장하세요."), None);
@@ -3391,10 +3872,13 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             if is_stopped(&results) {
                 break;
             }
-            // 추가 확인 컨텍스트 — 자가 누적 + 타 분야 단서 (엇갈린 단서).
-            let (ctx, leads) = build_followup_context(&results, &accum);
+            // 추가 확인 컨텍스트 — 자가 누적 + 타 분야 단서 + 밴딧 집중 지시.
+            let yields = bandit_yields(&results, &seen);
+            let focus = bandit_focus_lines(&yields);
+            let (ctx, leads) = build_followup_context(&results, &accum, &focus);
+            let top = yields.first().filter(|(_, n)| *n > 0).map(|(w, n)| format!(" — 수확 1위 {w}({n}건)")).unwrap_or_default();
             {
-                let ev = json!({ "type": "note", "text": format!("[sys] 추가 확인 {}차 시작 — 엇갈린 단서 {leads}건 확인.", round + 1) });
+                let ev = json!({ "type": "note", "text": format!("[sys] 추가 확인 {}차 시작 — 엇갈린 단서 {leads}건 확인{top}.", round + 1) });
                 let stamped = append_event(&app, &id, &ev);
                 app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
             }
@@ -3457,13 +3941,27 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
             }
             return;
         }
+        // 기계 대조 — 1차 리포트(없으면 워커 누적) 주장을 하네스가 재요청 검증하고
+        // 최종 병합에 반영한다. [실증] 자기채점의 기계망 + 환각 P-ID 검출.
+        let verify_src = if !early_text.trim().is_empty() { early_text.clone() } else { combined.clone() };
+        let mut verify_block = String::new();
+        if !verify_src.trim().is_empty() {
+            emit_note(&app, &id, "[sys] 기계 대조 — 증거 발췌 재확인 중…".to_string(), None);
+            let valid_ids: HashSet<String> = sweep.hits.iter().map(|h| h.id.clone()).collect();
+            let vauth = auth::load(&resolve_app_auth_path(&app));
+            let rep = verify_report_claims(&verify_src, &valid_ids, &vauth, &s.auth_cookie);
+            emit_note(&app, &id, verify_note_line(&rep), None);
+            verify_block = verify_report_block(&rep);
+        }
         let mut merge = deep_merge_instruction(&target, &goal, &combined, &mem, "최종 리포트");
         if engine == Engine::Prime {
-            merge = prime_adapt(merge);
+            merge = prime_adapt_deep(merge);
         }
         merge.push_str(&digest_c);
+        merge.push_str(&verify_block);
+        merge.push_str(&playbook);
         let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
-        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트");
+        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트", &piq);
         let ok = (!merge_outcome.failed && !merge_outcome.aborted) || has_usable_text(&merge_outcome);
         if ok && !merge_outcome.text.trim().is_empty() {
             // 발행 파일 자동 저장 — 실패하면 한 줄로 알린다(열 때 저장됨).
@@ -3493,6 +3991,11 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         // 최종 병합이 실패해도 1차 리포트가 있으면 사용자에게 남는 것은 성공이다.
         let delivered = ok || early_published;
         record_history(&app, &s.host, ok_n, DEEP_WORKERS.len(), delivered);
+        // prime 전담 HOME 사후 감사 — 워커·병합 전체 태그를 1회 훑는다.
+        if engine == Engine::Prime {
+            audit_prime_homes(&app, &id);
+        }
+        audit_temp_window(&app, &id, deep_start);
         if let Some(cur) = read_session(&app, &id) {
             if cur.status == "running" {
                 let st = if delivered { "done" } else { "error" };
@@ -3527,9 +4030,32 @@ fn gate_session_instruction(app: &AppHandle, id: &str, s: &Session) -> Result<()
     }
 }
 
+/// DNS 드리프트(TOCTOU) 실행 시점 확인 — 인가 시점과 다른 IP 로 바뀌었으면 경고.
+/// REDCELL_DNS_PIN=1 이면 경고 대신 실행을 중단한다 (CDN·LB 환경은 오탐 가능 — 기본 경고만).
+fn dns_drift_check(app: &AppHandle, id: &str, host: &str) -> Result<(), String> {
+    let auth = auth::load(&resolve_app_auth_path(app));
+    if auth.yaml {
+        return Ok(());
+    }
+    let drifted = auth::dns_drifted(host, &auth.allows, &auth::resolve_ips(host));
+    if drifted.is_empty() {
+        return Ok(());
+    }
+    let msg = format!(
+        "DNS 변경 감지 — {host} 가 인가 목록에 없던 IP({})로 해석됩니다 (리바인딩 의심).",
+        drifted.join(",")
+    );
+    if std::env::var("REDCELL_DNS_PIN").map(|v| v.trim() == "1").unwrap_or(false) {
+        return Err(format!("{msg}\n인가 대상을 다시 확인하고 실행하세요 (또는 REDCELL_DNS_PIN 을 해제)."));
+    }
+    emit_note(app, id, format!("[경고] {msg} 계속 진행합니다."), None);
+    Ok(())
+}
+
 #[tauri::command]
 fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
     let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
+    dns_drift_check(&app, &id, &s.host)?;
     gate_session_instruction(&app, &id, &s)?;
     // 세션 엔진에 따라 pi(-e 확장 게이트) 또는 prime-agent(스킬+킬게이트)로 실행한다.
     // (정밀 진단은 start_deep_diagnosis — 병렬 5분야 + 병합.)
@@ -3562,7 +4088,7 @@ fn stop_engagement(app: AppHandle, id: String) -> Result<(), String> {
     for k in keys {
         let removed = app.state::<Procs>().0.lock().unwrap().remove(&k);
         if let Some(mut child) = removed {
-            let _ = child.kill();
+            kill_engine_child(&mut child);
             let _ = child.wait();
         }
     }
@@ -3821,7 +4347,13 @@ fn backfill_reports_in_dir(sessions: &Path, reports: &Path) -> usize {
         }
         let Ok(txt) = fs::read_to_string(e.path()) else { continue };
         let Ok(s) = serde_json::from_str::<Session>(&txt) else { continue };
-        for ev in &s.events {
+        // 이벤트는 <id>.events.ndjson 에 산다(구버전 세션 JSON embed 는 s.events 로 함께).
+        let mut events = s.events.clone();
+        events.extend(read_events_file(&sessions.join(format!(
+            "{}.events.ndjson",
+            s.id
+        ))));
+        for ev in &events {
             let tag = ev.get("report").and_then(|v| v.as_str()).unwrap_or("");
             if !matches!(tag, "early" | "final") {
                 continue;
@@ -4112,23 +4644,44 @@ fn prime_version(bin: &Path) -> Option<String> {
 }
 
 /// 엔진 감지 — pi-coding-agent + prime-agent(Rust 하네스 직접 실행) 설치 상태·버전.
+/// 버전 요구치는 engines.json 핀에서 읽는다. UI 는 satisfies_min=false 일 때 경고를 표시한다.
 #[tauri::command]
 fn detect_engines(app: AppHandle) -> Value {
     let settings = get_settings(app);
     let pi = prime_cli_path(&settings.redcell_dir)
         .map(|p| p.to_string_lossy().into_owned())
         .ok();
+    let pi_ver = if pi.is_some() { pi_cli_version(&settings) } else { "미확인".to_string() };
+    let pi_min = pi_min_version();
+    let pi_pinned = pi_pinned_version();
     let prime_path = prime_agent_path().ok();
-    let prime_version = prime_path.as_deref().and_then(prime_version);
+    let prime_ver = prime_path.as_deref().and_then(prime_version);
+    let prime_min = prime_min_version();
+    let prime_pinned = prime_pinned_version();
+    let pi_ok = if pi.is_some() { pi_version_at_least(&pi_ver, &pi_min) } else { true };
     json!({
-        "pi": { "found": pi.is_some(), "path": pi },
-        "prime_agent": { "found": prime_path.is_some(), "path": prime_path.map(|p| p.to_string_lossy().into_owned()), "version": prime_version },
+        "pi": {
+            "found": pi.is_some(), "path": pi,
+            "version": pi_ver,
+            "min": pi_min,
+            "pinned": pi_pinned,
+            "satisfies_min": pi_ok,
+        },
+        "prime_agent": {
+            "found": prime_path.is_some(),
+            "path": prime_path.map(|p| p.to_string_lossy().into_owned()),
+            "version": prime_ver.clone(),
+            "min": prime_min,
+            "pinned": prime_pinned,
+            "satisfies_min": prime_ver.as_deref().map(|v| pi_version_at_least(v, &prime_min_version())).unwrap_or(true),
+        },
     })
 }
 
 fn main() {
     tauri::Builder::default()
         .manage(IoGuard(Mutex::new(())))
+        .manage(EventSeqs(Mutex::new(HashMap::new())))
         .manage(Procs(Mutex::new(HashMap::new())))
         .invoke_handler(tauri::generate_handler![
             get_settings,
@@ -4167,6 +4720,96 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// 그룹 kill — 자식의 자식(손자 sleep)까지 정리되는지 검증 (Unix 전용).
+    /// sh -c 'sleep 60 & ...; wait' 구조로 손자를 만들고 kill_engine_child 후 소멸 확인.
+    #[cfg(unix)]
+    #[test]
+    fn kill_engine_child_kills_grandchildren() {
+        use std::os::unix::process::CommandExt;
+        let dir = std::env::temp_dir().join(format!("rc-killpg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let pidfile = dir.join("grandchild.pid");
+        let mut cmd = Command::new("sh");
+        cmd.process_group(0);
+        cmd.arg("-c")
+            .arg(format!("sleep 60 & echo $! > '{}'; wait", pidfile.display()));
+        let mut child = cmd.spawn().expect("sh 스폰");
+        // 손자 pid 기록 대기 (최대 5초).
+        let mut gpid: Option<i32> = None;
+        for _ in 0..50 {
+            if let Ok(t) = std::fs::read_to_string(&pidfile) {
+                if let Ok(p) = t.trim().parse::<i32>() {
+                    gpid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let gpid = gpid.expect("손자 pid 기록");
+        // 손자 생존 확인 후 그룹 kill.
+        unsafe {
+            assert_eq!(libc::kill(gpid, 0), 0, "선행조건: 손자 생존");
+        }
+        kill_engine_child(&mut child);
+        // 손자 소멸 확인 (최대 5초 — SIGTERM 즉시 + SIGKILL 에스컬레이션).
+        let mut dead = false;
+        for _ in 0..50 {
+            unsafe {
+                if libc::kill(gpid, 0) != 0 {
+                    dead = true;
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert!(dead, "손자 프로세스도 정리되어야 한다 (pid {gpid})");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// 전담 HOME — home 생성 + .prime 링크(실제 설정이 있을 때만).
+    #[cfg(unix)]
+    #[test]
+    fn setup_prime_home_shapes() {
+        let sdir = std::env::temp_dir().join(format!("rc-phome-{}", std::process::id()));
+        std::fs::create_dir_all(&sdir).unwrap();
+        let fake = setup_prime_home(&sdir).expect("전담 HOME 생성");
+        assert!(fake.is_dir(), "home 디렉터리 존재: {fake:?}");
+        assert_eq!(fake.file_name().unwrap(), "home");
+        // 실제 ~/.prime 이 있으면 링크, 없으면 링크 없이 통과.
+        let real = user_home().map(|h| h.join(".prime"));
+        let link = fake.join(".prime");
+        if real.map(|p| p.is_dir()).unwrap_or(false) {
+            assert!(fs::symlink_metadata(&link).map(|m| m.file_type().is_symlink()).unwrap_or(false), ".prime 심볼릭 링크");
+        } else {
+            assert!(fs::symlink_metadata(&link).is_err(), "실제 설정 없으면 링크 없음");
+        }
+        std::fs::remove_dir_all(&sdir).ok();
+    }
+
+    /// stray 감사 — 파일은 잡고 .prime 링크 내부는 따라가지 않는다.
+    #[test]
+    fn prime_home_strays_shapes() {
+        let dir = std::env::temp_dir().join(format!("rc-stray-{}", std::process::id()));
+        let home = dir.join("home");
+        std::fs::create_dir_all(home.join("sub")).unwrap();
+        std::fs::write(home.join("loot.txt"), "x").unwrap();
+        std::fs::write(home.join("sub").join("s.sh"), "x").unwrap();
+        let strays = prime_home_strays(&home);
+        assert_eq!(strays, vec!["loot.txt".to_string(), "sub/s.sh".to_string()]);
+        assert!(prime_home_strays(&dir.join("없음")).is_empty(), "없는 경로는 빈 목록");
+        // .prime 링크는 따라가지 않는다 (Unix).
+        #[cfg(unix)]
+        {
+            let target = dir.join("real-prime");
+            std::fs::create_dir_all(&target).unwrap();
+            std::fs::write(target.join("secret.json"), "x").unwrap();
+            std::os::unix::fs::symlink(&target, home.join(".prime")).unwrap();
+            let strays2 = prime_home_strays(&home);
+            assert!(!strays2.iter().any(|s| s.contains("secret.json")), "링크 내부는 감사 제외: {strays2:?}");
+        }
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// 회귀 테스트: pi CLI(prime-agent) 경로 탐색은 nvm 전역 설치를 포함해 반드시 찾는다.
     /// (이 환경: HOME/.nvm/versions/node/*/lib/node_modules/... — 과거엔 못 찾아
@@ -4481,9 +5124,62 @@ mod tests {
     fn followup_instruction_keeps_recent_prior() {
         let def = &DEEP_WORKERS[0];
         let prior = format!("{}최신보고", "옛날보고".repeat(1000));
-        let inst = deep_followup_instruction(def, 3, &prior, "- [단서:w2] 키", "http://t/");
+        let inst = deep_followup_instruction(def, 3, &prior, "- [단서:w2] 키", "http://t/", "");
         assert!(inst.contains("추가 확인 3차"), "차수 표기: {}", inst.chars().take(80).collect::<String>());
         assert!(inst.contains("최신보고"), "최신 보고가 지시문에 남아야 한다");
+    }
+
+    /// 밴딧 수확 집계 — 라운드별 워커 신규 발견 수 (결정적 정렬).
+    #[test]
+    fn bandit_yields_shapes() {
+        let w1_line = "- [중간] 보안 헤더 누락 — x / 근거: y";
+        let seen: std::collections::HashSet<String> = extract_finding_keys(w1_line).into_iter().collect();
+        assert_eq!(seen.len(), 1, "정규화 키 1건 전제");
+        let results = vec![
+            ("w1".to_string(), PumpOutcome { text: w1_line.into(), ..Default::default() }),
+            ("w2".to_string(), PumpOutcome { text: "- [높음] SQL 주입 신호 — a / 근거: b\n- [중간] XSS 반사 — c / 근거: d".into(), ..Default::default() }),
+        ];
+        let y = bandit_yields(&results, &seen);
+        assert_eq!(y, vec![("w2".to_string(), 2), ("w1".to_string(), 0)], "{y:?}");
+    }
+
+    /// 밴딧 집중 지시 — 1위 심화·0수확 전환 (전원 0이면 무음).
+    #[test]
+    fn bandit_focus_shapes() {
+        let y = vec![("w2".to_string(), 2), ("w1".to_string(), 0)];
+        let f = bandit_focus_lines(&y);
+        assert!(f["w2"].contains("심화"), "{f:?}");
+        assert!(f["w1"].contains("새 표면"), "{f:?}");
+        assert!(bandit_focus_lines(&[("w1".to_string(), 0)]).is_empty(), "전원 0이면 무음");
+    }
+
+    /// 세션 플레이북 — P1/위험 확정 + 체인 (세션 한정, 빈 스윕이면 무음).
+    #[test]
+    fn session_playbook_block_shapes() {
+        let mut hits = vec![
+            probes::ProbeHit { id: "P-001".into(), category: "verify-xss".into(), severity: "high".into(), target: "u".into(), title: "XSS 확정".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+            probes::ProbeHit { id: "P-002".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+        ];
+        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 1, danger: false, hits: hits.clone() };
+        let pb = session_playbook_block(&rep);
+        assert!(pb.contains("P-001") && pb.contains("XSS 확정"), "{pb}");
+        assert!(pb.contains("체인"), "{pb}");
+        assert!(pb.contains("세션 한정"), "{pb}");
+        hits.clear();
+        let empty = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits };
+        assert!(session_playbook_block(&empty).is_empty(), "빈 스윕은 무음");
+    }
+
+    /// P0 증거 블록에 체인 단서 포함.
+    #[test]
+    fn p0_evidence_block_carries_chains() {
+        let hits = vec![
+            probes::ProbeHit { id: "P-001".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+            probes::ProbeHit { id: "P-002".into(), category: "xss-reflect".into(), severity: "medium".into(), target: "u".into(), title: "RX".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+        ];
+        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits };
+        let b = p0_evidence_block(&rep, 6000);
+        assert!(b.contains("체인 단서") && b.contains("P-001"), "{b}");
     }
 
     /// 교차 단서: 타 워커의 "자기가 아직 보고하지 않은" 발견만 전달한다.
@@ -4498,7 +5194,7 @@ mod tests {
         let mut accum = std::collections::HashMap::new();
         accum.insert("w1".to_string(), "- [중간] 보안 헤더 누락 — CSP 없음 / 근거: 헤더".to_string());
         accum.insert("w2".to_string(), w2_text);
-        let (ctx, leads) = build_followup_context(&results, &accum);
+        let (ctx, leads) = build_followup_context(&results, &accum, &std::collections::HashMap::new());
         assert!(leads >= 2, "서로의 발견이 단서로 오가야 한다: leads={leads}");
         let w1_cross = &ctx.get("w1").unwrap().1;
         assert!(w1_cross.contains("[단서:w2]"), "w1 에게 w2 발견이 전달되어야 한다: {w1_cross}");
@@ -4506,7 +5202,7 @@ mod tests {
         // 자기가 이미 보고한 것은 단서에서 빠진다.
         let mut accum2 = accum.clone();
         accum2.get_mut("w1").unwrap().push_str("\n- [높음] SQL 주입 신호 — /login 오류 노출 / 근거: syntax error");
-        let (ctx2, _) = build_followup_context(&results, &accum2);
+        let (ctx2, _) = build_followup_context(&results, &accum2, &std::collections::HashMap::new());
         assert!(!ctx2.get("w1").unwrap().1.contains("[단서:w2]"), "이미 아는 것은 단서 제외");
     }
 
@@ -4643,13 +5339,35 @@ mod tests {
         assert_eq!(tool_result_summary(&ev3), "");
     }
 
+    #[test]
+    fn tool_end_status_pi_and_prime_shapes() {
+        // pi 형상: 최상위 isError/durationMs.
+        let pi = serde_json::json!({"isError": true, "durationMs": 42, "result": {}});
+        assert_eq!(tool_end_status(&pi), (true, " 42ms".into()));
+        // prime-agent 0.10.0 --mode json 실측 tool_execution_end (AttributeError 건):
+        // 최상위 isError/durationMs 없음, result.details.status/durationMs 로 판정.
+        let prime_err = serde_json::json!({
+            "type": "tool_execution_end", "toolCallId": "call_4", "toolName": "python_repl",
+            "result": {"content": [{"type": "text", "text": "Traceback (most recent call last):\nAttributeError"}],
+                       "details": {"status": "error", "kernelRestarted": false, "durationMs": 16,
+                                   "bashCommands": {"first": "echo INNER-OK", "count": 1, "lines": 1}}}
+        });
+        assert_eq!(tool_end_status(&prime_err), (true, " 16ms".into()));
+        let prime_ok = serde_json::json!({
+            "type": "tool_execution_end", "toolName": "python_repl",
+            "result": {"content": [{"type": "text", "text": "INNER-OK\n"}],
+                       "details": {"status": "ok", "kernelRestarted": false, "durationMs": 15, "stdout": "INNER-OK\n"}}
+        });
+        assert_eq!(tool_end_status(&prime_ok), (false, " 15ms".into()));
+    }
+
     /// 심층 워커 정의: 5개 분야, id/label/title/brief 완비, 지시문 자족성.
     #[test]
     fn deep_workers_five_vectors() {
         assert_eq!(DEEP_WORKERS.len(), 5, "워커는 5개 분야여야 한다");
         for def in DEEP_WORKERS {
             assert!(!def.id.is_empty() && !def.label.is_empty() && !def.title.is_empty() && !def.brief.is_empty());
-            let inst = deep_worker_instruction(def, "http://t/", "쇼핑몰", "", "");
+            let inst = deep_worker_instruction(def, "http://t/", "쇼핑몰", "", "", "");
             assert!(inst.contains(def.title), "지시문에 분야 명시: {}", def.id);
             assert!(inst.contains("web_fetch"), "웹 조회 수단 명시: {}", def.id);
             assert!(inst.contains("## 워커 발견"), "출력 형식 명시: {}", def.id);
@@ -4680,6 +5398,58 @@ mod tests {
         assert_eq!(extract_hosts("x", &v), vec!["a.local"]); // 중복 제거
     }
 
+    /// 대상 추출 — (호스트, 포트) 쌍. 명시 포트·스킴 기본값·port 키·IPv6 브라켓.
+    #[test]
+    fn extract_targets_shapes() {
+        let v = serde_json::json!({"url": "https://demo.vulnlab.local:8443/a?x=1"});
+        assert_eq!(extract_targets(&v), vec![("demo.vulnlab.local".to_string(), Some(8443))]);
+        // 스킴 기본 포트 추론.
+        let v = serde_json::json!({"code": "a=requests.get('https://h1.local/'); b=urllib.request.urlopen(\"http://h2.local/x\")"});
+        let mut t = extract_targets(&v);
+        t.sort();
+        assert_eq!(t, vec![("h1.local".to_string(), Some(443)), ("h2.local".to_string(), Some(80))]);
+        // port 키 동행.
+        let v = serde_json::json!({"host": "10.1.2.3", "port": 8080});
+        assert_eq!(extract_targets(&v), vec![("10.1.2.3".to_string(), Some(8080))]);
+        // IPv6 브라켓 + 명시 포트 (네이키드 split(':') 회귀 방지).
+        let v = serde_json::json!({"url": "http://[::1]:8080/x"});
+        assert_eq!(extract_targets(&v), vec![("::1".to_string(), Some(8080))]);
+        // 베어 IPv4 + 콜론 포트.
+        let v = serde_json::json!({"code": "curl http://10.0.0.9:9000/metrics"});
+        assert_eq!(extract_targets(&v), vec![("10.0.0.9".to_string(), Some(9000))]);
+        // 포트 맥락 없음 → None (호스트 게이트만).
+        let v = serde_json::json!({"hostname": "Sub.Example.COM"});
+        assert_eq!(extract_targets(&v), vec![("sub.example.com".to_string(), None)]);
+        // 브라켓 없는 IPv6 URL 도 통째로 호스트 (스킴 기본 포트).
+        let v = serde_json::json!({"code": "x = \"http://::1/status\""});
+        assert_eq!(extract_targets(&v), vec![("::1".to_string(), Some(80))]);
+    }
+
+    /// 반응형 게이트 포트 집행 — 인가 호스트라도 ports 지시자 밖 포트는 위반.
+    #[test]
+    fn decide_tool_violation_ports() {
+        let auth = auth::AuthList {
+            allows: vec!["demo.vulnlab.local".into(), "10.0.0.0/24".into()],
+            ports: Some(vec![80, 443]),
+            ..Default::default()
+        };
+        let ok = serde_json::json!({"code": "urllib.request.urlopen(\"https://demo.vulnlab.local/\")"});
+        assert!(decide_tool_violation(&auth, "python_repl", &ok).is_none(), "스킴 기본 443 허용");
+        let ok2 = serde_json::json!({"url": "http://demo.vulnlab.local:80/x"});
+        assert!(decide_tool_violation(&auth, "web_fetch", &ok2).is_none(), "명시 80 허용");
+        let bad = serde_json::json!({"url": "https://demo.vulnlab.local:8443/x"});
+        let v = decide_tool_violation(&auth, "web_fetch", &bad).expect("8443은 위반이어야 한다");
+        assert!(v.contains("8443") && v.contains("demo.vulnlab.local"), "위반 사유에 호스트:포트 명시: {v}");
+        let bad2 = serde_json::json!({"host": "10.0.0.5", "port": 22});
+        assert!(decide_tool_violation(&auth, "recon_http", &bad2).is_some(), "port 키 22 위반");
+        // 지시자 없으면 포트 무제한 (호스트 게이트만).
+        let free = auth::AuthList { allows: vec!["demo.vulnlab.local".into()], ..Default::default() };
+        assert!(decide_tool_violation(&free, "web_fetch", &bad).is_none());
+        // 포트 맥락 없는 베어 호스트는 호스트 게이트만 (과잉 차단 방지).
+        let bare = serde_json::json!({"hostname": "demo.vulnlab.local"});
+        assert!(decide_tool_violation(&auth, "x", &bare).is_none());
+    }
+
     /// 반응형 게이트 판정 — 인가 안이면 통과(None), 밖이면 위반 사유.
     #[test]
     fn decide_tool_violation_cases() {
@@ -4701,6 +5471,40 @@ mod tests {
         assert!(decide_tool_violation(&auth, "python_repl", &local).is_none(), "대상 없는 호출은 통과");
         let yaml = auth::AuthList { yaml: true, ..Default::default() };
         assert!(decide_tool_violation(&yaml, "python_repl", &bad).is_none(), "YAML scope는 해석 불가 — kill 없음(스킬 수준만)");
+        // fail-closed: 네트워크 가능 툴 + 인자 해석 불가(Null) → 차단.
+        let null = Value::Null;
+        assert!(
+            decide_tool_violation(&auth, "python_repl", &null).is_some(),
+            "인자 없이는 대상을 확인할 수 없으므로 차단해야 한다"
+        );
+        assert!(
+            decide_tool_violation(&auth, "bash", &null).is_some(),
+            "bash 도 네트워크 도달 가능 — 해석 불가 시 차단"
+        );
+        assert!(
+            decide_tool_violation(&auth, "read", &null).is_none(),
+            "순수 로컬 툴(read)은 인자가 없어도 차단하지 않는다"
+        );
+    }
+
+    /// engines.json 핀 로드 — 단일 출처 파싱 + 폴백.
+    #[test]
+    fn engines_pin_shapes() {
+        let _g = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("REDCELL_ENGINES_JSON");
+        let doc = engines_doc();
+        assert_eq!(doc.get("schema_version").and_then(|v| v.as_u64()), Some(1));
+        for (eng, key) in [("pi", "pinned"), ("pi", "min"), ("prime_agent", "pinned"), ("prime_agent", "min")] {
+            let v = engine_pin(eng, key, "");
+            assert!(parse_semver(&v).is_some(), "{eng}.{key} 가 시맨틱 버전이어야 한다: {v}");
+        }
+        assert!(pi_version_at_least(&pi_pinned_version(), &pi_min_version()));
+        assert!(pi_version_at_least(&prime_pinned_version(), &prime_min_version()));
+        // 오버라이드 경로가 깨졌으면 내장 핀으로 폴백한다.
+        std::env::set_var("REDCELL_ENGINES_JSON", "/nonexistent-engines-xyz.json");
+        assert_eq!(engine_pin("pi", "pinned", "FALLBACK"), pi_pinned_version());
+        assert_ne!(pi_pinned_version(), "FALLBACK");
+        std::env::remove_var("REDCELL_ENGINES_JSON");
     }
 
     /// prime-agent 실측 이벤트 그대로의 위반 판정 — 실바이너리 캡처 verbatim 픽스처.
@@ -4721,13 +5525,19 @@ mod tests {
     #[test]
     fn write_scope_skill_shape() {
         let dir = std::env::temp_dir().join(format!("rc-skill-{}", std::process::id()));
-        let p = write_scope_skill(&dir, &["demo.vulnlab.local".into(), "10.0.0.0/24".into()], &["10.0.0.9".into()]).unwrap();
+        let p = write_scope_skill(&dir, &["demo.vulnlab.local".into(), "10.0.0.0/24".into()], &["10.0.0.9".into()], None).unwrap();
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("---\nname: redcell-scope\n"), "frontmatter 필요:\n{text}");
         assert!(text.contains("demo.vulnlab.local") && text.contains("10.0.0.0/24"), "허용 목록 포함");
         assert!(text.contains("10.0.0.9"), "제외 목록 포함");
         assert!(text.contains("python_repl"), "prime 도구 안내 포함");
         std::fs::remove_dir_all(&dir).ok();
+        // ports 지시자 반영.
+        let dir2 = std::env::temp_dir().join(format!("rc-skill-p-{}", std::process::id()));
+        let p2 = write_scope_skill(&dir2, &["demo.vulnlab.local".into()], &[], Some(&[80, 443])).unwrap();
+        let text2 = std::fs::read_to_string(&p2).unwrap();
+        assert!(text2.contains("80") && text2.contains("443"), "인가 포트 명시:\n{text2}");
+        std::fs::remove_dir_all(&dir2).ok();
     }
 
     /// prime-agent 실행 인자 — 바이너리+--mode json+--print+--skill+--session-dir.
@@ -4744,7 +5554,7 @@ mod tests {
         let (prog, args) = prime_run_args(&settings, "openai", &skill, &sdir, true, "진단해줘".into()).unwrap();
         assert_eq!(prog, fake);
         let joined = args.join(" ");
-        for frag in ["--mode", "json", "--print", "--skill", "/tmp/x/SKILL.md", "--session-dir", "/tmp/x/sess", "--continue", "--provider", "openai"] {
+        for frag in ["--mode", "json", "--print", "--offline", "--skill", "/tmp/x/SKILL.md", "--session-dir", "/tmp/x/sess", "--continue", "--provider", "openai"] {
             assert!(args.iter().any(|a| a == frag), "인자 누락: {frag}\n전체: {joined}");
         }
         assert!(args.iter().any(|a| a == "진단해줘"), "지시문 포함: {joined}");
@@ -4755,6 +5565,65 @@ mod tests {
         match saved {
             Some(v) => std::env::set_var("REDCELL_PRIME_BIN", v),
             None => std::env::remove_var("REDCELL_PRIME_BIN"),
+        }
+    }
+
+    /// 자율 병합 — env on + merge 태그에만 --autonomous 게이트를 붙인다.
+    #[test]
+    fn prime_autonomous_gate_shape() {
+        let _g = ENV_LOCK.lock().unwrap();
+        assert!(is_merge_run_tag("abc-merge") && is_merge_run_tag("abc-merge-early"));
+        assert!(!is_merge_run_tag("abc-w1") && !is_merge_run_tag("prime"));
+        // 게이트 스크립트 내용.
+        let base = std::env::temp_dir().join(format!("rc-gate-{}", std::process::id()));
+        let sdir = base.join("sess").join("merge");
+        let gate = write_collector_gate(&sdir).expect("게이트 기록");
+        let body = std::fs::read_to_string(&gate).unwrap();
+        assert!(body.contains("report.md") && body.contains("grep -q"), "{body}");
+        // 게이트 동작 — report.md 없으면 실패, 있으면 통과.
+        let run = |r: &str| {
+            std::process::Command::new("sh")
+                .arg(&gate)
+                .output()
+                .map(|o| (o.status.success(), r.to_string()))
+        };
+        assert!(!run("").unwrap().0, "report.md 없으면 게이트 실패");
+        std::fs::write(sdir.join("work").join("report.md"), "## R\nbody\n").unwrap();
+        assert!(run("").unwrap().0, "report.md 있으면 게이트 통과");
+        // 인자 조립 — env on + merge 태그.
+        let saved_bin = std::env::var_os("REDCELL_PRIME_BIN");
+        let saved_auto = std::env::var_os("REDCELL_PRIME_AUTONOMOUS");
+        let fake = std::env::temp_dir().join(format!("prime-bin-auto-{}", std::process::id()));
+        std::fs::write(&fake, "#!/bin/sh\necho prime\n").unwrap();
+        std::env::set_var("REDCELL_PRIME_BIN", &fake);
+        std::env::set_var("REDCELL_PRIME_AUTONOMOUS", "1");
+        let settings = Settings::default();
+        let skill = PathBuf::from("/tmp/x/SKILL.md");
+        let mdir = base.join("sess").join("merge");
+        let (_, args) = prime_run_args(&settings, "openai", &skill, &mdir, false, "x".into()).unwrap();
+        let joined = args.join(" ");
+        for frag in ["--autonomous", "--autonomous-max-turns", "6", "--autonomous-gate"] {
+            assert!(args.iter().any(|a| a == frag), "자율 인자 누락: {frag}\n{joined}");
+        }
+        assert!(args.iter().any(|a| a.ends_with("gate.sh")), "게이트 경로 포함: {joined}");
+        // 워커 태그에는 붙지 않는다.
+        let wdir = base.join("sess").join("w1");
+        let (_, args2) = prime_run_args(&settings, "openai", &skill, &wdir, false, "x".into()).unwrap();
+        assert!(!args2.iter().any(|a| a == "--autonomous"), "워커에 자율 금지");
+        // env off 면 merge 에도 붙지 않는다.
+        std::env::remove_var("REDCELL_PRIME_AUTONOMOUS");
+        let (_, args3) = prime_run_args(&settings, "openai", &skill, &mdir, false, "x".into()).unwrap();
+        assert!(!args3.iter().any(|a| a == "--autonomous"), "기본 off");
+        // 복원.
+        std::fs::remove_file(&fake).ok();
+        std::fs::remove_dir_all(&base).ok();
+        match saved_bin {
+            Some(v) => std::env::set_var("REDCELL_PRIME_BIN", v),
+            None => std::env::remove_var("REDCELL_PRIME_BIN"),
+        }
+        match saved_auto {
+            Some(v) => std::env::set_var("REDCELL_PRIME_AUTONOMOUS", v),
+            None => std::env::remove_var("REDCELL_PRIME_AUTONOMOUS"),
         }
     }
 
@@ -4883,6 +5752,66 @@ mod tests {
         let _ = fs::remove_dir_all(&base);
     }
 
+    /// 이벤트 저장소(NDJSON) — write→read 왕복과 빈 파일·빈 줄 내성.
+    #[test]
+    fn events_ndjson_roundtrip() {
+        let base = std::env::temp_dir().join(format!(
+            "redcell-ev-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&base);
+        fs::create_dir_all(&base).unwrap();
+        let p = base.join("s1.events.ndjson");
+        assert!(read_events_file(&p).is_empty(), "없는 파일은 빈 목록");
+        let evs = vec![
+            json!({ "_seq": 0, "type": "note", "text": "첫째" }),
+            json!({ "_seq": 1, "type": "note", "text": "둘째" }),
+        ];
+        write_events_file(&p, &evs);
+        let got = read_events_file(&p);
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[1]["text"], "둘째");
+        // NDJSON 형식 자체 검증 — 한 줄에 한 건.
+        let txt = fs::read_to_string(&p).unwrap();
+        assert_eq!(txt.lines().count(), 2);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 구버전 세션 JSON(embed events) + NDJSON 병용 — backfill 이 양쪽을 모두 읽는다.
+    #[test]
+    fn backfill_reads_legacy_embed_and_ndjson() {
+        let base = std::env::temp_dir().join(format!(
+            "redcell-bf2-{}-{}",
+            std::process::id(),
+            Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        ));
+        let _ = fs::remove_dir_all(&base);
+        let sessions = base.join("sessions");
+        let reports = base.join("reports");
+        fs::create_dir_all(&sessions).unwrap();
+        fs::create_dir_all(&reports).unwrap();
+        // 구버전: 이벤트가 세션 JSON 에 embed.
+        let legacy = json!({
+            "id": "sess-old", "name": "구버전", "host": "h", "created_at": "t", "updated_at": "t",
+            "events": [
+                { "_seq": 0, "type": "note", "text": "# 임베드 리포트", "report": "final" },
+            ]
+        });
+        fs::write(sessions.join("sess-old.json"), serde_json::to_string(&legacy).unwrap()).unwrap();
+        // 신버전: 이벤트가 NDJSON.
+        let fresh = json!({
+            "id": "sess-new", "name": "신버전", "host": "h", "created_at": "t", "updated_at": "t"
+        });
+        fs::write(sessions.join("sess-new.json"), serde_json::to_string(&fresh).unwrap()).unwrap();
+        write_events_file(
+            &sessions.join("sess-new.events.ndjson"),
+            &[json!({ "_seq": 0, "type": "note", "text": "# NDJSON 리포트", "report": "final" })],
+        );
+        assert_eq!(backfill_reports_in_dir(&sessions, &reports), 2, "embed+ndjson 모두 발행");
+        let _ = fs::remove_dir_all(&base);
+    }
+
     /// 경로 열기 — 보고서 폴더 안의 파일만 허용하고, 바깥은 거부한다.
     #[test]
     fn open_target_validates_inside_root() {
@@ -4968,7 +5897,7 @@ mod tests {
     #[test]
     fn followup_instruction_shape() {
         let def = &DEEP_WORKERS[2];
-        let inst = deep_followup_instruction(def, 2, "- [높음] IDOR 신호", "- [단서:w2] sqli", "http://t/");
+        let inst = deep_followup_instruction(def, 2, "- [높음] IDOR 신호", "- [단서:w2] sqli", "http://t/", "");
         assert!(inst.contains("추가 확인 2차"));
         assert!(inst.contains("로그인·권한 점검"));
         assert!(inst.contains("IDOR"));
@@ -4977,6 +5906,227 @@ mod tests {
         // prime 치환 후에도 골격 유지.
         let pa = prime_adapt(inst);
         assert!(pa.contains("python_repl+urllib") && pa.contains("## 추가 발견"));
+    }
+
+    #[test]
+    fn evidence_claim_extraction_shapes() {
+        let text = "### 루트 1 — .env 노출\n진입점: http://t/.env\n검증: [실증] 재현됨\n증거: **SECRET_KEY=abcd1234efgh5678** 설정값이 그대로 노출되었다\n\n### 루트 2 — 가정 시나리오\n증거: [가정] 관리자일 것이다\n";
+        let claims = extract_evidence_claims(text);
+        assert_eq!(claims.len(), 1, "실증+URL+발췌 1건만: {claims:?}");
+        assert_eq!(claims[0].url, "http://t/.env");
+        assert!(claims[0].excerpt.contains("SECRET_KEY="), "마크다운 제거: {}", claims[0].excerpt);
+        // 워커 불릿 형식.
+        let w = "- [높음] .env 노출 http://t/.env — 키 확인 / 근거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n- [정보] 이상 없음 — 범위 확인\n";
+        let wc = extract_evidence_claims(w);
+        assert_eq!(wc.len(), 1, "워커 불릿 1건: {wc:?}");
+        // P-ID.
+        assert_eq!(extract_p_ids("인용 [P-001] 과 [P-042] 중복 [P-001]"), vec!["[P-001]".to_string(), "[P-042]".to_string()]);
+        let valid: HashSet<String> = ["[P-001]".to_string()].into_iter().collect();
+        assert_eq!(unknown_p_ids("인용 [P-001] 과 [P-999]", &valid), vec!["[P-999]".to_string()]);
+        // 발췌 판정.
+        assert!(excerpt_matches("aaa SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출됨 bbb", "", "secret_key=abcd1234efgh5678 설정값이 그대로"));
+        assert!(!excerpt_matches("전혀 다른 본문 내용입니다 여기에", "", "secret_key=abcd1234efgh5678 설정값이 그대로"));
+        assert!(!excerpt_matches("짧음", "", "짧음"), "20자 미만은 false");
+    }
+
+    /// 스텁 서버 대조 — 확인/불일치/인가밖/환각P-ID 전 경로.
+    #[test]
+    fn verify_report_claims_against_stub() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(4) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let Ok(n) = s.read(&mut buf) else { break };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                let body = if path.starts_with("/env") {
+                    "SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다"
+                } else {
+                    "평범한 홈페이지 본문입니다"
+                };
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        let auth = auth::AuthList { allows: vec!["127.0.0.1".into()], ..Default::default() };
+        let valid: HashSet<String> = ["[P-001]".to_string()].into_iter().collect();
+        let text = format!(
+            "### 루트 1 — .env [P-001]\n진입점: http://127.0.0.1:{port}/env\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n\n### 루트 2 — 가짜 [P-999]\n진입점: http://127.0.0.1:{port}/home\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n\n### 루트 3 — 외부\n진입점: http://evil.test/x\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n"
+        );
+        let rep = verify_report_claims(&text, &valid, &auth, "");
+        assert_eq!(rep.checks.len(), 3, "{rep:?}");
+        assert!(matches!(rep.checks[0].verdict, ClaimVerdict::Confirmed), "{:?}", rep.checks[0].verdict);
+        assert!(matches!(rep.checks[1].verdict, ClaimVerdict::Mismatch(_)), "{:?}", rep.checks[1].verdict);
+        assert!(matches!(rep.checks[2].verdict, ClaimVerdict::Skipped(_)), "{:?}", rep.checks[2].verdict);
+        assert_eq!(rep.unknown_ids, vec!["[P-999]".to_string()]);
+        let block = verify_report_block(&rep);
+        assert!(block.contains("기계 대조 결과") && block.contains("환각 P-ID"), "{block}");
+        assert!(verify_note_line(&rep).contains("주장 3건"));
+    }
+
+    #[test]
+    fn verify_skips_disallowed_port() {
+        use std::net::TcpListener;
+        // 포트만 예약 (서빙 안 함 — 게이트가 먼저 걸러 재요청이 나가면 안 된다).
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let auth = auth::AuthList {
+            allows: vec!["127.0.0.1".into()],
+            ports: Some(vec![1]),
+            ..Default::default()
+        };
+        let valid: HashSet<String> = ["[P-001]".to_string()].into_iter().collect();
+        let text = format!(
+            "### 루트 1 — x [P-001]\n진입점: http://127.0.0.1:{port}/env\n검증: [실증]\n증거: SECRET_KEY=abcdef0123456789 설정값 노출\n"
+        );
+        let rep = verify_report_claims(&text, &valid, &auth, "");
+        assert_eq!(rep.checks.len(), 1, "{rep:?}");
+        match &rep.checks[0].verdict {
+            ClaimVerdict::Skipped(reason) => assert!(reason.contains("인가 밖"), "게이트 사유여야 한다: {reason}"),
+            v => panic!("인가 밖 포트는 건너뛰어야 한다: {v:?}"),
+        }
+        assert_eq!(url_port(&format!("http://127.0.0.1:{port}/env")), Some(port));
+        assert_eq!(url_port("https://h.local/x"), Some(443));
+        assert_eq!(url_port("http://h.local/x"), Some(80));
+        assert_eq!(url_port("notaurl"), None);
+    }
+
+    #[test]
+    fn out_of_scope_result_detection() {
+        let auth = auth::AuthList {
+            allows: vec!["demo.vulnlab.local".into()],
+            ..Default::default()
+        };
+        // 인가 안 + 밖 혼합 → 밖만.
+        let hits = out_of_scope_hosts_in_text(
+            "200 OK https://demo.vulnlab.local/a fetched http://evil-exfil.test/collect",
+            &auth,
+        );
+        assert_eq!(hits, vec!["evil-exfil.test".to_string()]);
+        // 인가 안만 → 빈 목록.
+        assert!(out_of_scope_hosts_in_text("https://demo.vulnlab.local/ok", &auth).is_empty());
+        // 호스트 없음 → 빈 목록.
+        assert!(out_of_scope_hosts_in_text("just some text 200", &auth).is_empty());
+        // YAML scope → 해석 불가 빈 목록.
+        let yaml = auth::AuthList { yaml: true, ..Default::default() };
+        assert!(out_of_scope_hosts_in_text("http://evil-exfil.test/x", &yaml).is_empty());
+        // ports 지시자: 인가 호스트의 인가 밖 포트도 경고 (host:port 표시).
+        let pauth = auth::AuthList {
+            allows: vec!["demo.vulnlab.local".into()],
+            ports: Some(vec![443]),
+            ..Default::default()
+        };
+        assert_eq!(
+            out_of_scope_hosts_in_text("fetched https://demo.vulnlab.local:3306/dump", &pauth),
+            vec!["demo.vulnlab.local:3306".to_string()]
+        );
+        assert!(out_of_scope_hosts_in_text("fetched https://demo.vulnlab.local/a", &pauth).is_empty());
+    }
+
+    #[test]
+    fn findings_handoff_shapes() {
+        // 파일명 살균.
+        assert_eq!(findings_filename("w1"), "findings-w1.json");
+        assert_eq!(findings_filename("rc-abc/w2"), "findings-rc-abcw2.json");
+        // 저장 블록 — 경로 있을 때만.
+        assert!(findings_save_block("", false).is_empty());
+        let b = findings_save_block("/tmp/x/findings-w1.json", false);
+        assert!(b.contains("/tmp/x/findings-w1.json") && b.contains("severity"), "{b}");
+        let r = findings_save_block("/tmp/x/f.json", true);
+        assert!(r.contains("덮어쓰기로 갱신"), "{r}");
+        // 워커 지시문에 경로 반영.
+        let def = &DEEP_WORKERS[0];
+        let inst = deep_worker_instruction(def, "http://t/", "", "", "", "/tmp/x/findings-w1.json");
+        assert!(inst.contains("/tmp/x/findings-w1.json") && inst.contains("## 워커 발견"));
+        let inst0 = deep_worker_instruction(def, "http://t/", "", "", "", "");
+        assert!(!inst0.contains("구조화 저장"), "빈 경로면 블록 생략");
+    }
+
+    #[test]
+    fn collect_findings_block_shapes() {
+        let base = std::env::temp_dir().join(format!("rc-find-{}", std::process::id()));
+        let prime_id = base.join("psess");
+        let sess = base.join("sess");
+        // prime: w1 파일만 존재.
+        let w1 = prime_id.join("w1").join("work");
+        std::fs::create_dir_all(&w1).unwrap();
+        std::fs::write(w1.join("findings-w1.json"), r#"[{"severity":"높음","title":"X"}]"#).unwrap();
+        let b = collect_findings_block_in_dirs(&prime_id, &sess, Engine::Prime, "q");
+        assert!(b.contains("구조화 발견") && b.contains("높음"), "{b}");
+        // pi: piq 접두 파일만 수집.
+        std::fs::create_dir_all(&sess).unwrap();
+        std::fs::write(sess.join("findings-q-w2.json"), r#"[{"severity":"중간"}]"#).unwrap();
+        std::fs::write(sess.join("findings-other-w3.json"), r#"[{"severity":"치명"}]"#).unwrap();
+        let b2 = collect_findings_block_in_dirs(&prime_id, &sess, Engine::Pi, "q");
+        assert!(b2.contains("중간") && !b2.contains("치명"), "{b2}");
+        // 파일 없으면 빈 문자열 (텍스트 폴백).
+        let b3 = collect_findings_block_in_dirs(&base.join("없음"), &base.join("없음2"), Engine::Prime, "q");
+        assert!(b3.is_empty());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    #[test]
+    fn temp_window_and_taskkill_shapes() {
+        let dir = std::env::temp_dir().join(format!("rc-tmpw-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("loot.txt"), "x").unwrap();
+        std::fs::write(dir.join("redcell-prompt-1"), "x").unwrap();
+        let past = std::time::SystemTime::now() - std::time::Duration::from_secs(3600);
+        let hits = temp_window_files_in(&dir, past);
+        assert_eq!(hits, vec!["loot.txt".to_string()], "자사 패턴 제외: {hits:?}");
+        let future = std::time::SystemTime::now() + std::time::Duration::from_secs(3600);
+        assert!(temp_window_files_in(&dir, future).is_empty(), "미래 기준 빈 목록");
+        assert!(temp_window_files_in(&dir.join("없음"), past).is_empty());
+        assert_eq!(taskkill_tree_args(1234), vec!["/PID".to_string(), "1234".to_string(), "/T".to_string(), "/F".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn prime_spawn_stagger_shapes() {
+        let _g = ENV_LOCK.lock().unwrap();
+        assert_eq!(worker_spawn_index("w1"), 0);
+        assert_eq!(worker_spawn_index("w5"), 4);
+        assert_eq!(worker_spawn_index("merge"), 0);
+        let saved = std::env::var_os("REDCELL_PRIME_SPAWN_STAGGER_MS");
+        std::env::remove_var("REDCELL_PRIME_SPAWN_STAGGER_MS");
+        assert_eq!(prime_spawn_stagger_ms(), 1500);
+        std::env::set_var("REDCELL_PRIME_SPAWN_STAGGER_MS", "0");
+        assert_eq!(prime_spawn_stagger_ms(), 0);
+        std::env::set_var("REDCELL_PRIME_SPAWN_STAGGER_MS", "abc");
+        assert_eq!(prime_spawn_stagger_ms(), 1500, "파싱 실패 기본값");
+        match saved {
+            Some(v) => std::env::set_var("REDCELL_PRIME_SPAWN_STAGGER_MS", v),
+            None => std::env::remove_var("REDCELL_PRIME_SPAWN_STAGGER_MS"),
+        }
+    }
+
+    #[test]
+    fn prime_adapt_deep_adds_recon_discipline() {
+        let deep = prime_adapt_deep("web_fetch 로 확인".into());
+        assert!(deep.contains("python_repl+urllib"), "기본 치환 유지");
+        assert!(deep.contains("python_repl") && deep.contains("## 심층 정찰 규율"), "정찰 규율 포함");
+        assert!(deep.contains("한 python_repl 블록에 모아라"));
+        let chat = prime_adapt("web_fetch 로 확인".into());
+        assert!(!chat.contains("심층 정찰 규율"), "자유 채팅에는 규율 미부착");
+    }
+
+    #[test]
+    fn prime_tooling_v2_directives() {
+        for needle in [
+            "python_repl",           // 유일 툴 선언
+            "bash(",                 // 병렬 패턴
+            "curl -sS -m 10",        // curl 규율
+            "handle.kill()",         // 타임아웃 규율
+            "edit.run",              // 결과물 파일 규칙
+            "websearch.run",         // 금지 명시
+            "rlm.spawn",             // 금지 명시
+            "리터럴로 쓴다",         // 게이트 감사 가능성
+        ] {
+            assert!(PRIME_TOOLING.contains(needle), "지침 누락: {needle}");
+        }
     }
 
     /// 회귀: lge-aigw 기본 모델은 보안 진단 콘텐츠를 통과시키는 서빙이어야 한다.

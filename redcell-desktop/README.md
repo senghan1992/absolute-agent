@@ -110,7 +110,7 @@ prime-agent 가 그 대상에서 작업(조사·정보 수집·파일 추출·�
 
 ## 동작 원리
 
-이 앱은 **pi-coding-agent(1.3.0) / prime-agent(0.10)를 감싼 표시/세션 계층**이다.
+이 앱은 **pi-coding-agent(1.4.0) / prime-agent(0.10)를 감싼 표시/세션 계층**이다.
 공격력을 새로 만들지 않는다. 세션의 `engine` 값에 따라 실행 엔진이 갈린다.
 
 ```
@@ -124,7 +124,7 @@ redcell-desktop (Tauri, Rust)
 ```
 
 엔진 기준: pi CLI 진입점은 정식 번들(`dist/bundle/cli.js`, 구 `dist/cli.js` 폴백 유지),
-이벤트는 pi 1.3 json 프로토콜(`text_delta`·`tool_execution_start/end`·`message_end.stopReason`·
+이벤트는 pi 1.4 json 프로토콜(`text_delta`·`tool_execution_start/end`·`message_end.stopReason`·
 `agent_settled`)로 파싱한다. prime-agent(Rust 하네스)는 라이브러리 임베딩을 제공하지 않아
 직접 실행 엔진으로도 쓴다 — 세션마다 `pi`/`prime-agent` 를 고른다(상단 셀렉트·첫 화면).
 `detect_engines` 로 설치 상태·버전을 감지해 설정 화면과 첫 화면에 표시한다.
@@ -135,7 +135,7 @@ prime-agent 엔진        prime-agent --mode json --print … --skill <스코프
 ```
 
 - **pi**: RedCell 확장을 `-e` 로 명시 로드 — `tool_call` 훅이 호출 **전에** 인가를 검사해
-  차단한다(사전 차단). 방법론은 `before_agent_start` 로 시스템 프롬프트에 주입한다(pi 1.3 방식).
+  차단한다(사전 차단). 방법론은 `before_agent_start` 로 시스템 프롬프트에 주입한다(pi 1.4 방식).
 - **prime-agent(Rust 하네스 직접 실행)**: 확장 훅이 없으므로 4중 방어로 scope 를 강제한다.
   ① 실행마다 인가 목록을 채운 스코프 스킬(`SKILL.md`)을 `--skill` 로 주입,
   ② **선행 차단**(Linux): `LD_PRELOAD` egress 필터(`netfilter`, `connect`/`getaddrinfo`

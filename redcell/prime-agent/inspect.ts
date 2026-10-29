@@ -41,6 +41,21 @@ function isNoise(d: string): boolean {
   return false;
 }
 
+const NET_TOKENS = [
+  "fetch", "web", "http", "curl", "wget", "python", "repl", "exec", "bash", "shell", "run",
+  "command", "code", "script", "request", "socket", "net", "dns", "resolve", "browser",
+  "navigate", "goto", "tcp", "udp", "connect", "download", "upload", "terminal",
+];
+
+/**
+ * 네트워크 도달 가능 툴 판정 (데스크톱 Rust 게이트의 tool_may_reach_network 와 동일 목록).
+ * tool_call 인자 해석 불가 시 fail-closed 차단 여부 결정에만 쓴다.
+ */
+export function mayReachNetwork(toolName: string): boolean {
+  const n = toolName.toLowerCase();
+  return NET_TOKENS.some((k) => n.includes(k));
+}
+
 /** 툴 이름/인자로 액션 성격 추정 → ScopeGuard 의 destructive/dos 판정에 사용 */
 export function classifyIntent(toolName: string, argsStr: string): NonNullable<Target["intent"]> {
   const t = `${toolName} ${argsStr}`.toLowerCase();

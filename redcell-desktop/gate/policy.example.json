@@ -1,0 +1,16 @@
+{
+  "_doc": "RedCell 배포 게이트 정책 예시 — fail_on 심각도 + 명시적 억제 (사유·승인자·만료 필수) + 인증 필수 + CVSS 환경 지표",
+  "fail_on": ["critical", "high"],
+  "require_auth": true,
+  "cvss_env": {"cr": "H", "ir": "H", "ar": "M"},
+  "suppressions": [
+    {
+      "category": "headers",
+      "target_contains": "https://myservice.internal/",
+      "reason": "예시: CSP는 다음 스프린트 적용 예정 (보안팀 합의)",
+      "approver": "sec-lead",
+      "until": "2027-06-30",
+      "note": "예시 항목 — 실사용 시 교체"
+    }
+  ]
+}

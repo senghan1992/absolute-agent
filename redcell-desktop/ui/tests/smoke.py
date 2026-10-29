@@ -49,7 +49,7 @@ def new_session_with_target(page, host="demo.vulnlab.local", port="8080"):
 
 def wait_badge(page, want, timeout_ms=45000):
     page.wait_for_function(
-        f"document.getElementById('statusBadge').textContent.trim() === '{want}'",
+        f"document.getElementById('statusBadge').dataset.status === '{want}'",
         timeout=timeout_ms,
     )
 
@@ -98,6 +98,23 @@ def main():
             res_cards = page.locator("#resultsBody .md-card").count()
             check("core: results view has report", results_open or res_cards > 0,
                   f"active={results_open} cards={res_cards}")
+            check("core: run separator inserted", page.locator("#capBody tr.run-sep").count() >= 1)
+            check("core: badge text Korean", page.locator("#statusBadge").inner_text().strip() == "완료",
+                  page.locator("#statusBadge").inner_text().strip())
+            # memory panel roundtrip (preview mock is stateful)
+            page.locator('.subtab[data-view="live"]').click()
+            page.wait_for_timeout(300)
+            page.locator("#memPanel summary").click()
+            page.wait_for_timeout(200)
+            page.fill("#memText", "smoke-memo-1234")
+            page.click("#memAddBtn")
+            page.wait_for_timeout(400)
+            mem_items = page.locator("#memList .mem-item").count()
+            check("core: memory add shows item", mem_items >= 1, f"items={mem_items}")
+            if mem_items:
+                page.locator("#memList .mem-del").first.click()
+                page.wait_for_timeout(400)
+            check("core: memory delete clears item", page.locator("#memList .mem-item").count() == 0)
             page.click('.subtab[data-view="live"]')
             page.wait_for_timeout(300)
 

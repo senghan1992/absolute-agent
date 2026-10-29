@@ -1,0 +1,105 @@
+name: Engine Compat
+
+# pi / prime-agent 업스트림 추종 게이트.
+# engines.json 핀 변경·매주 스케줄에 돌며, known_good 버전과의 호환성을 검증한다.
+on:
+  push:
+    paths:
+      - "redcell-desktop/engines.json"
+      - "redcell-desktop/src-tauri/**"
+      - "redcell/prime-agent/**"
+      - ".github/workflows/engine-compat.yml"
+  schedule:
+    - cron: "17 3 * * 1" # 매주 월요일 — latest 조회 포함
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: engine-compat-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compat:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: redcell-desktop/src-tauri
+
+      - name: Read engine pins
+        id: pins
+        shell: bash
+        run: |
+          PI_PIN=$(jq -r '.pi.pinned' redcell-desktop/engines.json)
+          PRIME_PIN=$(jq -r '.prime_agent.pinned' redcell-desktop/engines.json)
+          echo "pi=$PI_PIN" >> "$GITHUB_OUTPUT"
+          echo "prime=$PRIME_PIN" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned pi
+        shell: bash
+        run: npm i -g "@earendil-works/pi-coding-agent@${{ steps.pins.outputs.pi }}"
+
+      - name: pi flag snapshot
+        shell: bash
+        run: |
+          pi --help > /tmp/pi-help.txt 2>&1 || node "$(npm root -g)/@earendil-works/pi-coding-agent/dist/bundle/cli.js" --help > /tmp/pi-help.txt 2>&1
+          for f in --mode --session-id --provider --model --api-key; do
+            grep -q -- "$f" /tmp/pi-help.txt || { echo "MISSING pi flag: $f"; exit 1; }
+          done
+          pi --version
+
+      - name: Install pinned prime-agent
+        shell: bash
+        run: |
+          TAG="v${{ steps.pins.outputs.prime }}"
+          case "${{ matrix.os }}" in
+            ubuntu-latest) ASSET="prime-agent-linux-x64.tar.gz" ;;
+            windows-latest) ASSET="prime-agent-windows-x64.zip" ;;
+          esac
+          URL="https://github.com/PrimeIntellect-ai/prime-agent/releases/download/${TAG}/${ASSET}"
+          echo "downloading $URL"
+          curl -fsSL -o /tmp/pa-pkg "$URL" || { echo "release asset missing: $URL"; exit 1; }
+          mkdir -p /tmp/pa && tar -xzf /tmp/pa-pkg -C /tmp/pa 2>/dev/null || unzip -o /tmp/pa-pkg -d /tmp/pa
+          find /tmp/pa -name "prime-agent*" -type f -exec chmod +x {} \;
+          echo "/tmp/pa" >> "$GITHUB_PATH"
+          find /tmp/pa -maxdepth 3 -name "prime-agent*" | head
+
+      - name: prime-agent flag snapshot + contract probe
+        shell: bash
+        run: |
+          BIN=$(find /tmp/pa -maxdepth 3 -name "prime-agent*" -type f | head -n 1)
+          "$BIN" --help > /tmp/pa-help.txt 2>&1
+          for f in --mode --print --offline --skill --session-dir --continue --provider --model --api-key --autonomous --autonomous-gate --autonomous-max-turns; do
+            grep -q -- "$f" /tmp/pa-help.txt || { echo "MISSING prime flag: $f"; exit 1; }
+          done
+          "$BIN" --version
+          # 계약 프로브: 가짜 키로 usage 오류 vs 설정 오류를 구분한다.
+          set +e
+          OUT=$("$BIN" --mode json --print "ping" --provider openai --model gpt-test --api-key REDCELL_FAKE_KEY 2>&1 | head -c 2000)
+          echo "$OUT" | head -c 500
+          echo "$OUT" | grep -qiE "no models available|api key|unauthorized|401|403" && echo "contract: auth-layer reached (expected with fake key)"
+
+      - name: Backend tests (protocol fixtures)
+        shell: bash
+        run: cd redcell-desktop/src-tauri && cargo test -- --skip live_sweep_against_stub --skip live_sweep_with_cookie
+
+      - name: Check npm latest (schedule only)
+        if: github.event_name == 'schedule'
+        shell: bash
+        run: |
+          LATEST=$(npm view @earendil-works/pi-coding-agent version)
+          echo "npm latest pi: $LATEST (pinned: ${{ steps.pins.outputs.pi }})"
+          test "$LATEST" = "${{ steps.pins.outputs.pi }}" || echo "::warning::pi update available: $LATEST (see redcell-desktop/docs/ENGINE_UPGRADE.md)"

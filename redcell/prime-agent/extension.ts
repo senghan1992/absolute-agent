@@ -29,7 +29,7 @@ import { loadAuthorization } from "../src/scope/load-auth.js";
 import { DEFAULT_LIST_FILE } from "../src/scope/ip-list.js";
 import { redcellHome } from "../src/config.js";
 import { httpProbe } from "../src/tools/http-probe.js";
-import { extractHosts, classifyIntent } from "./inspect.js";
+import { extractHosts, classifyIntent, mayReachNetwork } from "./inspect.js";
 
 const AUTH_CANDIDATES = [
   process.env.REDCELL_AUTH,
@@ -87,6 +87,18 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
   let guard: ScopeGuard | null = null;
   let authError: string | null = null;
 
+  // 툴 등록 — registerTool API 가 없으면 조용히 넘어가지 않고 경고한다.
+  // (pi 버전 변경으로 API 가 바뀌면 지시문은 web_fetch 을 쓰라 하고 툴은 없는
+  // 상태가 되므로, 등록 실패는 반드시 로그에 남긴다.)
+  const registerOrWarn = (name: string, tool: unknown): void => {
+    const reg = (pi as unknown as { registerTool?: (t: unknown) => void }).registerTool;
+    if (typeof reg === "function") {
+      reg.call(pi, tool);
+    } else {
+      console.warn(`[redcell] registerTool API 없음 — ${name} 미등록 (pi 버전·호환 확인 필요)`);
+    }
+  };
+
   const ensureGuard = async (): Promise<void> => {
     if (guard || authError) return;
     for (const p of AUTH_CANDIDATES) {
@@ -101,8 +113,8 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
     authError = `인가 파일을 찾을 수 없습니다 (시도: ${AUTH_CANDIDATES.join(", ")})`;
   };
 
-  // 1) 방법론 시스템 프롬프트 주입 — pi 1.3 방식(before_agent_start 반환 교체).
-  //    구 appendSystemPrompt 는 1.3 에 없어 조용히 무시되므로 반드시 이 이벤트로 주입한다.
+  // 1) 방법론 시스템 프롬프트 주입 — pi 1.4 방식(before_agent_start 반환 교체).
+  //    구 appendSystemPrompt 는 1.x 에 없어 조용히 무시되므로 반드시 이 이벤트로 주입한다.
   pi.on("before_agent_start", async (event: any) => {
     const base = String(event?.systemPrompt ?? "");
     if (base.includes("RedCell — 인가된 대상 전용 AI 조수")) return;
@@ -124,13 +136,24 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
 
     // 이 호출이 건드리는 대상 호스트들을 추출(전용 툴의 host 인자 + bash/코드 문자열 스캔).
     // pi 0.8x 의 tool_call 이벤트는 {toolName, input:{...}} 형태다.
-    const argsStr = JSON.stringify(event?.input ?? event?.arguments ?? event?.args ?? {});
+    const rawInput = event?.input ?? event?.arguments ?? event?.args;
+    const argsStr = JSON.stringify(rawInput ?? {});
     const toolName = String(event?.toolName ?? event?.name ?? event?.tool ?? "");
     const hosts = extractHosts(argsStr);
     const intent = classifyIntent(toolName, argsStr);
 
     // 대상이 식별되지 않는 순수 로컬 작업(파일읽기 등)은 통과.
-    if (hosts.length === 0) return;
+    // 단 fail-closed: 네트워크 도달 가능 툴인데 인자가 비어 해석 불가하면
+    // (프로토콜 변경 등) 대상을 확인할 수 없으므로 차단한다.
+    if (hosts.length === 0) {
+      if ((rawInput === undefined || rawInput === null) && mayReachNetwork(toolName)) {
+        return {
+          block: true,
+          reason: `RedCell scope 위반: ${toolName} 호출 인자를 해석할 수 없어 대상을 확인할 수 없습니다 (pi 프로토콜 변경 가능). 안전을 위해 차단합니다.`,
+        };
+      }
+      return;
+    }
 
     for (const host of hosts) {
       const target: Target = { host, intent };
@@ -146,7 +169,8 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
   });
 
   // 3) 인가된 대상 전용 정찰 툴.
-  pi.registerTool?.(
+  registerOrWarn(
+    "recon_http",
     defineTool({
       name: "recon_http",
       label: "RedCell HTTP Recon",
@@ -186,7 +210,8 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
   const webFetchErr = (msg: string) =>
     ({ content: [{ type: "text", text: msg }], details: { blocked: true }, isError: true }) as any;
 
-  pi.registerTool?.(
+  registerOrWarn(
+    "web_fetch",
     defineTool({
       name: "web_fetch",
       label: "웹 페이지 조회(인가 대상 전용)",
@@ -347,7 +372,8 @@ export default async function redcell(pi: ExtensionAPI): Promise<void> {
 
   // 4b) 인가 대상의 여러 경로를 한 번에 프로브하는 정찰 툴 — URL 전용 진단의 공격 표면 확보용.
   //     전부 비파괴 GET/HEAD 이고, 호스트·리다이렉트 홉마다 scope 를 재검사한다.
-  pi.registerTool?.(
+  registerOrWarn(
+    "recon_list",
     defineTool({
       name: "recon_list",
       label: "경로 정찰(인가 대상 전용)",

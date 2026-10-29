@@ -146,6 +146,18 @@
             <button class="lf-chip" data-f="alert" role="tab" aria-selected="false">차단·오류</button>
             <span class="lf-count" id="liveFilterCount"></span>
           </div>
+          <details id="memPanel" class="mem-panel">
+            <summary>과거 메모 <span id="memCount" class="mem-count"></span></summary>
+            <div id="memList" class="mem-list"></div>
+            <div class="mem-add">
+              <input id="memText" class="sh-input" placeholder="이 대상에 남길 메모 (다음 진단에 자동 반영)" maxlength="2000" />
+              <select id="memScope" class="sh-input" title="범위">
+                <option value="host">이 주소만</option>
+                <option value="global">전체 대상</option>
+              </select>
+              <button id="memAddBtn" class="btn btn-diag" title="메모 저장">저장</button>
+            </div>
+          </details>
           <div class="capture-wrap">
           <div class="capture">
             <table class="cap-table">

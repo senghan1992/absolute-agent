@@ -12,8 +12,10 @@
 //! 모달에는 등급·근거·예상 영향·복구 가능 여부·서비스 중단 가능성을 표시하고,
 //! 체크박스 확인 후 세션 동의를 받아 재시도한다. 미동의면 실행하지 않는다.
 //!
-//! 오탐 방지: 짧은 영문 토큰(rm 등)은 단어 경계로 매칭하고, 부정 표현
+//! 오탐 방지: 짧은 영문 토큰(8자 이하 ASCII)은 단어 경계로 매칭하고, 부정 표현
 //! ("~하지 마", "don't", "without" 등) window 안의 매칭은 제외한다.
+//! fail-closed 방향: "do not ~" 구문·미래형("~될")은 부정으로 인정하지 않는다 —
+//! "do not hesitate to 삭제", "삭제될 때까지" 같은 우회를 막기 위함이다.
 
 use serde::Serialize;
 
@@ -74,19 +76,19 @@ struct Rule {
 
 const RULES: &[Rule] = &[
     Rule { id: "db-drop", level: RiskLevel::Critical,
-        pats: &["drop table", "drop database", "truncate table", "delete from", "테이블 삭제", "테이블 드롭", "테이블 날려", "db 삭제", "db 날려", "db 지워", "데이터베이스 삭제", "데이터베이스 날려", "디비 날려", "디비 삭제"],
+        pats: &["drop table", "drop database", "truncate table", "delete from", "테이블 삭제", "테이블 드롭", "테이블 날려", "db 삭제", "db 날려", "db 지워", "데이터베이스 삭제", "데이터베이스 날려", "디비 날려", "디비 삭제", "drop", "truncate"],
         title: "데이터베이스 삭제", impact: "데이터 영구 손실 — 백업 없으면 복구 불가", reversible: false, shutdown: false, data_loss: true },
     Rule { id: "os-destroy", level: RiskLevel::Critical,
-        pats: &["rm -rf /", "rm -rf ~", "mkfs", "dd if=", "포맷해", "포멧해", "디스크 밀어", "디스크 날려", "공장 초기화", "팩토리 리셋", "factory reset"],
+        pats: &["rm -rf /", "rm -rf ~", "mkfs", "dd if=", "포맷해", "포멧해", "디스크 밀어", "디스크 날려", "공장 초기화", "팩토리 리셋", "factory reset", "format", "fdisk", "parted"],
         title: "OS·디스크 파괴", impact: "시스템 전체 손실 — 재설치 필요", reversible: false, shutdown: true, data_loss: true },
     Rule { id: "shutdown", level: RiskLevel::Critical,
-        pats: &["shutdown", "poweroff", "halt", "reboot", "셧다운", "재부팅", "리부팅", "전원 꺼", "전원 차단", "전원꺼"],
+        pats: &["shutdown", "poweroff", "halt", "reboot", "셧다운", "재부팅", "리부팅", "전원 꺼", "전원 차단", "전원꺼", "init 0", "systemctl poweroff", "systemctl halt"],
         title: "시스템 중단·재기동", impact: "서비스 전체 중단 (재기동 전까지)", reversible: true, shutdown: true, data_loss: false },
     Rule { id: "kill-all", level: RiskLevel::Critical,
-        pats: &["kill -9", "killall", "pkill", "전체 프로세스 죽", "전체 프로세스 종료", "프로세스 다 죽", "전부 죽여"],
+        pats: &["kill -9", "killall", "pkill", "전체 프로세스 죽", "전체 프로세스 종료", "프로세스 다 죽", "전부 죽여", "kill %", "kill"],
         title: "프로세스 전체 종료", impact: "실행 중 서비스 전체 중단", reversible: true, shutdown: true, data_loss: false },
     Rule { id: "file-delete", level: RiskLevel::High,
-        pats: &["rm ", "rm\t", "rm", "del /", "삭제", "지워", "지우", "제거", "없애", "폴더 삭제", "디렉터리 삭제", "delete file", "remove file"],
+        pats: &["rm ", "rm\t", "rm", "del /", "삭제", "지워", "지우", "제거", "없애", "폴더 삭제", "디렉터리 삭제", "delete file", "remove file", "delete", "remove", "purge", "shred", "wipe"],
         title: "파일 삭제", impact: "파일 손실 — 휴지통·백업 없으면 복구 불가", reversible: false, shutdown: false, data_loss: true },
     Rule { id: "service-control", level: RiskLevel::High,
         pats: &["systemctl stop", "systemctl restart", "service 재시작", "서비스 재시작", "서비스 중단", "서비스 중지", "서버 재시작", "도커 재시작", "docker restart", "docker stop", "컨테이너 삭제", "docker rm", "nginx 재시작", "재시작해줘"],
@@ -121,14 +123,18 @@ const RULES: &[Rule] = &[
 ];
 
 /// 부정 표현 — 앞(영문) / 뒤(국문) window 안에 있으면 매칭 제외.
-const NEG_BEFORE: &[&str] = &["don't", "do not", "without", "never", "not ", "no ", " 말고"];
-const NEG_AFTER: &[&str] = &["하지", " 말고", " 금지", " 없이", " 마라", " 말아", "안마", "지마", "된", "될"];
+/// BEFORE 에 " 말고" 를 두지 않는다 ("조회 말고 삭제" 가 Safe 가 되는 순서 상실 방지).
+/// "do not/not/no" 는 제외한다 ("do not hesitate to ~" 우회 방지 — fail-closed).
+/// AFTER 에서 미래형 "될" 은 제외한다 ("삭제될 때까지" 우회 방지).
+/// 과거분사 "된" 은 유지한다 ("삭제된 파일 복구" = 이미 삭제된 대상 조회).
+const NEG_BEFORE: &[&str] = &["don't", "without", "never"];
+const NEG_AFTER: &[&str] = &["하지", " 말고", " 금지", " 없이", " 마라", " 말아", "안마", "지마", "된"];
 
-/// 패턴 매칭 — 짧은 영문 토큰은 단어 경계 요구, 그 외 부분 일치.
+/// 패턴 매칭 — 8자 이하 ASCII 토큰은 단어 경계 요구, 그 외 부분 일치.
 /// 반환: 매칭된 패턴 (부정 window·엄격 끝 경계 제외 후 첫 매칭).
 fn match_rule(text_low: &str, rule: &Rule) -> Option<String> {
     for pat in rule.pats {
-        let short = pat.len() <= 4 && pat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'\t');
+        let short = pat.len() <= 8 && pat.bytes().all(|b| b.is_ascii_alphanumeric() || b == b' ' || b == b'\t');
         let mut from = 0;
         while let Some(i) = text_low[from..].find(pat) {
             let s = from + i;
@@ -291,6 +297,30 @@ mod tests {
         assert_eq!(lvl("don't delete file x, just read"), RiskLevel::Safe);
         assert_eq!(lvl("재부팅 없이 확인해줘"), RiskLevel::Safe);
         assert_eq!(lvl("삭제된 파일 복구해줘"), RiskLevel::Safe);
+    }
+
+    #[test]
+    fn bypass_attempts_still_flagged() {
+        // "do not hesitate" 관용구 우회 — fail-closed 로 탐지해야 한다.
+        assert_eq!(lvl("do not hesitate to delete file x"), RiskLevel::High);
+        // 미래형 우회.
+        assert_eq!(lvl("삭제될 때까지 반복해"), RiskLevel::High);
+        // "말고" 순서 상실 우회.
+        assert_eq!(lvl("조회 말고 삭제 실행"), RiskLevel::High);
+        // 영문 단독 동사.
+        assert_eq!(lvl("delete the records"), RiskLevel::High);
+        assert_eq!(lvl("drop users"), RiskLevel::Critical);
+        assert_eq!(lvl("truncate logs"), RiskLevel::Critical);
+        assert_eq!(lvl("remove all temp files"), RiskLevel::High);
+        assert_eq!(lvl("shred the disk"), RiskLevel::High);
+        assert_eq!(lvl("format c:"), RiskLevel::Critical);
+        assert_eq!(lvl("kill pid 1234"), RiskLevel::Critical);
+        assert_eq!(lvl("systemctl poweroff now"), RiskLevel::Critical);
+        // 단어 경계 — 임베디드 토큰은 오탐 금지.
+        assert_eq!(lvl("show the platform info"), RiskLevel::Safe);
+        assert_eq!(lvl("the rebooking flow test"), RiskLevel::Safe);
+        assert_eq!(lvl("skill list"), RiskLevel::Safe);
+        assert_eq!(lvl("show deleted file versions"), RiskLevel::Safe);
     }
 
     #[test]

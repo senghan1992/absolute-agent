@@ -18,6 +18,22 @@ const PHASE_ORDER = ["recon", "enumerate", "exploit", "post"];
 
 const $ = (id) => document.getElementById(id);
 const cur = () => sessions.find((s) => s.id === activeId) || null;
+// get_session(전체) 결과를 sessions 배열에 반영하고 "전체 로드됨" 표시를 남긴다.
+// list_sessions 는 요약(이벤트·채팅 제외)만 주므로, 전체가 필요한 화면은
+// 이 표시를 보고 필요한 세션만 로드한다(ensureAllFull).
+function applySession(fresh) {
+  if (!fresh) return null;
+  fresh.__full = true;
+  const i = sessions.findIndex((x) => x.id === fresh.id);
+  if (i >= 0) sessions[i] = fresh;
+  return fresh;
+}
+async function ensureAllFull() {
+  const need = sessions.filter((s) => !s.__full);
+  if (!need.length) return;
+  const results = await Promise.all(need.map((s) => invoke("get_session", { id: s.id }).catch(() => null)));
+  results.forEach((fresh) => applySession(fresh));
+}
 const esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
 const clock = (ms) => { try { return new Date(ms).toLocaleTimeString("en-GB", { hour12: false }); } catch { return ""; } };
 const hhmm = (ts) => {
@@ -102,10 +118,12 @@ function renderActive() {
   $("shGoal") && ($("shGoal").value = s.goal || "");
   const psel = $("shProvider");
   if (psel) {
+    // 이전 세션의 임시 항목 제거 (세션 전환 시 (저장됨) 잔류 방지).
+    psel.querySelectorAll("option[data-temp]").forEach((o) => o.remove());
     const want = s.provider || settings.default_provider || "";
     const clean = want === "mock" ? "" : want; // 레거시 mock 값은 선택지로 삼지 않음
     if (clean && ![...psel.options].some((o) => o.value === clean)) {
-      psel.insertAdjacentHTML("beforeend", `<option value="${esc(clean)}">${esc(clean)} (저장됨)</option>`);
+      psel.insertAdjacentHTML("beforeend", `<option value="${esc(clean)}" data-temp="1">${esc(clean)} (저장됨)</option>`);
     }
     psel.value = clean;
   }
@@ -121,6 +139,7 @@ function renderActive() {
   }
   setBadge(s.status);
   renderDangerBtn(s);
+  loadMem();
 
   renderCapture(s);
   renderStepper(s);
@@ -194,7 +213,7 @@ async function cancelDangerPending(note) {
   if (note && s) {
     await invoke("append_chat", { id: s.id, role: "system", content: "위험한 작업은 보류했습니다 — 동의 없이 실행하지 않았습니다." });
     const fresh = await invoke("get_session", { id: s.id });
-    if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
+    if (fresh) { applySession(fresh); }
     renderChat();
   }
 }
@@ -220,9 +239,11 @@ async function confirmDanger() {
   if (retry) { try { await retry(); } catch (e) { console.error(e); } }
 }
 
+const STATUS_KO = { idle: "대기", running: "실행 중", done: "완료", error: "오류", stopped: "중지됨" };
 function setBadge(status) {
   const b = $("statusBadge");
-  b.textContent = status;
+  b.textContent = STATUS_KO[status] || status;
+  b.dataset.status = status;
   b.className = "badge badge-" + status;
   const running = status === "running";
   // 단일 액션 버튼(진단 시작)이 실행 중이면 '중지'로 뒤집힌다. 실행/중지 직관만 노출한다.
@@ -313,13 +334,27 @@ function syncSendBtn() {
   if (ci && btn) btn.disabled = !ci.value.trim();
 }
 
+// 실행 구분선 — 세션별 all 인덱스 배열. 재실행해도 기록은 유지하고 구분선만 꽂는다.
+const runMarks = {};
+function markRunStart(s) {
+  if (!s) return;
+  const n = eventsOf(s).filter((e) => e.type !== "worker_status").length;
+  (runMarks[s.id] = runMarks[s.id] || []).push(n);
+}
 function renderCapture(s) {
   if (resultsTabActive()) renderResults();
   renderWorkerBar(s);
   const body = $("capBody");
   const all = eventsOf(s).filter((e) => e.type !== "worker_status"); // 워커 상태는 상단 칩으로
   const evs = all.filter(rowPassesFilter);
-  body.innerHTML = evs.map((e, i) => rowHtml(e, i)).join("");
+  const marks = new Set(runMarks[s.id] || []);
+  let html = "";
+  all.forEach((e, ai) => {
+    if (!rowPassesFilter(e)) return;
+    if (marks.has(ai)) html += `<tr class="run-sep"><td colspan="6">── 새 실행 ──</td></tr>`;
+    html += rowHtml(e, ai);
+  });
+  body.innerHTML = html;
   const emptyEl = $("capEmpty");
   emptyEl.style.display = evs.length ? "none" : "block";
   emptyEl.textContent = (!evs.length && all.length)
@@ -748,7 +783,7 @@ function milestoneChat(e) {
 async function pushAssistant(id, content) {
   await invoke("append_chat", { id, role: "assistant", content });
   const fresh = await invoke("get_session", { id });
-  if (fresh) { const i = sessions.findIndex((x) => x.id === id); if (i >= 0) sessions[i] = fresh; }
+  applySession(fresh);
   if (id === activeId) renderChat();
 }
 
@@ -792,6 +827,11 @@ function onLiveEvent(event) {
     const body = $("capBody");
     $("capEmpty").style.display = "none";
     const seq = event._seq != null ? event._seq : eventsOf(s).length - 1;
+    // 증분 추가 경로에서도 실행 구분선을 꽂는다 (이벤트는 이미 push된 상태).
+    const ai = eventsOf(s).filter((e) => e.type !== "worker_status").length - 1;
+    if ((runMarks[s.id] || []).includes(ai)) {
+      body.insertAdjacentHTML("beforeend", `<tr class="run-sep"><td colspan="6">── 새 실행 ──</td></tr>`);
+    }
     body.insertAdjacentHTML("beforeend", rowHtml(event, seq));
     const lastTr = body.lastElementChild;
     if (lastTr) lastTr.onclick = () => {
@@ -840,10 +880,31 @@ function onLiveEvent(event) {
   if (event.type === "done") hideActivity();
 }
 
+// 실행 중 들어온 채팅 지시 대기열 — 세션별 1건(최신). onFinished 에서 이어서 실행한다.
+const pendingGoals = {};
 async function onFinished(id, status) {
   const fresh = await invoke("get_session", { id });
-  if (fresh) { const i = sessions.findIndex((x) => x.id === id); if (i >= 0) sessions[i] = fresh; }
+  applySession(fresh);
   const s = sessions.find((x) => x.id === id);
+  const queued = pendingGoals[id];
+  if (queued) {
+    delete pendingGoals[id];
+    await invoke("append_chat", { id, role: "assistant", content: `앞서 메모한 내용으로 이어서 실행합니다: "${queued}"` });
+    const upd0 = await invoke("get_session", { id });
+    applySession(upd0);
+    if (id === activeId) { renderChat(); }
+    try {
+      markRunStart(sessions.find((x) => x.id === id));
+      if (s && s.deep) await invoke("start_deep_diagnosis", { id });
+      else await invoke("start_engagement", { id });
+    } catch (e) {
+      await invoke("append_chat", { id, role: "system", content: "이어서 실행 실패: " + e });
+    }
+    const upd1 = await invoke("get_session", { id });
+    applySession(upd1);
+    if (id === activeId) { renderChat(); renderTabs(); renderActive(); }
+    return;
+  }
   {
     const summary = status === "error"
       ? "실행 중 오류가 발생했습니다. 진행 상황 탭의 기록을 확인하세요."
@@ -853,7 +914,7 @@ async function onFinished(id, status) {
     await invoke("append_chat", { id, role: "assistant", content: summary });
   }
   const upd = await invoke("get_session", { id });
-  if (upd) { const i = sessions.findIndex((x) => x.id === id); sessions[i] = upd; }
+  applySession(upd);
   if (id === activeId) { renderChat(); renderNext(cur()); renderStepper(cur()); }
 }
 
@@ -861,7 +922,7 @@ async function onFinished(id, status) {
 async function selectSession(id) {
   activeId = id;
   const fresh = await invoke("get_session", { id });
-  if (fresh) { const i = sessions.findIndex((x) => x.id === id); if (i >= 0) sessions[i] = fresh; }
+  applySession(fresh);
   renderTabs();
   renderActive();
   switchView("live");
@@ -870,6 +931,7 @@ async function selectSession(id) {
 async function newSession() {
   const s = await invoke("create_session", { name: "", host: "127.0.0.1", port: null, goal: "", provider: settings.default_provider || "", mode: "tools", max: false, diag: false });
   sessions.unshift(s);
+  if (s) s.__full = true;
   activeId = s.id;
   renderTabs();
   renderActive();
@@ -909,7 +971,7 @@ async function persistHeader(overrides = {}) {
     max: false,
   };
   const updated = await invoke("update_session", payload);
-  if (updated) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = updated; }
+  applySession(updated);
   renderTabs();
 }
 
@@ -972,6 +1034,7 @@ async function runEngagement() {
   await ensureTargetAuthorized();
   try {
     setBadge("running");
+    markRunStart(s);
     await invoke("start_engagement", { id: s.id });
   } catch (e) {
     const risk = parseConsentError(e);
@@ -984,7 +1047,7 @@ async function runEngagement() {
     const msg = "실행 실패: " + e;
     await invoke("append_chat", { id: s.id, role: "system", content: msg });
     const fresh = await invoke("get_session", { id: s.id });
-    if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
+    applySession(fresh);
     renderChat();
     toast(msg); // 스폰 실패(전형적: Windows npx 문제, redcell 경로/의존성)를 즉시 알린다
   }
@@ -999,8 +1062,7 @@ async function stopEngagement() {
     try {
       const fresh = await invoke("get_session", { id: s.id });
       if (fresh) {
-        const i = sessions.findIndex((x) => x.id === s.id);
-        if (i >= 0) sessions[i] = fresh;
+        applySession(fresh);
         if (fresh.id === activeId) setBadge(fresh.status);
         renderTabs();
       }
@@ -1031,13 +1093,14 @@ async function sendChat() {
   const target = host ? `${host}${port ? ":" + port : ""}` : "(주소 없음 — 위에 주소를 입력하세요)";
   let ack;
   if (s.status === "running") {
+    pendingGoals[s.id] = text;
     ack = `"${text}" 을(를) 메모했습니다. 지금 실행 중인 작업이 끝나면 이 내용으로 다시 실행됩니다.`;
   } else {
     ack = `알겠습니다: "${text}"\n${target} · AI 모델 ${provider} 로 실행합니다 — 왼쪽 진행 상황에서 확인하세요.`;
   }
   await invoke("append_chat", { id: s.id, role: "assistant", content: ack });
   const fresh = await invoke("get_session", { id: s.id });
-  if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); sessions[i] = fresh; }
+  applySession(fresh);
   renderChat();
   switchView("live");
   if (s.status !== "running") await runEngagement();
@@ -1066,11 +1129,12 @@ async function beginDeepDiagnosis(s) {
   await invoke("append_chat", { id: s.id, role: "user", content: goal });
   await invoke("append_chat", { id: s.id, role: "assistant", content: `진단 시작 — 먼저 기본 점검을 한 뒤 다섯 가지 관점에서 동시에 깊이 살펴보고, 하나의 결과 리포트로 정리합니다. 왼쪽에서 진행을 확인하세요.` });
   const fresh = await invoke("get_session", { id: s.id });
-  if (fresh) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = fresh; }
+  applySession(fresh);
   renderChat();
   switchView("live");
   try {
     setBadge("running");
+    markRunStart(s);
     await invoke("start_deep_diagnosis", { id: s.id });
   } catch (e) {
     const risk = parseConsentError(e);
@@ -1092,7 +1156,7 @@ async function beginDeepDiagnosis(s) {
     const msg = "진단 실패: " + e;
     await invoke("append_chat", { id: s.id, role: "system", content: msg });
     const f2 = await invoke("get_session", { id: s.id });
-    if (f2) { const i = sessions.findIndex((x) => x.id === s.id); if (i >= 0) sessions[i] = f2; }
+    applySession(f2);
     renderChat();
     toast(msg);
   }
@@ -1484,8 +1548,9 @@ function reportStats(docs) {
 // 리포트 본문이 상단 요약에 가리지 않도록:
 //   (1) 첫 줄은 항상 한 줄로 유지하고, 서랍(필터 · 바로가기 · 직접 확인 · 범례)은 접고 시작하며,
 //   (2) [자세히]로 펼치거나 [접기]로 접을 수 있고,
-//   (3) 펼친 채로 본문을 스크롤하면 자동으로 접힌다.
+//   (3) 스크롤하면 자동 접힘 — 단, 수동 펼침 고정은 맨 위로 돌아올 때까지 유지된다.
 let summaryPinned = true;        // 첫 화면은 접힘(리포트 본문 우선) · [자세히]로 펼침 고정
+let summaryManual = false;       // 수동 펼침 고정 — 스크롤 자동 접힘을 이긴다
 let summaryTightWindow = false; // 창이 낮으면 위에서도 접힘 유지(본문 우선)
 const SUMMARY_COLLAPSE_AT = 48; // 이만큼 스크롤하면 서랍 자동 접힘(px)
 const SUMMARY_TIGHT_H = 420;    // 리포트 영역이 이보다 낮으면 접고 시작
@@ -1513,16 +1578,24 @@ function syncSummaryCollapse() {
   }
 }
 
-// 본문 스크롤 이벤트: 펼친 채로 스크롤하면 자동으로 접어 본문 공간을 넓힌다.
+// 본문 스크롤 이벤트: 스크롤하면 자동 접힘 — 수동 펼침 고정은 맨 위 복귀까지 유지.
+// 맨 위로 돌아오면 기본 상태(접힘)로 복원한다.
 function onResultsScroll() {
   const body = $("resultsBody");
-  if (body && body.scrollTop > SUMMARY_COLLAPSE_AT && summaryPinned === false) summaryPinned = true;
+  if (!body) return;
+  if (body.scrollTop <= 1) {
+    summaryManual = false;
+    summaryPinned = true;
+  } else if (!summaryManual && summaryPinned === false) {
+    summaryPinned = true;
+  }
   syncSummaryCollapse();
 }
 
-// [접기]/[펼치기] — 사용자가 직접 고정(스크롤해도 유지).
+// [접기]/[펼치기] — 사용자가 직접 고정(펼침 고정은 스크롤해도 유지).
 function toggleSummary() {
   summaryPinned = !summaryCollapsedNow();
+  summaryManual = !summaryPinned;
   syncSummaryCollapse();
 }
 
@@ -2515,7 +2588,8 @@ function renderDashboard() {
   });
 }
 // 전체 이력 모달: 진단 요약(모아보기)과 감사 로그를 한 곳에서 탭으로 전환.
-function openHistory(tab) {
+async function openHistory(tab) {
+  await ensureAllFull(); // 대시보드·감사 로그는 전 세션의 이벤트가 필요하다
   renderDashboard();            // 요약은 항상 최신으로 갱신
   document.getElementById("historyModal").classList.remove("hidden");
   setHistoryTab(tab || "summary");
@@ -2567,6 +2641,7 @@ function auditEntries() {
   return out.sort((a, b) => (b.ts || 0) - (a.ts || 0));
 }
 const AUDIT_ICON = { auth: "i-key", block: "i-ban", finding: "i-alert", diag: "i-check" };
+const AUDIT_LABEL = { auth: "대상 등록", block: "차단", finding: "발견", diag: "진단 완료" };
 
 // ── 리포트 모아보기: 발행 파일 + 파일 없는 기록을 세션별로 ──────────────────────
 const REPORT_TAG_LABEL = { early: "1차", final: "최종", note: "메모", manual: "직접 저장" };
@@ -2700,7 +2775,7 @@ function renderAudit() {
     return `<div class="au-row au-${e.sev}">
       <span class="au-ic"><svg class="ic"><use href="#${icon}"/></svg></span>
       <div class="au-main">
-        <div class="au-title"><span class="au-badge">${e.label}</span> ${esc(e.desc)}</div>
+        <div class="au-title"><span class="au-badge">${esc(AUDIT_LABEL[e.kind] || "기록")}</span> ${esc(e.desc)}</div>
         <div class="au-meta">${esc(where)}</div>
       </div>
       <span class="au-time">${fmtAuditTs(e.ts)}</span>
@@ -2709,8 +2784,42 @@ function renderAudit() {
 }
 
 // ── 배선 ─────────────────────────────────────────────────────────────────────
+// ── 과거 메모 패널 ────────────────────────────────────────────────────────────
+async function loadMem() {
+  const list = $("memList"), cnt = $("memCount");
+  if (!list) return;
+  const s = cur();
+  let mem = { global: [], host: [] };
+  try { mem = await invoke("get_memory", { host: (s && s.host) || "" }); } catch { /* 미리보기 */ }
+  const all = [...(mem.host || []).map((m) => ({ ...m, scope: "이 주소" })), ...(mem.global || []).map((m) => ({ ...m, scope: "전체" }))];
+  if (cnt) cnt.textContent = all.length ? `(${all.length}건 — 다음 진단에 자동 반영)` : "(없음)";
+  list.innerHTML = all.length
+    ? all.map((m) => `<div class="mem-item"><span class="mem-kind">${esc(m.scope)}${m.kind && m.kind !== "note" ? "·" + esc(m.kind) : ""}</span><span class="mem-text">${esc(m.text)}</span><button class="mem-del" data-id="${esc(m.id)}" title="삭제">✕</button></div>`).join("")
+    : `<div class="placeholder">아직 메모가 없습니다 — 알게 된 사실을 남기면 다음 진단부터 반영됩니다.</div>`;
+  list.querySelectorAll(".mem-del").forEach((b) => {
+    b.onclick = async () => {
+      try { await invoke("remove_memory", { id: b.dataset.id }); } catch (e) { toast("삭제 실패: " + e); return; }
+      loadMem();
+    };
+  });
+}
+async function addMem() {
+  const s = cur();
+  const input = $("memText");
+  const text = (input.value || "").trim();
+  if (!text) { toast("메모 내용을 입력하세요."); return; }
+  const scope = $("memScope").value;
+  const host = scope === "global" ? "" : ((s && s.host) || "");
+  try {
+    await invoke("add_memory", { host, kind: "note", text });
+  } catch (e) { toast("저장 실패: " + e); return; }
+  input.value = "";
+  loadMem();
+}
 function wire() {
   $("newSessionBtn").onclick = newSession;
+  $("memAddBtn").onclick = addMem;
+  $("memText").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); addMem(); } });
   $("emptyNewBtn").onclick = newSession;
   $("settingsBtn").onclick = openSettings;
   $("historyBtn").onclick = () => openHistory("summary");
@@ -2773,7 +2882,7 @@ function wire() {
   ["authAllowList", "authDenyList"].forEach((id) => {
     $(id).addEventListener("click", (e) => {
       const b = e.target.closest(".auth-rm");
-      if (b) removeAuth(b.dataset.target);
+      if (b) removeAuth(b.closest(".auth-item").dataset.target);
     });
   });
   const qg = $("quickGoals");
@@ -2917,6 +3026,7 @@ async function obStart() {
     goal: DEFAULT_DIAG_GOAL, provider: prov, mode: "prime", diag: true, deep: true, engine: eng,
   });
   sessions.unshift(s);
+  if (s) s.__full = true;
   activeId = s.id;
   renderTabs();
   renderActive();
@@ -2956,9 +3066,18 @@ async function refreshEngines() {
   try { info = await invoke("detect_engines"); } catch { /* 구 백엔드·프리뷰 폴백 */ }
   enginesInfo = info;
   const pv = info && info.prime_agent && info.prime_agent.version;
+  const piv = info && info.pi && info.pi.version;
+  const piStale = info && info.pi && info.pi.found && info.pi.satisfies_min === false;
+  const primeStale = info && info.prime_agent && info.prime_agent.found && info.prime_agent.satisfies_min === false;
+  const piLabel = !(info.pi && info.pi.found)
+    ? "미설치 — npm i -g @earendil-works/pi-coding-agent"
+    : (piStale ? `구버전 ${piv || ""} (최소 ${info.pi.min}) — 업데이트 권장` : `연결됨${piv && piv !== "미확인" ? ` (${piv})` : ""}`);
+  const primeLabel = !(info.prime_agent && info.prime_agent.found)
+    ? "미설치(선택)"
+    : (primeStale ? `구버전 ${pv || ""} (최소 ${info.prime_agent.min}) — 업데이트 권장` : `직접 실행 가능${pv ? ` (${pv})` : ""}`);
   const html = info
-    ? engineBadge(!!(info.pi && info.pi.found), "pi-coding-agent", info.pi && info.pi.found ? "연결됨" : "미설치 — npm i -g @earendil-works/pi-coding-agent")
-      + engineBadge(!!(info.prime_agent && info.prime_agent.found), "prime-agent", info.prime_agent && info.prime_agent.found ? `직접 실행 가능${pv ? ` (${pv})` : ""}` : "미설치(선택)")
+    ? engineBadge(!!(info.pi && info.pi.found), "pi-coding-agent", piLabel)
+      + engineBadge(!!(info.prime_agent && info.prime_agent.found), "prime-agent", primeLabel)
     : "";
   const ob = $("obEngines"); if (ob) ob.innerHTML = html;
   const st = $("engineStatus"); if (st) st.innerHTML = html || '<span class="eng-dim">엔진 정보를 가져오지 못했습니다</span>';
@@ -2977,8 +3096,13 @@ async function boot() {
   sessions = await invoke("list_sessions");
   try { await invoke("backfill_reports"); } catch { /* 미리보기·구버전은 무시 */ }
   activeId = sessions.length ? sessions[0].id : null;
-  renderTabs();
-  renderActive();
+  if (activeId) {
+    // list_sessions 는 요약만 주므로, 처음 열릴 세션은 전체를 로드한다.
+    await selectSession(activeId);
+  } else {
+    renderTabs();
+    renderActive();
+  }
   await listenEngagement();
   await refreshProviders();
   syncObProvider();

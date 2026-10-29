@@ -1,5 +1,4 @@
 {
   "extensions": ["./.pi/agent/extensions/redcell/index.ts"],
-  "skills": ["./.pi/agent/skills/pentest-lab"],
-  "autoRefine": { "enabled": true, "turnInterval": 20, "compact": true }
+  "skills": ["./.pi/agent/skills/pentest-lab"]
 }

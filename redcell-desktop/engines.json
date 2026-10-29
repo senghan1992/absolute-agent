@@ -1,0 +1,18 @@
+{
+  "_comment": "RedCell 엔진 버전 핀 — pi / prime-agent 업스트림 추적의 단일 출처. 새 릴리스 적용 절차는 docs/ENGINE_UPGRADE.md. REDCELL_ENGINES_JSON 환경변수로 이 파일을 통째로 오버라이드할 수 있다.",
+  "schema_version": 1,
+  "pi": {
+    "package": "@earendil-works/pi-coding-agent",
+    "min": "1.4.0",
+    "pinned": "1.4.0",
+    "known_good": ["1.4.0"],
+    "json_protocol": "pi-1.x (docs/json.md: text_delta/text_end/tool_execution_start/end/message_end/agent_settled)"
+  },
+  "prime_agent": {
+    "repo": "https://github.com/PrimeIntellect-ai/prime-agent",
+    "min": "0.10.0",
+    "pinned": "0.10.0",
+    "known_good": ["0.10.0"],
+    "notes": "세션 영속성(--session-dir/--continue)은 0.10에서 미동작 실측 — 데스크톱이 프롬프트 캐리 방식으로 연속성을 보장한다. --api-key 무시 실측 — env 주입+models.json 병기를 유지한다."
+  }
+}

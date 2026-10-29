@@ -178,7 +178,7 @@
     ].map((e, i) => Object.assign({ _seq: i, _ts: Date.now() - 60000 + i * 2000 }, e)),
   };
 
-  const store = { sessions: [sampleSession, sampleDiagSession], settings: { redcell_dir: "(preview)", auth_path: "", default_provider: "" } };
+  const store = { sessions: [sampleSession, sampleDiagSession], settings: { redcell_dir: "(preview)", auth_path: "", default_provider: "" }, memos: [], memoSeq: 0 };
   const findById = (id) => store.sessions.find((s) => s.id === id);
   const clone = (o) => JSON.parse(JSON.stringify(o));
 
@@ -550,10 +550,20 @@
       case "start_engagement": { const s = findById(args.id); if (s) { mockRiskGate(s); simulate(s); } return null; }
       case "start_deep_diagnosis": { const s = findById(args.id); if (s) { mockRiskGate(s); simulateDeep(s); } return null; }
       case "stop_engagement": { const s = findById(args.id); if (s) stopSim(s); return null; }
-      case "detect_engines": return { pi: { found: true, path: "(preview) dist/bundle/cli.js" }, prime_agent: { found: true, path: "(preview) prime-agent", version: "0.10.0 (preview)" } };
-      case "get_memory": return { global: [], host: [] };
-      case "add_memory": return { ok: true, count: 1 };
-      case "remove_memory": return { ok: true, count: 0 };
+      case "detect_engines": return { pi: { found: true, path: "(preview) dist/bundle/cli.js", version: "1.4.0 (preview)", min: "1.4.0", pinned: "1.4.0", satisfies_min: true }, prime_agent: { found: true, path: "(preview) prime-agent", version: "0.10.0 (preview)", min: "0.10.0", pinned: "0.10.0", satisfies_min: true } };
+      case "get_memory": {
+        const h = (args.host || "").trim().toLowerCase();
+        return {
+          global: store.memos.filter((m) => !m.host),
+          host: store.memos.filter((m) => m.host && m.host.toLowerCase() === h),
+        };
+      }
+      case "add_memory": {
+        const m = { id: "m" + (++store.memoSeq), ts: nowIso(), host: args.host || "", kind: args.kind || "note", text: args.text };
+        store.memos.push(m);
+        return { ok: true, count: store.memos.length };
+      }
+      case "remove_memory": store.memos = store.memos.filter((m) => m.id !== args.id); return { ok: true, count: store.memos.length };
       case "list_auth": return authResult();
       case "get_providers": return [
         { name: "anthropic", kind: "anthropic", note: "Claude 공식 API", default_model: "claude-opus-5", env_keys: [], base_url: "https://api.anthropic.com/v1", ready_env: false, needs_base: false },

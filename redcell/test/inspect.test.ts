@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { extractHosts, classifyIntent } from "../prime-agent/inspect.js";
+import { extractHosts, classifyIntent, mayReachNetwork } from "../prime-agent/inspect.js";
 
 describe("extractHosts — tool_call 훅의 대상 추출", () => {
   it("URL / IP / localhost 를 뽑아낸다", () => {
@@ -33,5 +33,18 @@ describe("classifyIntent — 액션 성격 판정", () => {
     expect(classifyIntent("ipython", "sqlmap -u ...")).toBe("exploit");
     expect(classifyIntent("ipython", "nmap -sV host")).toBe("enumerate");
     expect(classifyIntent("recon_http", '{"host":"127.0.0.1"}')).toBe("recon");
+  });
+});
+
+describe("mayReachNetwork — fail-closed 차단 대상 판정", () => {
+  it("실행·통신 계열은 참", () => {
+    for (const t of ["web_fetch", "python_repl", "bash", "exec", "curl", "browser_navigate", "terminal"]) {
+      expect(mayReachNetwork(t)).toBe(true);
+    }
+  });
+  it("순수 로컬 툴은 거짓", () => {
+    for (const t of ["read", "edit", "write", "list", "memory_get"]) {
+      expect(mayReachNetwork(t)).toBe(false);
+    }
   });
 });
