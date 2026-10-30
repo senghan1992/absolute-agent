@@ -1,0 +1,31 @@
+[package]
+name = "forge"
+version = "0.1.0"
+edition = "2024"
+description = "REDFORGE — 터미널 기반 자율 보안점검 에이전트 (인가 게이트 + 파이썬 커널 + 스톰 엔진)"
+
+[[bin]]
+name = "forge"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0"
+base64 = "0.22"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+crossterm = "0.29"
+futures = "0.3"
+parking_lot = "0.12"
+rand = "0.9"
+ratatui = "0.30"
+regex = "1"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "gzip", "brotli", "deflate", "json", "charset", "http2"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "process", "io-util", "io-std", "sync", "time", "signal", "fs"] }
+unicode-width = "0.2"
+url = "2"
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full"] }
