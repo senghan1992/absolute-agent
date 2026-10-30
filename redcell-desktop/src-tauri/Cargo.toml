@@ -23,7 +23,10 @@ uuid = { version = "1", features = ["v4"] }
 ureq = { version = "2", default-features = false, features = ["tls"] }
 redcell-netfilter = { path = "netfilter" }
 # 원시 TLS 전송 (HTTPS %2e) — ureq 와 동일한 잠금 버전 직접 의존 (오프라인 해석용 exact 핀).
-rustls = "=0.21.12"
+# dangerous_configuration: 자체 서명·자체 발급 인증서에도 접속해 버전을 수집하려면
+# 검증 통과를 강제하는 verifier 가 필요하다(자체 서명 대상에서 handshake 자체가 실패하면
+# 협상 버전·암호군·인증서 정보를 얻을 수 없다). 같은 버전의 기존 crate 이므로 오프라인 영향 없음.
+rustls = { version = "=0.21.12", features = ["dangerous_configuration"] }
 webpki-roots = "=0.25.4"
 # OpenAPI YAML 풀파서 — serde-yaml 공식 유지보수 포크 (서브셋 파서는 폴백 유지).
 yaml_serde = "0.10"

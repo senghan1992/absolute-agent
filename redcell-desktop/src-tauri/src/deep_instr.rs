@@ -35,23 +35,43 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
 # <서비스명> 진단 리포트
 ## 0. 한눈에 보기 (맨 앞 요약 표)
   3줄 요약: 비전문가도 이해하는 "그래서 뭐가 위험한가" 3줄 (등급·최대 피해·급한 조치)
-  | 루트 | 위험도 | 공격 방법 | 탈취 정보 | 보완 요약 |
-  (각 시나리오를 한 행으로 — 비전문가도 표 하나로 전체 그림을 본다)
+  | 루트 | 위험도 | CVSS | 검증 | 공격 방법 | 탈취 정보 | 보완 요약 |
+  (각 시나리오를 한 행으로 — 비전문가도 표 하나로 전체 그림을 본다.
+   CVSS 칸은 P0 증거에 붙어 있는 객관적 점수·벡터를 그대로 옮겨 적고, 없으면 '-')
   P0 자동 스윕 요약 1줄: "자동 스윕 N개 프로브·M건 발견" + 심각도 분포.
   (시나리오에는 관련 증거 ID를 [P-###] 형태로 반드시 인용한다)
 ## 1. 진단 범위 및 가정
   - 기술 스택·아키텍처 추정 (설명에 없는 부분은 [가정] 으로 표시)
+  - P0 가 탐지한 '기술 스택' 목록이 주어지면 그 내용을 자산 목록으로 쓴다
+    (버전·근거가 붙어 있다 — 임의 추정으로 바꾸지 않는다)
   - 진단 경계: 설명 기반 판단 vs 실측 확인
+  - **점검하지 못한 영역** (P0 커버리지 원장에 out_of_scope·blocked·deferred 가 붙은
+    항목 + 로그인 미제공·브라우저 렌더 불가 등) — 무엇을 왜 못 했는지 명시
 ## 2. 공격 표면 (Attack Surface)
   인증·세션·권한 / 입력 처리 / 데이터 흐름 / 외부 연동 / 배포·설정 / 비즈니스 로직
   각 표면의 노출 경로와 진입점(예상 엔드포인트·함수·플로우)
-## 3. 공격 시나리오 (위험도 순 — 시니어가 주니어에게 가르치듯 구체적으로)
+## 3. 위험도 판정 기준 (엄수 — 근거 없는 고위험 단정 금지)
+  | 등급 | 판정 기준 | CVSS 3.1 대략 |
+  |---|---|---|
+  | 치명 | 인증 없이 원격에서 무결성·기밀성을 크게 훼손(데이터베이스 전체 탈취·관리자 계정 탈취·원격 코드 실행) | 9.0~10.0 |
+  | 높음 | 인증 우회·계정 탈취·중대 정보 노출·고위험 인젝션(확정) | 7.0~8.9 |
+  | 중간 | 제한적 정보 노출·방어 심층화 누락·설정 오류 | 4.0~6.9 |
+  | 낮음 | 정보성 누락·보안 강화 권고 | 0.1~3.9 |
+  - **[실증]이 아닌 항목은 한 단계 낮춰 표기한다** (치명 [가정] → 높음, 높음 [가정] → 중간).
+  - P0 증거에 CVSS 벡터·점수·CWE 가 붙어 있으면 **그 값을 그대로 인용**한다
+    (재계산·임의 수정 금지). 없으면 CVSS 칸에 '-' 라고 적는다.
+  - 같은 근본 원인(같은 진입점·같은 결함)의 발견은 하나로 합친다 — 개수를 늘려
+    위험을 부풀리지 않는다. 서로 다른 결함만 별개 루트로 세다.
+## 4. 공격 시나리오 (위험도 순 — 시니어가 주니어에게 가르치듯 구체적으로)
   각 시나리오는 **반드시 아래 고정 형식**으로 작성한다 — UI 가 '공격 흐름
   다이어그램'·'단계 시뮬레이션'·'멘토 노트'·'탈취 정보 태그'로 시각화하므로
   라벨 줄을 정확히 지켜라:
 
   ### 루트 1. <공격 시나리오 이름> [높음]
   위험도: 높음                  (치명|높음|중간|낮음 중 하나)
+  CVSS: 9.8 (CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H) · CWE-89 · OWASP A03:2021
+        (P0 에 붙은 값이 있으면 그대로 · 없으면 "CVSS: -"
+         벡터와 점수는 반드시 서로 일치해야 한다 — 임의 조합 금지)
   진입점: <공격자가 처음 닿는 지점 — URL/엔드포인트/화면/파일 등>
   공격 흐름: 공격자 → <진입점> → (<취약점/공격 기법>) → <중간 결과> → (<탈취>) → <최종 피해>
              예: 공격자 → 로그인 폼 → (SQL 주입) → 인증 우회 → (관리자 세션 탈취) →
@@ -60,6 +80,8 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
   탈취 정보: 이메일 주소, 비밀번호 해시, 세션 토큰, 결제 카드 정보
              (쉼표로 구분 — 무엇이 새는지 구체적일수록 좋음)
   공격 방법: 구체적 기법·페이로드 예시·도구 (주니어가 따라 할 수 있을 정도로)
+  재현: curl -sS 'https://대상/경로?id=1%27' -H 'Cookie: …' | head -c 300
+        (복붙해서 바로 재현되는 요청 1줄 — 시크릿은 마스킹)
   멘토 노트: 왜 이 공격이 가능한지 원리 설명 — 주니어를 가르치듯 쉽게, 2~4문장
              (예: "로그인 입력값을 SQL 문장에 그대로 이어붙이면, 공격자의 입력이
              코드가 된다. 그래서 참이 되는 조건을 넣으면 비밀번호 없이도 …")
@@ -69,7 +91,7 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
     1. <공격자 행동 — 요청·페이로드·조작> → <시스템 결과/응답>
     2. <다음 행동> → <다음 결과>
     (숫자 번호 + '→' 한 쌍으로 2~4단계. 행동은 주니어가 따라 할 수 있을 만큼
-    구체적으로 — 예: "id 에 ' OR '1'='1 입력 후 로그인 클릭 → 관리자 쿠키 발급 응답")
+     구체적으로 — 예: "id 에 ' OR '1'='1 입력 후 로그인 클릭 → 관리자 쿠키 발급 응답")
   검증: [실증] <어떻게 확인했는지 — web_fetch 실측 응답 근거>
         [징후] <부분 확인·정황 — 헤더, 설정, 오류 노출 등>
         [가정] <설명 기반 추론 — 실측 불가 사유>
@@ -86,10 +108,13 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
   GraphQL introspection·API 남용, 비즈니스 로직 남용(할인·쿼터·순서·상태),
   AI/LLM(프롬프트 주입·시스템 프롬프트 유출·RAG 오염·에이전트 도구 남용·과권한 키),
   개인정보 노출, 유니코드·인코딩 우회, 체인 공격(XSS→CSRF→관리자 권한 등)
-## 4. 개선·보완 권고 (우선순위)
-  각 항목: **우선순위(P0~P3) · 문제 · 구체적 보완 방법(복붙 가능한 코드·설정 포함) ·
-  검증 방법**
-## 5. 실측 확인 (URL 이 주어진 경우) — 정밀 검증 단계
+## 5. 개선·보완 권고 (우선순위)
+  각 항목: **우선순위(P0~P3) · 문제 · 영향 · CVSS · 구체적 보완 방법(복붙 가능한
+  코드·설정 포함) · 검증 방법(고친 뒤 무엇을 다시 돌려 확인할지) · 예상 노력(시간) ·
+  완료 기준(DoD)**
+  우선순위 기준: P0=지금(익스플로잇 가능·데이터 유출 진행 중) · P1=1주 내(공격 경로
+  열림) · P2=1개월 내(방어 심층화) · P3=정리·모니터링
+## 6. 실측 확인 (URL 이 주어진 경우) — 정밀 검증 단계
   먼저 P0 자동 스윕 결과(프로브 수·발견 수·심각도 분포)를 3~5줄로 요약하고,
   각 시나리오의 검증 항목에 관련 증거 ID([P-###])를 명시한다. P0 증거와
   모순되는 시나리오는 삭제하거나 [가정]으로 강등한다.
@@ -102,6 +127,20 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
   - 재현 불가/미시도 → [가정] 유지 (어떤 시도를 했는지 기재)
   재현 동작은 비파괴(읽기·폼 검증 정도)로 제한하고, 실측 전후의 차이와 남은 미확인
   항목을 정리한다.
+## 7. 확인된 보안 통제 (잘 되어 있는 것)
+  실제 확인된 방어 항목 3~6개 (보안 헤더·쿠키 플래그·인증 실패 차단·입력 검증·
+  레이트리밋·감사 로그·CSP 등). 각 항목: 무엇이 어떻게 되어 있는지 + 근거 발췌 1줄.
+  (점검 범위 안에서 문제가 없었던 것만 적는다 — 확인 못 한 것은 적지 않는다)
+## 8. 한계와 미검증 영역 (이 리포트가 보증하지 못하는 것)
+  P0 커버리지 원장의 out_of_scope·blocked·deferred 항목과 실측 실패 항목을 그대로
+  옮겨 적는다. 각 항목: 무엇을 못했는지 · 왜(사유) · 어떻게 검증하면 되는지(다음 단계).
+  이 섹션이 비어 있으면 "이상 없음" 이 아니라 "추가 확인 필요 항목 없음" 으로 적는다.
+## 부록 A. 재현 절차
+  루트별 최소 재현 요청(curl 1줄) 모음 — 복붙만으로 재현되게. 순서대로 번호 매김.
+## 부록 B. 참고 기준
+  인용한 기준 목록 (CWE 번호·OWASP Top 10 (2021) 항목·NIST SP 800-115 등).
+  점검 방법·도구도 함께 적는다 (예: "RedCell 결정적 스윕 N개 프로브 · 5개 분야
+  수동 정찰 · [P-###] 기계 대조 하네스 재요청 M건").
 
 ## 집필 원칙
 - **비전문가 친화**: 시나리오마다 "결국 무엇이 어떻게 새는가"를 흐름·탈취 정보로
@@ -116,6 +155,11 @@ pub const REPORT_SPEC: &str = r#"## 리포트 형식 (Markdown, 아래 구조를
 - **정밀 검증**: 추측(가정)과 실측(실증)을 절대 섞지 않는다. 근거 없이 단정하거나
   위험도를 부풀리지 말 것 — 증거가 부족하면 [징후]나 [가정]으로 정직하게 낮춘다.
   검증 상태가 [실증]인 시나리오만 "확인된 취약점"으로 표현한다.
+- **객관 지표 우선**: P0 증거에 붙은 CVSS·CWE 를 임의 값으로 바꾸지 않는다.
+  확인된 치명(9.0+)이 하나라도 있으면 그것이 이 서비스의 최대 위험이다 — 평균으로
+  묻지 말고 맨 위에 단독으로 적는다.
+- **커버리지 존중**: "점검 커버리지·미검증 인계" 원장에 out_of_scope·blocked 가 있는
+  항목은 검사되지 않았다. 한계 섹션에 옮겨 적고, 통과했다고 쓰지 않는다.
 - 로컬 컴퓨터 파일은 조사하지 말 것. 웹 실측은 반드시 web_fetch 툴로만."#;
 
 /// 정밀 진단 분야 정의 — prime-agent builder(factory) 패턴의 워커/섹션에 대응.
@@ -211,6 +255,11 @@ pub fn deep_worker_instruction(
 - 모든 웹 조회는 web_fetch 툴로, 비파괴 GET/HEAD(폼 검증 정도의 POST 허용)로만.
 - 실제로 확인한 것만 증거(응답·헤더·본문 발췌, 민감값은 뒤 4자리만)와 함께 기록.
 - 못 본 것은 [가정] 으로 표기하고 단정하지 마라.
+- 위험도는 CVSS 3.1 기준으로 매긴다 — 치명=9.0~10.0(원격 무인증 무결성·기밀성
+  큰 훼손) · 높음=7.0~8.9(인증 우회·중대 노출·고위험 인젝션 확정) · 중간=4.0~6.9
+  (제한적 노출·설정 오류) · 낮음=0.1~3.9(정보성). P0 증거에 CVSS·CWE 가 붙어
+  있으면 그 값을 그대로 인용한다(재계산 금지). [실증] 이 아닌 항목은 한 단계
+  낮게 표기한다.
 - 이 컴퓨터의 파일 시스템(bash/read/edit/write)은 조사 대상이 아니다.
 {mem}
 ## 출력 형식 (반드시 지킨다 — 병합 단계에서 합친다)
@@ -261,7 +310,23 @@ pub fn deep_merge_instruction(target: &str, goal: &str, outputs: &str, mem: &str
 4. `## 기계 대조 결과` 블록이 있으면 반드시 반영한다: 불일치 [실증] 은 [징후] 로
    강등하고, 존재하지 않는 [P-###] 인용(기계 판정 목록)은 삭제한다.
    대조 결과를 무시하고 [실증] 을 유지하는 것은 금지한다.
-5. 아래 리포트 형식·집필 원칙을 정확히 지킨다.
+5. P0 증거에 `CVSS <점수> (<벡터>) · CWE-<번호>` 가 붙어 있으면 루트 카드의
+   `CVSS:` 줄에 **그대로** 옮겨 적는다. 값이 없으면 임의로 채우지 말고
+   `CVSS: -` 로 적는다. 위험도는 아래 '위험도 판정 기준'(CVSS 3.1) 에 맞춰
+   매기고, [실증] 이 아닌 항목은 한 단계 낮게 표기한다.
+6. `## 점검 커버리지·미검증 인계` 원장이 있으면 '한계와 미검증 영역' 섹션에
+   out_of_scope·blocked·deferred 항목을 그대로 옮겨 적는다. 검사하지 않은
+   항목을 "점검 완료" 으로 쓰지 않는다.
+7. 루트는 **(위험도 → 검증 상태) 순**으로 정렬한다 — 실증 > 징후 > 가정, 같은 등급이면
+   영향이 큰 것부터. 요약 표(0절)도 같은 순서를 따른다. (독자가 위에서부터 읽으면
+   가장 위험한 항목이 먼저 보여야 한다)
+8. 아래 리포트 형식·집필 원칙을 정확히 지킨다.
+9. `## 기계 대조 결과` 의 `### 심각도 대조` 절이 있으면 반드시 반영한다:
+   - [심각도 과대] — 루트가 적은 위험도가 인용한 P-ID 근거의 최대 심각도보다 높다.
+     위험도를 **근거 최대 심각도와 일치하도록 낮춰** 적는다(치명 → 중간 등).
+   - [심각도 과소] — 위험도가 근거보다 낮다(위험 은폐). 위험도를 **올려** 적는다.
+   과대 강등은 규칙 4(불일치 실증 → [징후] 강등)와 같은 취급이다 —
+   대조 결과를 무시하고 기존 위험도를 유지하는 것은 금지한다.
 
 {spec}"#,
         target = target,
@@ -280,6 +345,10 @@ pub struct EvidenceClaim {
     pub route: String,
     pub url: String,
     pub excerpt: String,
+    /// 보조 후보 URL — 같은 루트에 진입점·재현 curl 등 여러 URL 이 나올 때
+    /// 하나만 뽑으면 '재현 URL' 을 재요청해 증거 불일치(오등급)가 날 수 있다.
+    /// 어느 하나라도 증거를 재현하면 그 루트는 [실증] 을 유지한다.
+    pub alt_urls: Vec<String>,
 }
 
 /// 주장 추출 상한 (대조 요청 폭증 방지).
@@ -300,6 +369,25 @@ fn first_url_in(text: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// 텍스트 속 서로 다른 URL 최대 `cap`개 — 루트 섹션의 진입점·재현 curl·증거 URL.
+/// 원문은 공백으로 나뉘어 있어 'https://x?a=1&b=2' 형태도 토큰 단위로 온다.
+pub fn urls_in(text: &str, cap: usize) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for tok in text.split_whitespace() {
+        let t = clean_url_token(tok);
+        if !(t.starts_with("http://") || t.starts_with("https://")) || t.len() <= 12 {
+            continue;
+        }
+        if !out.contains(&t) {
+            out.push(t);
+        }
+        if out.len() >= cap {
+            break;
+        }
+    }
+    out
 }
 
 fn clean_excerpt(raw: &str) -> String {
@@ -351,7 +439,8 @@ pub fn extract_evidence_claims(text: &str) -> Vec<EvidenceClaim> {
         if out.iter().any(|c: &EvidenceClaim| c.url == url) {
             continue;
         }
-        out.push(EvidenceClaim { route, url, excerpt });
+        let alt_urls: Vec<String> = urls_in(sec, 4).into_iter().filter(|u| u != &url).collect();
+        out.push(EvidenceClaim { route, url, excerpt, alt_urls });
     }
     // 워커 형식: "- [등급] 제목 — 설명 / 근거: ..." 불릿.
     for line in text.lines() {
@@ -376,7 +465,133 @@ pub fn extract_evidence_claims(text: &str) -> Vec<EvidenceClaim> {
             continue;
         }
         let route: String = head.chars().take(80).collect();
-        out.push(EvidenceClaim { route, url, excerpt });
+        let alt_urls: Vec<String> = urls_in(head, 4).into_iter().filter(|u| u != &url).collect();
+        out.push(EvidenceClaim { route, url, excerpt, alt_urls });
+    }
+    out
+}
+
+/// 루트 카드 — 심각도 대조 감사 대상(한 개 루트 섹션).
+/// 헤딩의 위험도 배지·검증 상태·인용 P-ID 를 뽑아 위험도 과대평가를 기계 판정한다.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RootClaim {
+    /// 루트 식별 문자열 — 헤딩 원문에서 앞의 '#' 만 뗀 것.
+    pub route: String,
+    /// 루트 제목 — 헤딩에서 번호·등급 배지를 뗀 이름.
+    pub title: String,
+    /// 주장 위험도 — "치명"|"높음"|"중간"|"낮음" (배지 우선, 없으면 '위험도:' 줄).
+    pub severity: String,
+    /// 검증 상태 — "실증"|"징후"|"가정".
+    pub verification: String,
+    /// 섹션 안의 [P-###] 인용.
+    pub p_ids: Vec<String>,
+}
+
+/// 리포트 위험도 등급 4종 — 헤딩 배지·'위험도:' 줄 파싱용.
+const ROOT_SEVERITIES: [&str; 4] = ["치명", "높음", "중간", "낮음"];
+/// 검증 상태 3종 — '검증:' 줄 파싱용.
+const VERIFY_STATES: [&str; 3] = ["실증", "징후", "가정"];
+
+/// 대괄호 배지에서 등급 하나 찾기 — `[높음]` 형태만 인정(다른 대괄호는 무시).
+fn badge_grade(text: &str, grades: &[&str]) -> Option<String> {
+    for g in grades {
+        if text.contains(&format!("[{g}]")) {
+            return Some((*g).to_string());
+        }
+    }
+    None
+}
+
+/// 등급 토큰 판정 — `높음` 처럼 정확히 일치하거나 `중간(` 처럼 뒤에 구분자가 오는 경우.
+fn grade_token(tok: &str, grades: &[&str]) -> Option<String> {
+    let t = tok.trim_matches(|c: char| matches!(c, '(' | ')' | '[' | ']' | ',' | '.' | ':' | '·' | '…'));
+    for g in grades {
+        if t == *g {
+            return Some((*g).to_string());
+        }
+        if let Some(rest) = t.strip_prefix(g) {
+            if rest.is_empty() || rest.starts_with(|c: char| matches!(c, '(' | ')' | ',' | '.' | ':' | '-')) {
+                return Some((*g).to_string());
+            }
+        }
+    }
+    None
+}
+
+/// 헤딩에서 루트 제목 추출 — "### 루트 1. 이름 [높음]" → "이름".
+fn root_title_from_header(header: &str) -> String {
+    let body = header.trim_start_matches('#').trim();
+    let rest = body.strip_prefix("루트").unwrap_or(body).trim_start();
+    let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+    let after_num = &rest[digits.len()..];
+    let t = after_num.trim_start_matches(|c: char| {
+        c.is_whitespace() || matches!(c, '.' | ')' | ':' | ',' | '-' | '—' | '–' | '·')
+    });
+    // 등급 배지 제거 — 제목에 [높음] 이 남아 있으면 지저분하다.
+    let mut out = t.to_string();
+    for g in ROOT_SEVERITIES {
+        out = out.replace(&format!("[{g}]"), "");
+    }
+    out.trim().trim_end_matches(['-', '—', '·', ':']).trim().to_string()
+}
+
+/// 루트 카드 파싱 — `### 루트 N.` 섹션 단위.
+/// 헤딩 배지가 없으면 '위험도: X' 줄로 폴백하고, 검증 줄에서 [실증|징후|가정] 을 읽는다.
+/// 루트 헤딩이 없는 리포트는 빈 배열을 반환한다(extract_evidence_claims 와 동일 관대).
+pub fn extract_root_claims(text: &str) -> Vec<RootClaim> {
+    let mut sections: Vec<String> = Vec::new();
+    let mut cur = String::new();
+    for line in text.lines() {
+        if line.trim_start().starts_with("### 루트") {
+            if !cur.trim().is_empty() {
+                sections.push(std::mem::take(&mut cur));
+            }
+        }
+        cur.push_str(line);
+        cur.push('\n');
+    }
+    if !cur.trim().is_empty() {
+        sections.push(cur);
+    }
+    let mut out: Vec<RootClaim> = Vec::new();
+    for sec in &sections {
+        let header = sec.lines().next().unwrap_or("").trim();
+        if !header.starts_with("### 루트") {
+            continue;
+        }
+        let route = header.trim_start_matches('#').trim().to_string();
+        let title = root_title_from_header(header);
+        // 위험도 — 헤딩 배지 우선, 없으면 '위험도: X' 줄.
+        let mut severity = badge_grade(header, &ROOT_SEVERITIES).unwrap_or_default();
+        // 검증 상태 — '검증: [실증]' 줄.
+        let mut verification = String::new();
+        for line in sec.lines().skip(1) {
+            let t = line.trim();
+            if severity.is_empty() {
+                if let Some(rest) = t.strip_prefix("위험도:") {
+                    for tok in rest.split_whitespace() {
+                        if let Some(g) = grade_token(tok, &ROOT_SEVERITIES) {
+                            severity = g;
+                            break;
+                        }
+                    }
+                }
+            }
+            if verification.is_empty() {
+                if let Some(rest) = t.strip_prefix("검증:") {
+                    if let Some(g) = badge_grade(rest, &VERIFY_STATES) {
+                        verification = g;
+                    }
+                }
+            }
+        }
+        out.push(RootClaim {
+            route,
+            title,
+            severity,
+            verification,
+            p_ids: extract_p_ids(sec),
+        });
     }
     out
 }

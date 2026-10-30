@@ -92,6 +92,9 @@ CRAWL_EXPECTED = [
     ("C50", "secret", "high", "/members", ""),
     ("C51", "xss-reflect", "medium", "/members/", "'uid'"),
     ("C52", "verify-xss", "high", "/members/", "'uid'"),
+    # POST 폼 주입 — /gb 방명록 저장 후 무이스케이프 반사 (무저장 XSS 참값).
+    ("C53", "xss-reflect", "medium", "/gb", "'msg'"),
+    ("C54", "verify-xss", "high", "/gb", "'msg'"),
 ]
 OPENAPI_EXPECTED = [
     ("A70", "api-surface", "info", "/api/echo", ""),
@@ -236,7 +239,7 @@ def main():
         # 게이트 모드: 정답지는 high 다수 → exit 1 + SARIF 유효성.
         sarif = "/tmp/bench.sarif"
         cmd = [sweep_bin, "127.0.0.1", "--port", str(port), "--timeout", "120",
-               "--gate", "--sarif", sarif]
+               "--gate", "--sarif", sarif, "--json"]
         r = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
         print("gate exit=%d (기대 1)" % r.returncode)
         if r.returncode != 1:
@@ -244,7 +247,10 @@ def main():
         with open(sarif) as f:
             s = json.load(f)
         assert s["version"] == "2.1.0", "SARIF 버전"
-        assert len(s["runs"][0]["results"]) == len(rep.get("hits", [])), "SARIF 결과 수"
+        # 동일-실행 일관성: SARIF 결과 수 == 해당 실행 verdict.hits_total
+        # (이전 safe 실행과 비교하면 브라우저 타이밍 차이에 흔들림).
+        verdict = json.loads(r.stdout)
+        assert len(s["runs"][0]["results"]) == verdict.get("hits_total"), "SARIF 결과 수"
         print("sarif: rules=%d results=%d OK"
               % (len(s["runs"][0]["tool"]["driver"]["rules"]), len(s["runs"][0]["results"])))
     finally:

@@ -101,6 +101,79 @@ def main():
             check("core: run separator inserted", page.locator("#capBody tr.run-sep").count() >= 1)
             check("core: badge text Korean", page.locator("#statusBadge").inner_text().strip() == "완료",
                   page.locator("#statusBadge").inner_text().strip())
+
+            # 2b. 결과 탭 정보 구조 — 새 리포트 표준 요소가 실제로 보이는지 확인한다.
+            #     (실패해도 전체를 중단하지 않는다 — check() 가 FAIL 로 기록한다)
+            try:
+                if not page.locator("#view-results.active").count():
+                    page.click('.subtab[data-view="results"]')
+                page.wait_for_timeout(600)
+            except Exception as e:
+                check("report: results tab reachable", False, str(e))
+
+            letter = page.eval_on_selector(".rs-letter", "el => el.textContent.trim()")
+            check("report: grade letter shown", bool(letter) and letter in "ABCDF", f"letter={letter!r}")
+            why = page.eval_on_selector(".rs-why-note", "el => el.textContent")
+            check("report: grade reason with risk index", "위험지수" in why, why[:60])
+
+            n_root = page.locator("#resultsBody .md-card.is-root").count()
+            check("report: root cards exist", n_root >= 1, f"roots={n_root}")
+            order = page.evaluate(
+                "() => { const cards=[...document.querySelectorAll('#resultsBody .md-card')];"
+                " const fix=cards.findIndex(c=>c.querySelector('.md-kind.fix'));"
+                " const root=cards.findIndex(c=>c.classList.contains('is-root'));"
+                " return {fix: fix, root: root}; }")
+            check("report: '해야 할 일' card comes before root cards",
+                  order["fix"] >= 0 and order["root"] >= 0 and order["fix"] < order["root"],
+                  f"fix={order['fix']} root={order['root']}")
+
+            n_score = page.locator("#resultsBody .diag-field.field-score").count()
+            check("report: CVSS shown as score/classification fields", n_score >= 1, f"field-score={n_score}")
+
+            n_tbl = page.locator("#resultsBody table").count()
+            n_scroll = page.locator("#resultsBody .table-scroll table").count()
+            check("report: table wrapped in horizontal scroll container",
+                  n_tbl >= 1 and n_scroll == n_tbl, f"tables={n_tbl} wrapped={n_scroll}")
+
+            # 툴팁(abbr) — 비전문가가 모르는 전문어에 설명이 붙는지
+            abbrs = page.eval_on_selector_all(
+                "#resultsBody abbr[title]",
+                "els => els.map(e => ({t: e.textContent.trim(), tip: e.getAttribute('title')}))")
+            check("report: jargon tooltips (abbr[title]) exist in body",
+                  len(abbrs) >= 3, f"abbr={len(abbrs)}")
+            check("report: every tooltip carries a plain-language explanation",
+                  bool(abbrs) and all(a["tip"] and len(a["tip"]) >= 6 for a in abbrs),
+                  str(abbrs[:2]))
+            check("report: no nested tooltips (중복 감싸기 금지)",
+                  page.locator("#resultsBody abbr abbr").count() == 0)
+            dup = page.evaluate(
+                "() => { let worst = 0;"
+                " for (const c of document.querySelectorAll('#resultsBody .md-card')) {"
+                "  const seen = {};"
+                "  for (const a of c.querySelectorAll('abbr[title]')) {"
+                "   const t = a.textContent.trim(); seen[t] = (seen[t] || 0) + 1;"
+                "   if (seen[t] > worst) worst = seen[t]; } }"
+                " return worst; }")
+            check("report: a term is wrapped only once per document", dup <= 1, f"max={dup}")
+
+            # 위험도 필터(치명) → 보이는 루트 카드 수가 줄어든다
+            before_roots = page.locator("#resultsBody .md-card.is-root").count()
+            page.evaluate(
+                "() => { const c=[...document.querySelectorAll('#reportSummary .rs-nav-chip')]"
+                ".find(e=>e.dataset.f==='치명'); if(c) c.click(); }")
+            page.wait_for_timeout(400)
+            after_roots = page.locator("#resultsBody .md-card.is-root").count()
+            check("report: severity filter narrows root cards",
+                  0 <= after_roots < before_roots, f"{before_roots}->{after_roots}")
+            page.evaluate(
+                "() => { const c=[...document.querySelectorAll('#reportSummary .rs-nav-chip')]"
+                ".find(e=>e.dataset.f==='치명'); if(c) c.click(); }")
+            page.wait_for_timeout(300)
+
+            jumps = page.eval_on_selector_all(
+                "#reportSummary .rs-jump-chip", "els => els.map(e => e.textContent.trim())")
+            check("report: jump nav labels by kind", any("해야 할 일" in j for j in jumps),
+                  f"jumps={jumps[:6]}")
             # memory panel roundtrip (preview mock is stateful)
             page.locator('.subtab[data-view="live"]').click()
             page.wait_for_timeout(300)
@@ -245,6 +318,60 @@ def main():
         check("ux: empty-host shows toast",
               page.locator("#toast.show").count() == 1)
         check("ux: no blocking dialogs anywhere", len(DIALOGS) == 0, "; ".join(DIALOGS[:3]))
+
+        # 13. 온보딩(첫 화면) — AI 모델이 연결돼 있지 않으면 '진단 시작' 전에 안내가 보인다
+        #     기존 세션을 모두 지우면 URL 입력 첫 화면(히어로)이 드러난다.
+        page.evaluate("() => { window.confirm = () => true; }")
+        for _ in range(12):
+            if page.locator("#tabs .tab").count() == 0:
+                break
+            page.evaluate(
+                "() => { const c = document.querySelector('#tabs .tab .tclose'); if (c) c.click(); }")
+            page.wait_for_timeout(250)
+        page.wait_for_timeout(400)
+        check("onboard: URL-first hero shown when no session exists",
+              page.locator("#onboardHero").is_visible())
+        setup_txt = ""
+        if page.locator("#obSetup").count():
+            setup_txt = page.eval_on_selector("#obSetup", "el => el.textContent")
+        check("onboard: 'AI 모델 연결' guide card visible before starting",
+              page.locator("#obSetup").is_visible()
+              and "AI 모델" in setup_txt and "연결" in setup_txt,
+              setup_txt[:80])
+        setup_btn = ""
+        if page.locator("#obSetup #obSetupBtn").count():
+            setup_btn = page.eval_on_selector("#obSetup #obSetupBtn", "el => el.textContent")
+        check("onboard: guide card offers 'AI 모델 연결하기' button",
+              "AI 모델 연결하기" in setup_btn, setup_btn[:40])
+
+        # 14. 엔진 선택지 라벨이 사람 말인가 (pi · prime-agent 원어 노출 금지)
+        eng_labels = page.eval_on_selector_all(
+            "#obEngine option", "els => els.map(e => e.textContent.trim())")
+        check("onboard: engine options are plain Korean",
+              any("자동" in l for l in eng_labels)
+              and any("기본 검사 엔진" in l for l in eng_labels)
+              and any("심화 검사 엔진" in l for l in eng_labels)
+              and not any("prime-agent" in l or l.strip() == "pi" for l in eng_labels),
+              str(eng_labels))
+        eng_hint = ""
+        if page.locator("#obEngineHint").count():
+            eng_hint = page.eval_on_selector("#obEngineHint", "el => el.textContent.trim()")
+        check("onboard: engine hint line visible under the selector", len(eng_hint) > 8, eng_hint[:60])
+
+        # 15. 진단 시작을 눌렀는데 AI 모델이 없으면 — 왜 멈췄는지 정직하게 말한다
+        page.fill("#obUrl", "https://demo.vulnlab.local")
+        page.click("#obDiag")
+        page.wait_for_timeout(600)
+        err_txt = page.eval_on_selector("#obError", "el => el.textContent")
+        toast_txt = page.eval_on_selector("#toast", "el => el.textContent")
+        check("onboard: missing AI model explained on '진단 시작'",
+              page.locator("#providerModal").is_visible()
+              and ("AI 모델 연결이 필요해요" in err_txt
+                   or "AI 모델 연결이 필요해요" in toast_txt),
+              f"err={err_txt[:50]} toast={toast_txt[:50]}")
+        page.evaluate(
+            "() => { const b = document.getElementById('providerClose'); if (b) b.click(); }")
+        page.wait_for_timeout(200)
 
         check("final: zero console errors", len(ERRORS) == 0, "; ".join(ERRORS[:5]))
         browser.close()

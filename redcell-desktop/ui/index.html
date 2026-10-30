@@ -88,9 +88,9 @@
             <select id="shProvider" class="sh-input sh-provider" title="AI 모델 — ⚙ 설정에서 연결 관리" aria-label="AI 모델">
               <option value="">— AI 모델 선택 —</option>
             </select>
-            <select id="shEngine" class="sh-input sh-engine" title="진단 엔진 — 잘 모르면 pi 그대로 두세요" aria-label="진단 엔진">
-              <option value="pi">pi</option>
-              <option value="prime">prime-agent</option>
+            <select id="shEngine" class="sh-input sh-engine" title="진단 엔진 — 잘 모르면 '기본 검사 엔진' 그대로 두세요" aria-label="진단 엔진">
+              <option value="pi">기본 검사 엔진</option>
+              <option value="prime">심화 검사 엔진</option>
             </select>
             <div class="sh-target sh-cookie" title="로그인이 필요한 곳까지 점검할 때 사용합니다(선택) — 브라우저에서 복사한 Cookie 값을 붙여넣으세요. 비밀번호를 저장하거나 자동으로 로그인하지 않습니다.">
               <span class="tgt-ico"><svg class="ic"><use href="#i-key"/></svg></span>
@@ -228,13 +228,19 @@
         <p class="hero-sub">주소를 입력하면 수백 가지 기본 항목을 자동으로 점검한 뒤, 다섯 가지 관점에서 동시에 깊이 살펴보고 뚫리는 과정·증거·막는 방법까지 정리해 드립니다. 보안 지식이 없어도 읽을 수 있는 리포트.</p>
         <div class="hero-form">
           <input id="obUrl" class="hero-url" placeholder="진단할 주소 — 예: https://example.com" spellcheck="false" autocomplete="off" />
-          <select id="obProvider" class="hero-provider" title="AI 모델" aria-label="AI 모델"></select>
-          <select id="obEngine" class="hero-engine" title="진단 엔진 — 잘 모르면 pi 그대로 두세요" aria-label="진단 엔진">
-            <option value="pi">pi</option>
-            <option value="prime">prime-agent</option>
-          </select>
+          <select id="obProvider" class="hero-provider" title="AI 모델 — 연결한 모델이 여기 보입니다" aria-label="AI 모델"></select>
+          <div class="hero-engine-wrap">
+            <select id="obEngine" class="hero-engine" title="진단 엔진 — 잘 모르면 '자동(권장)' 그대로 두세요" aria-label="진단 엔진">
+              <option value="">자동(권장)</option>
+              <option value="pi">기본 검사 엔진</option>
+              <option value="prime">심화 검사 엔진</option>
+            </select>
+            <p id="obEngineHint" class="hero-engine-hint">기본 엔진이면 충분해요. 심화 엔진은 더 깊게 여러 관점에서 봅니다.</p>
+          </div>
           <button id="obDiag" class="btn btn-primary btn-lg"><svg class="ic"><use href="#i-crosshair"/></svg>진단 시작</button>
         </div>
+        <!-- AI 모델 미연결 안내 — '진단 시작' 을 누르기 전부터 보인다 -->
+        <div id="obSetup" class="hero-setup hidden"></div>
         <div id="obError" class="hero-error hidden"></div>
         <div id="obEngines" class="hero-engines"></div>
         <ol class="hero-steps">
@@ -330,7 +336,7 @@
             </label>
             <div class="fld">진단 엔진
               <div id="engineStatus" class="engine-status"><span class="eng-dim">확인 중…</span></div>
-              <small class="fld-note">진단은 pi 엔진으로 실행됩니다. prime-agent가 설치돼 있으면 함께 표시됩니다.</small>
+              <small class="fld-note">진단은 기본 검사 엔진으로 실행됩니다. 심화 검사 엔진이 설치돼 있으면 함께 표시됩니다.</small>
             </div>
           </div>
 

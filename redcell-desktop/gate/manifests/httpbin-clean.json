@@ -1,0 +1,21 @@
+{
+  "id": "httpbin-clean",
+  "target": "https://httpbin.org",
+  "authorized": "공개 HTTP 테스트 서비스(httpbin.org), 저RPS(8)·비파괴·미인증 스캔",
+  "sweep_args": ["--rps", "8", "--threads", "4", "--timeout", "240"],
+  "timeout": 300,
+  "clean": false,
+  "note": "httpbin은 입력을 의도적으로 반사한다. cors 반사 high는 의도된 동작의 관측(verdict=confirmed)이지 오탐이 아니다. jquery는 실제 구버전(verdict=signal). FP 회귀는 absent 규칙으로 감시한다.",
+  "expected": [
+    {"id": "H01", "category": "cors", "min_severity": "high", "target_contains": "https://httpbin.org/", "title_contains": "CORS Origin 반사"},
+    {"id": "H02", "category": "cors", "min_severity": "medium", "target_contains": "https://httpbin.org/", "title_contains": "null Origin"},
+    {"id": "H03", "category": "vuln-component", "min_severity": "high", "target_contains": "jquery.min.js", "title_contains": "CVE-2020-11022"},
+    {"id": "H04", "category": "headers", "min_severity": "medium", "target_contains": "https://httpbin.org/", "title_contains": "HSTS"},
+    {"id": "H05", "category": "methods", "min_severity": "medium", "target_contains": "https://httpbin.org/", "title_contains": "쓰기 메서드 허용"}
+  ],
+  "absent": [
+    {"id": "A-secret", "category": "secret", "min_severity": "high", "note": "swagger-ui minified JS 코드조각 오탐 회귀 (2026-10-30 수정)"},
+    {"id": "A-paths", "category": "paths", "min_severity": "high", "note": "SPA 폴백·무증거 경로 오탐 회귀 (2026-10-30 수정)"}
+  ],
+  "known_misses": []
+}

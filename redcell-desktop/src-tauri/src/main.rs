@@ -1924,8 +1924,13 @@ fn run_prime(
     let piq = s2.piq.clone();
     let mut instruction = turn_instruction(app, &s2, Engine::Pi);
     // 단일 진단 모드에서도 P0 스윕 증거를 주입 (대상이 있을 때만).
+    // 스윕 히트 id 는 기계 대조(verify_report_claims)의 유효 P-ID 목록이 된다.
+    // 기계 대조 입력 — P-ID → 엔진 심각도(seriousness audit 가 '주장 위험도 ↔ 근거 최대 심각도'
+    // 를 비교한다). 맵의 키 집합이 곧 유효 P-ID 목록이다.
+    let mut sweep_ids: HashMap<String, String> = HashMap::new();
     if s2.diag && !s2.host.trim().is_empty() {
         let sweep = run_p0_sweep(app, id, &s2.host, s2.port, &s2.auth_cookie, s2.danger_consent);
+        sweep_ids = sweep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
         instruction.push_str(&p0_evidence_block(&sweep, 6000));
     }
 
@@ -1955,9 +1960,14 @@ fn run_prime(
         let id = id.to_string();
         let prefix = prep.tool_prefix;
         let run_start = std::time::SystemTime::now();
+        // 진단 세션만 리포트 표식("final")을 붙인다 — 일반 채팅은 노트로 방출된다.
+        // 표식이 붙으면 결과 탭의 등급·필터·내보내기·표지가 정상 동작한다.
+        let report_tag: Option<&'static str> = if s2.diag { Some("final") } else { None };
+        let cookie = s2.auth_cookie.clone();
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, None);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, report_tag);
             finalize_run(&app, &id, &outcome, "pi");
+            finalize_single_turn_report(&app, &id, &outcome, &sweep_ids, &cookie);
             audit_temp_window(&app, &id, run_start);
         });
     }
@@ -2560,6 +2570,48 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
     }
 }
 
+/// 단일 턴(비병합) 진단 마감 — 리포트 자동 저장 + 기계 대조 결과 노트.
+/// 심층 경로와 달리 병합 단계가 없다 — 그래서 **자동 수정은 하지 않는다.**
+/// 검증 결과(확인/불일치/미시도·환각 P-ID)를 정직하게 노트로만 노출하고,
+/// 원문은 사용자가 확인·수정할 수 있도록 그대로 둔다.
+fn finalize_single_turn_report(
+    app: &AppHandle,
+    id: &str,
+    outcome: &PumpOutcome,
+    evidence: &HashMap<String, String>,
+    cookie: &str,
+) {
+    // 일반 채팅 세션은 대상이 아니다 — 리포트 저장·대조는 진단 세션에서만.
+    let diag = read_session(app, id).map(|s| s.diag).unwrap_or(false);
+    if !diag {
+        return;
+    }
+    let text = outcome.text.trim();
+    if text.is_empty() {
+        return;
+    }
+    // 발행 파일 자동 저장 — 실패는 한 줄로 알리고 무시한다(실행 자체를 막지 않는다).
+    if let Err(e) = write_report_file(&reports_dir(app), id, "final", text) {
+        emit_note(
+            app,
+            id,
+            format!("[sys] 리포트 자동 저장 실패({e}) — 결과 탭에서 MD로 저장하세요."),
+            None,
+        );
+    }
+    // 기계 대조 — 환각 [P-###] 인용과 근거 없는 [실증] 표기, 그리고 위험도 과대 주장을 잡아낸다.
+    // (심층 경로와 동일한 검증기를 쓴다 — 근거 맵은 P-ID → 엔진 심각도.)
+    let vauth = auth::load(&resolve_app_auth_path(app));
+    let rep = verify_report_claims(text, evidence, &vauth, cookie);
+    emit_note(app, id, verify_note_line(&rep), None);
+    emit_note(
+        app,
+        id,
+        "[sys] 단일 턴 진단은 병합 단계가 없어 대조 결과만 알려줍니다 — 불일치·환각 인용은 자동 수정되지 않습니다(리포트 원문을 확인하세요).".to_string(),
+        None,
+    );
+}
+
 /// prime-agent 단일 턴 — 스코프 스킬 주입 + 반응형 킬게이트 + 세션 dir 연속대화.
 /// prime-agent 대화 연속성 — 0.10 은 --session-dir 에 저장하지 않고 --continue 가
 /// 새 세션을 발급하는 것으로 실측됐다. 대신 앱이 보관한 채팅 기록(최근 6개·3000자)을
@@ -2602,8 +2654,14 @@ fn run_prime_agent(
 ) -> Result<(), String> {
     let run_start = std::time::SystemTime::now();
     let mut instruction = turn_instruction(app, s, Engine::Prime);
+    // 단일 진단 모드에서도 P0 스윕 증거를 주입 (대상이 있을 때만).
+    // 스윕 히트 id 는 기계 대조(verify_report_claims)의 유효 P-ID 목록이 된다.
+    // 기계 대조 입력 — P-ID → 엔진 심각도(seriousness audit 가 '주장 위험도 ↔ 근거 최대 심각도'
+    // 를 비교한다). 맵의 키 집합이 곧 유효 P-ID 목록이다.
+    let mut sweep_ids: HashMap<String, String> = HashMap::new();
     if s.diag && !s.host.trim().is_empty() {
         let sweep = run_p0_sweep(app, id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
+        sweep_ids = sweep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
         instruction.push_str(&p0_evidence_block(&sweep, 6000));
     }
     // prime 무상태 연속 대화 — 앞 턴 기록이 있으면 인계 블록을 앞에 붙인다.
@@ -2638,9 +2696,13 @@ fn run_prime_agent(
         let id = id.to_string();
         let prefix = prep.tool_prefix;
         let auth = prep.enforce_auth;
+        // 진단 세션만 리포트 표식("final")을 붙인다 — 일반 채팅은 노트로 방출된다.
+        let report_tag: Option<&'static str> = if s.diag { Some("final") } else { None };
+        let cookie = s.auth_cookie.clone();
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, None);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, report_tag);
             finalize_run(&app, &id, &outcome, "prime-agent");
+            finalize_single_turn_report(&app, &id, &outcome, &sweep_ids, &cookie);
             audit_prime_homes(&app, &id);
             audit_temp_window(&app, &id, run_start);
         });
@@ -3302,8 +3364,17 @@ fn p0_evidence_block(rep: &probes::ProbeReport, cap_chars: usize) -> String {
     } else {
         format!("\n\n### 체인 단서 (공격 시나리오 씨앗 — ID 인용)\n{}", chains.join("\n"))
     };
+    // 커버리지 원장 — '점검 범위·한계' 섹션을 추측이 아닌 사실로 채우는 근거.
+    let cov = probes::coverage_digest(rep, 4000);
+    let cov_sec = if cov.trim().is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n\n## 점검 커버리지·미검증 인계 (P0 실측 원장)\n{cov}\n규칙: out_of_scope·blocked·deferred 단위는 **검사하지 않은 것**이다. 리포트 '한계·미검증 영역' 섹션에 그대로 옮겨 적고, 해당 항목을 '점검 완료'로 쓰지 마라."
+        )
+    };
     format!(
-        "\n\n## P0 자동 스윕 증거 (실측 확정 — ID 인용 필수)\n{}\n규칙: 위 [P-###] 증거는 확정 실측이다. 관련 시나리오에 ID를 반드시 인용하고, 이미 커버된 항목은 재프로브하지 말고 체인·악용 추론과 빈틈 보완에 집중하라.{chain_sec}",
+        "\n\n## P0 자동 스윕 증거 (실측 확정 — ID 인용 필수)\n{}\n규칙: 위 [P-###] 증거는 확정 실측이다. 관련 시나리오에 ID를 반드시 인용하고, 이미 커버된 항목은 재프로브하지 말고 체인·악용 추론과 빈틈 보완에 집중하라.{chain_sec}{cov_sec}",
         probes::evidence_digest(rep, cap_chars)
     )
 }
@@ -3414,12 +3485,113 @@ struct ClaimCheck {
     route: String,
     url: String,
     verdict: ClaimVerdict,
+    /// 실제 재요청한 횟수 (후보 URL 중 시도한 것).
+    tried: usize,
 }
 
 #[derive(Debug, Default)]
 struct VerifyReport {
     checks: Vec<ClaimCheck>,
     unknown_ids: Vec<String>,
+    /// 위험도 대조 감사 결과 — 리포트 주장 위험도 ↔ P0 근거 최대 심각도.
+    severity: Vec<SeverityAudit>,
+}
+
+/// 심각도 대조 감사 — 리포트가 주장한 위험도를 P0 실측 근거와 기계 대조한다.
+/// 워커가 '치명'이라 써도 근거 P-ID 최대 심각도가 medium 이면 과대(over) 로 강등한다.
+/// kind: "over"(과대 — 반드시 낮춰야 함) | "under"(과소 — 위험 은폐, 정보성)
+///      | "no-evidence"(비교 근거 없음, 정보성).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SeverityAudit {
+    /// 루트 식별 문자열(헤딩 원문).
+    route: String,
+    /// 리포트가 주장한 위험도 — "치명"|"높음"|"중간"|"낮음".
+    claimed: String,
+    /// 인용된 유효 P-ID 중 최대 엔진 심각도("critical".."info") — 없으면 None.
+    evidence_max: Option<String>,
+    kind: &'static str,
+}
+
+/// 주장 위험도 랭크 — 치명 4 > 높음 3 > 중간 2 > 낮음 1 (정보 0).
+fn claimed_sev_rank(s: &str) -> Option<u8> {
+    match s {
+        "치명" => Some(4),
+        "높음" => Some(3),
+        "중간" => Some(2),
+        "낮음" => Some(1),
+        "정보" => Some(0),
+        _ => None,
+    }
+}
+
+/// 엔진 심각도 랭크 — critical 4 > high 3 > medium 2 > low 1 > info 0.
+fn engine_sev_rank(s: &str) -> Option<u8> {
+    match s {
+        "critical" => Some(4),
+        "high" => Some(3),
+        "medium" => Some(2),
+        "low" => Some(1),
+        "info" => Some(0),
+        _ => None,
+    }
+}
+
+/// 엔진 심각도 → 리포트 위험도 표기 — 병합자가 그대로 옮겨 적을 수 있게.
+/// "정보" 는 리포트 위험도 4급(치명·높음·중간·낮음) 밖이라 최하위 '낮음' 으로 옮긴다.
+fn engine_sev_ko(s: &str) -> &'static str {
+    match s {
+        "critical" => "치명",
+        "high" => "높음",
+        "medium" => "중간",
+        _ => "낮음",
+    }
+}
+
+/// 루트별 위험도 감사 — 주장 위험도와 인용 P-ID 근거의 최대 심각도를 대조.
+/// - over: 주장이 근거보다 높음 → 반드시 낮춰야 함(강등 지시 대상).
+/// - under: 주장이 근거보다 낮음 → 위험 은폐(정보성).
+/// - no-evidence: 인용 P-ID 가 없어 비교 불가(정보성 — 웹 실측 시나리오는 정상).
+/// 존재하지 않는 P-ID 인용은 여기서는 무시한다(환각 처리는 unknown_p_ids 가 담당).
+/// 일치(exact)·주장 등급 미인식은 감사 건으로 남기지 않는다.
+fn audit_claim_severities(claims: &[RootClaim], evidence: &HashMap<String, String>) -> Vec<SeverityAudit> {
+    let mut out: Vec<SeverityAudit> = Vec::new();
+    for c in claims {
+        // 인용 중 실제 근거로 존재하는 것만 — 존재하지 않는 인용은 무시.
+        let cited: Vec<&String> = c.p_ids.iter().filter(|id| evidence.contains_key(*id)).collect();
+        if cited.is_empty() {
+            out.push(SeverityAudit {
+                route: c.route.clone(),
+                claimed: c.severity.clone(),
+                evidence_max: None,
+                kind: "no-evidence",
+            });
+            continue;
+        }
+        let mut max_rank: Option<u8> = None;
+        let mut max_sev = String::new();
+        for id in cited {
+            let sev = &evidence[id];
+            let r = engine_sev_rank(sev).unwrap_or(0);
+            if max_rank.map_or(true, |m| r > m) {
+                max_rank = Some(r);
+                max_sev = sev.clone();
+            }
+        }
+        let Some(e_rank) = max_rank else { continue };
+        // 주장 등급이 미인식(빈 값 등)이면 비교 대상이 아니다.
+        let Some(c_rank) = claimed_sev_rank(&c.severity) else { continue };
+        if c_rank == e_rank {
+            continue; // 일치 — 위반 없음.
+        }
+        let kind = if c_rank > e_rank { "over" } else { "under" };
+        out.push(SeverityAudit {
+            route: c.route.clone(),
+            claimed: c.severity.clone(),
+            evidence_max: Some(max_sev),
+            kind,
+        });
+    }
+    out
 }
 
 fn url_host(url: &str) -> Option<String> {
@@ -3516,42 +3688,69 @@ fn verify_fetch(url: &str, cookie: &str) -> Result<(u16, String, String), String
     Err("리다이렉트 과다".into())
 }
 
+/// 기계 대조 — 주장 URL 재요청 + 환각 P-ID 검출 + 위험도 대조.
+/// `evidence` 는 검증 대상 ID 맵(P-ID → 엔진 심각도) — 스윕 결과(sweep.hits)에서 만든다.
+/// 맵의 키가 유효 P-ID 집합이 된다.
 fn verify_report_claims(
     text: &str,
-    valid_ids: &HashSet<String>,
+    evidence: &HashMap<String, String>,
     auth: &auth::AuthList,
     cookie: &str,
 ) -> VerifyReport {
-    let unknown_ids = unknown_p_ids(text, valid_ids);
+    let valid_ids: HashSet<String> = evidence.keys().cloned().collect();
+    let unknown_ids = unknown_p_ids(text, &valid_ids);
     let mut checks = Vec::new();
     for c in extract_evidence_claims(text) {
-        let verdict = match url_host(&c.url) {
-            None => ClaimVerdict::Skipped("URL 파싱 불가".into()),
-            Some(_) if url_scheme(&c.url).is_none() => ClaimVerdict::Skipped("http(s) 아님".into()),
-            Some(h) if !auth::is_host_port_allowed(auth, &h, url_port(&c.url)) => {
-                ClaimVerdict::Skipped("인가 밖 URL".into())
-            }
-            Some(_) => match verify_fetch(&c.url, cookie) {
-                Err(e) => ClaimVerdict::Skipped(format!("재요청 실패: {}", e.chars().take(80).collect::<String>())),
-                Ok((st, hs, body)) => {
-                    if excerpt_matches(&body, &hs, &c.excerpt) {
-                        ClaimVerdict::Confirmed
-                    } else {
-                        ClaimVerdict::Mismatch(format!("HTTP {st} — 발췌 미출현"))
+        // 후보 URL 을 순서대로 시도 — 하나라도 증거를 재현하면 [실증] 을 유지한다.
+        // (루트에 진입점·재현 curl 이 둘 이상 있으면 한쪽만 재요청해 오등급되지 않도록)
+        let mut candidates = vec![c.url.clone()];
+        candidates.extend(c.alt_urls.iter().cloned());
+        let mut verdict: Option<ClaimVerdict> = None;
+        let mut tried = 0usize;
+        for url in &candidates {
+            let host = url_host(url);
+            match host {
+                None => {
+                    verdict = Some(ClaimVerdict::Skipped("URL 파싱 불가".into()));
+                }
+                Some(_) if url_scheme(url).is_none() => {
+                    verdict = Some(ClaimVerdict::Skipped("http(s) 아님".into()));
+                }
+                Some(h) if !auth::is_host_port_allowed(auth, &h, url_port(url)) => {
+                    verdict = Some(ClaimVerdict::Skipped("인가 밖 URL".into()));
+                }
+                Some(_) => {
+                    tried += 1;
+                    match verify_fetch(url, cookie) {
+                        Err(e) => {
+                            verdict = Some(ClaimVerdict::Skipped(format!(
+                                "재요청 실패: {}",
+                                e.chars().take(80).collect::<String>()
+                            )));
+                        }
+                        Ok((st, hs, body)) => {
+                            if excerpt_matches(&body, &hs, &c.excerpt) {
+                                verdict = Some(ClaimVerdict::Confirmed);
+                                break;
+                            }
+                            verdict = Some(ClaimVerdict::Mismatch(format!("HTTP {st} — 발췌 미출현")));
+                        }
                     }
                 }
-            },
-        };
-        checks.push(ClaimCheck { route: c.route, url: c.url, verdict });
+            }
+        }
+        let verdict = verdict.unwrap_or_else(|| ClaimVerdict::Skipped("재요청 대상 없음".into()));
+        checks.push(ClaimCheck { route: c.route, url: c.url, verdict, tried });
     }
-    VerifyReport { checks, unknown_ids }
+    let severity = audit_claim_severities(&extract_root_claims(text), evidence);
+    VerifyReport { checks, unknown_ids, severity }
 }
 
 fn verify_report_block(rep: &VerifyReport) -> String {
-    if rep.checks.is_empty() && rep.unknown_ids.is_empty() {
+    if rep.checks.is_empty() && rep.unknown_ids.is_empty() && rep.severity.is_empty() {
         return String::new();
     }
-    let mut lines = vec!["\n\n## 기계 대조 결과 (하네스 실측 — 병합 규칙 4 적용)".to_string()];
+    let mut lines = vec!["\n\n## 기계 대조 결과 (하네스 실측 — 병합 규칙 4·9 적용)".to_string()];
     for c in &rep.checks {
         let mark = match &c.verdict {
             ClaimVerdict::Confirmed => "확인".to_string(),
@@ -3563,6 +3762,33 @@ fn verify_report_block(rep: &VerifyReport) -> String {
     if !rep.unknown_ids.is_empty() {
         lines.push(format!("- [환각 P-ID] 존재하지 않는 인용: {} — 삭제할 것", rep.unknown_ids.join(", ")));
     }
+    // 심각도 대조 — 위험도 과대(강등 지시)·과소(위험 은폐)·근거 없음.
+    if !rep.severity.is_empty() {
+        lines.push(String::new());
+        lines.push("### 심각도 대조 (주장 위험도 ↔ P0 근거 최대 심각도)".to_string());
+        for a in &rep.severity {
+            let route = a.route.chars().take(60).collect::<String>();
+            let ev = a.evidence_max.as_deref().unwrap_or("");
+            match a.kind {
+                "over" => {
+                    let target = engine_sev_ko(ev);
+                    lines.push(format!(
+                        "- [심각도 과대] {route} — 위험도: {} (근거 최대 심각도 {ev}) → 위험도를 {} 으로 낮출 것",
+                        a.claimed, target
+                    ));
+                }
+                "under" => {
+                    lines.push(format!(
+                        "- [심각도 과소] {route} — 위험도: {} (근거 최대 심각도 {ev}) → 위험도를 올릴 것(위험 은폐)",
+                        a.claimed
+                    ));
+                }
+                _ => {
+                    lines.push(format!("- [심각도 근거없음] {route} — P-ID 인용 없음(비교 불가)"));
+                }
+            }
+        }
+    }
     lines.join("\n")
 }
 
@@ -3573,6 +3799,12 @@ fn verify_note_line(rep: &VerifyReport) -> String {
     let mut s = format!("[sys] 기계 대조 끝 — 주장 {}건 중 확인 {}건·불일치 {}건·미시도 {}건", rep.checks.len(), cf, mm, sk);
     if !rep.unknown_ids.is_empty() {
         s.push_str(&format!(" · 환각 P-ID {}건({})", rep.unknown_ids.len(), rep.unknown_ids.join(",")));
+    }
+    if !rep.severity.is_empty() {
+        let ov = rep.severity.iter().filter(|a| a.kind == "over").count();
+        let un = rep.severity.iter().filter(|a| a.kind == "under").count();
+        let ne = rep.severity.len() - ov - un;
+        s.push_str(&format!(" · 심각도 대조 {}건(과대 {ov}·과소 {un}·근거없음 {ne})", rep.severity.len()));
     }
     s.push('.');
     s
@@ -3947,9 +4179,12 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         let mut verify_block = String::new();
         if !verify_src.trim().is_empty() {
             emit_note(&app, &id, "[sys] 기계 대조 — 증거 발췌 재확인 중…".to_string(), None);
-            let valid_ids: HashSet<String> = sweep.hits.iter().map(|h| h.id.clone()).collect();
+            // 검증 대상 ID 맵 — P-ID → 엔진 심각도(스윕 결과에서 만든다).
+            // 이 맵이 유효 P-ID 집합이자 위험도 대조의 근거가 된다.
+            let evidence: HashMap<String, String> =
+                sweep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
             let vauth = auth::load(&resolve_app_auth_path(&app));
-            let rep = verify_report_claims(&verify_src, &valid_ids, &vauth, &s.auth_cookie);
+            let rep = verify_report_claims(&verify_src, &evidence, &vauth, &s.auth_cookie);
             emit_note(&app, &id, verify_note_line(&rep), None);
             verify_block = verify_report_block(&rep);
         }
@@ -4052,9 +4287,291 @@ fn dns_drift_check(app: &AppHandle, id: &str, host: &str) -> Result<(), String> 
     Ok(())
 }
 
+// ── 진단 의도 판별 — 채팅 지시문만 읽어 "보안 진단" 의도를 알아낸다 ──────────────
+// 이 앱의 사용자는 "보인을 모르는 사람"이다. 대부분 채팅창에 "이 사이트 보안
+// 진단해줘" 처럼 자연어로 지시한다. 그래서 채팅 경로가 심층 경로(REPORT_SPEC +
+// P0 증거 + 결과 탭 리포트)와 같은 표준을 받도록, 지시문에서 진단 의도를
+// 판별해 세션을 diag 로 승격시킨다.
+//
+// 판정은 백엔드에서만 한다(UI·외부 호출자 공통) — 같은 기준이 어긋나면
+// "왜 진단으로 바뀌었나요" 를 설명할 수 없게 된다.
+
+/// 강한 진단 신호 — 이것만 있으면 진단 의도로 확정한다.
+const DIAG_STRONG: &[&str] = &[
+    // 한국어
+    "진단",
+    "취약점",
+    "취약",
+    "해킹",
+    "레드팀",
+    "레드 팀",
+    "모의해킹",
+    "모의 해킹",
+    "침투",
+    "공격 벡터",
+    "공격면",
+    // 영어
+    "diagnose",
+    "diagnosis",
+    "pentest",
+    "pen test",
+    "penetration test",
+    "vulnerability",
+    "vulnerabilities",
+    "vuln scan",
+    "vulnerability scan",
+    "exploit",
+    "owasp",
+    "cwe",
+    "cve",
+    "red team",
+    "redteam",
+    "security assessment",
+    "security audit",
+    "security review",
+    "security test",
+    "security analysis",
+    "bug bounty",
+    "threat model",
+    "attack surface",
+];
+
+/// 약한 진단 신호 — 일반 작업 지시와 함께 나오면 일반 작업으로 본다.
+const DIAG_WEAK: &[&str] = &["점검", "보안", "audit"];
+
+/// 일반 작업 지시 — "파일로 뽑아줘" 류는 진단이 아니다(강한 신호가 있을 때만 예외).
+const GENERAL_TASK: &[&str] = &[
+    "파일로 뽑",
+    "뽑아줘",
+    "뽑아",
+    "목록 정리",
+    "목록으로",
+    "목록만",
+    "다운로드",
+    "요약",
+    "추출해",
+    "내보내",
+    "정리해서",
+    "정리해줘",
+    "저장해",
+];
+
+/// 심층(깊게) 의도 신호 — 깊게/철저히 요청했으면 심층으로 간다.
+/// (일반 작업 지시와 겹칠 때만 진단 신호를 함께 요구한다 — looks_like_deep_diagnosis)
+const DEEP_KW: &[&str] = &[
+    "깊게",
+    "깊이",
+    "정밀",
+    "전면",
+    "철저",
+    "모든 관점",
+    "전반적",
+    "빠짐없이",
+    "deep",
+    "deeply",
+    "in-depth",
+    "thorough",
+    "thoroughly",
+    "comprehensive",
+    "exhaustive",
+    // "full" 은 단독으로는 일반 단어다("full text 검색") — 진단 명사와 붙을 때만 신호로 본다.
+    "full assessment",
+    "full review",
+    "full audit",
+    "full test",
+    "full scan",
+    "full report",
+    "full analysis",
+    "full security",
+    "full pentest",
+    "full penetration",
+];
+
+/// 부정형 — 키워드 뒤(한국어 어순)·앞(영어 어순)에 붙는 "그만" 류 표현.
+/// risk.rs 의 negated() 와 같은 아이디어지만(private fn 이라) 독립 구현한다.
+const NEG_BEFORE: &[&str] = &[
+    "하지 마",
+    "하지마",
+    "하지 말",
+    "그만",
+    "안 해",
+    "안해",
+    "않아",
+    "말아",
+    "don't",
+    "dont",
+    "do not",
+    "never",
+    "no need",
+    "without",
+    "no ",
+];
+const NEG_AFTER: &[&str] = &[
+    "하지",
+    "하지 마",
+    "하지마",
+    "하지 말",
+    "그만",
+    "안 해",
+    "안해",
+    "않아",
+    "말아",
+];
+
+/// 키워드 앞 최대 N 글자 — 부정 표현 탐색 창.
+const NEG_BEFORE_CHARS: usize = 8;
+/// 키워드 뒤 최대 N 글자 — 부정 표현 탐색 창(한국어는 뒤에 붙는다).
+const NEG_AFTER_CHARS: usize = 12;
+
+/// 키워드 앞 N 글자 — 문자 경계를 보존하며 잘라낸다.
+fn window_before(text: &str, start: usize, n_chars: usize) -> &str {
+    let mut bs = start;
+    let mut count = 0usize;
+    for (i, _) in text[..start].char_indices().rev() {
+        if count >= n_chars {
+            break;
+        }
+        bs = i;
+        count += 1;
+    }
+    &text[bs..start]
+}
+
+/// 키워드 뒤 N 글자 — 문자 경계를 보존하며 잘라낸다.
+fn window_after(text: &str, end: usize, n_chars: usize) -> &str {
+    let mut count = 0usize;
+    let mut e = end;
+    for (i, c) in text[end..].char_indices() {
+        if count >= n_chars {
+            break;
+        }
+        e = end + i + c.len_utf8();
+        count += 1;
+    }
+    &text[end..e]
+}
+
+/// 영문 키워드의 단어 경계 — 앞뒤가 영문/숫자면 다른 단어의 일부로 본다.
+fn word_boundary_ok(text: &str, s: usize, e: usize) -> bool {
+    let before_ok = match text[..s].chars().next_back() {
+        None => true,
+        Some(c) => !c.is_ascii_alphanumeric(),
+    };
+    let after_ok = match text[e..].chars().next() {
+        None => true,
+        Some(c) => !c.is_ascii_alphanumeric(),
+    };
+    before_ok && after_ok
+}
+
+/// 키워드 출현이 부정형인지 — 앞뒤 창에 부정 표현이 있으면 제외한다.
+fn kw_negated(text: &str, s: usize, e: usize) -> bool {
+    let before = window_before(text, s, NEG_BEFORE_CHARS);
+    if NEG_BEFORE.iter().any(|m| before.contains(m)) {
+        return true;
+    }
+    let after = window_after(text, e, NEG_AFTER_CHARS);
+    NEG_AFTER.iter().any(|m| after.contains(m))
+}
+
+/// 키워드 목록 중 부정형이 아닌 출현이 하나라도 있는가.
+/// (영문 키워드는 단어 경계를 적용하고, 한국어 키워드는 경계 검사를 하지 않는다)
+fn has_kw(text: &str, kws: &[&str]) -> bool {
+    kws.iter().any(|kw| {
+        let k = kw.to_lowercase();
+        if k.is_empty() {
+            return false;
+        }
+        // 영문(숫자·공백·하이픈만) 키워드에만 단어 경계를 적용한다.
+        let ascii = k.chars().all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '-');
+        text.match_indices(k.as_str()).any(|(s, m)| {
+            let e = s + m.len();
+            if ascii && !word_boundary_ok(text, s, e) {
+                return false;
+            }
+            !kw_negated(text, s, e)
+        })
+    })
+}
+
+/// 채팅 지시문이 보안 진단 의도인지 — 순수 함수(부작용 없음).
+/// 강한 신호(진단·취약점·해킹·pentest·vulnerability …)가 있으면 진단이다.
+/// 약한 신호(점검·보안·audit)만 있으면 일반 작업 지시와 겹치지 않을 때만 진단이다.
+fn looks_like_diagnosis(goal: &str) -> bool {
+    let g = goal.to_lowercase();
+    if g.trim().is_empty() {
+        return false;
+    }
+    let strong = has_kw(&g, DIAG_STRONG);
+    let weak = has_kw(&g, DIAG_WEAK);
+    if !strong && !weak {
+        return false;
+    }
+    // 일반 작업 지시("파일로 뽑아줘"·"목록 정리해줘"·"다운로드"·"요약해줘")는 진단이 아니다.
+    // 강한 진단 신호가 함께 있을 때만 예외(예: "취약점 목록 뽑아줘").
+    if !strong && has_kw(&g, GENERAL_TASK) {
+        return false;
+    }
+    true
+}
+
+/// 채팅 지시문이 심층(병렬 5분야 + 병합) 진단 의도인지 — 순수 함수.
+/// 깊이 신호("깊게"·"정밀"·"전면"·"thorough" …)가 있으면 심층이다.
+/// 단 "깊게 정리해줘" 처럼 일반 작업 지시면 깊이 신호만으로 승격하지 않는다.
+fn looks_like_deep_diagnosis(goal: &str) -> bool {
+    let g = goal.to_lowercase();
+    if !has_kw(&g, DEEP_KW) {
+        return false;
+    }
+    // 일반 작업 지시("깊게 정리해줘"·"요약해줘" 류)는 심층 진단이 아니다 —
+    // 진단 신호가 함께 있을 때만 예외.
+    if has_kw(&g, GENERAL_TASK) && !looks_like_diagnosis(goal) {
+        return false;
+    }
+    true
+}
+
 #[tauri::command]
 fn start_engagement(app: AppHandle, id: String) -> Result<(), String> {
-    let (s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
+    let (mut s, settings, redcell, provider) = engagement_precheck(&app, &id)?;
+    // 진단 의도 판별 — 채팅으로 들어온 지시도 심층 경로와 같은 표준을 받게 한다.
+    let diag_intent = looks_like_diagnosis(&s.goal);
+    let deep_intent = looks_like_deep_diagnosis(&s.goal);
+    let promote = !s.diag && (diag_intent || deep_intent); // 진단 승격 여부(영속 저장 대상)
+    if promote {
+        // 진단 승격 — 세션에 영속 저장한다(같은 세션의 다음 턴도 표준 진단을 유지).
+        if let Some(mut cur) = read_session(&app, &id) {
+            cur.diag = true;
+            cur.updated_at = now();
+            write_session_locked(&app, &cur);
+        }
+        s.diag = true;
+    }
+    if deep_intent && !s.host.trim().is_empty() {
+        // 심층 라우팅 — start_deep_diagnosis 가 precheck·게이트·DNS 드리프트·LLM
+        // 프리플라이트를 모두 자체 수행한다. 여기서 dns_drift_check·gate_session_instruction 을
+        // 다시 부르면 같은 게이트/인가 검사가 두 번 돌아 노트·경고가 중복된다.
+        // 따라서 deep 분기에서는 그 둘을 넘기고 start_deep_diagnosis 에 맡긴다.
+        // (중복되는 것은 engagement_precheck 뿐인데, 이는 읽기 전용이라 무해하다.)
+        emit_note(
+            &app,
+            &id,
+            "[sys] '깊게/정밀' 요청으로 판단해 심층 진단(다섯 가지 관점 병렬 + 최종 병합)으로 진행합니다.".to_string(),
+            None,
+        );
+        return start_deep_diagnosis(app, id);
+    }
+    if promote {
+        // 왜 표준 진단으로 바뀌는지 — 비전문가도 알 수 있게 이유를 남긴다.
+        let text = if deep_intent {
+            // 심층 진단은 대상 주소가 있어야 한다(심층 경로 요구사항) — 주소가 없으면
+            // 표준 진단으로 진행하고 그 사실을 알린다.
+            "[sys] '깊게/정밀' 요청으로 판단해 표준 진단(리포트 표준 + 자동 기본 점검)으로 진행합니다 — 심층 진단은 위에 주소가 있어야 실행됩니다.".to_string()
+        } else {
+            "[sys] '진단' 요청으로 판단해 표준 진단(리포트 표준 + 자동 기본 점검)으로 진행합니다.".to_string()
+        };
+        emit_note(&app, &id, text, None);
+    }
     dns_drift_check(&app, &id, &s.host)?;
     gate_session_instruction(&app, &id, &s)?;
     // 세션 엔진에 따라 pi(-e 확장 게이트) 또는 prime-agent(스킬+킬게이트)로 실행한다.
@@ -5157,16 +5674,16 @@ mod tests {
     #[test]
     fn session_playbook_block_shapes() {
         let mut hits = vec![
-            probes::ProbeHit { id: "P-001".into(), category: "verify-xss".into(), severity: "high".into(), target: "u".into(), title: "XSS 확정".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
-            probes::ProbeHit { id: "P-002".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+            probes::ProbeHit { id: "P-001".into(), category: "verify-xss".into(), severity: "high".into(), target: "u".into(), title: "XSS 확정".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None, fingerprint: "".into(), verdict: "".into(), fix: "".into() },
+            probes::ProbeHit { id: "P-002".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None, fingerprint: "".into(), verdict: "".into(), fix: "".into() },
         ];
-        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 1, danger: false, hits: hits.clone() };
+        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 1, danger: false, hits: hits.clone(), coverage: vec![], needs_validation: vec![], stack: vec![] };
         let pb = session_playbook_block(&rep);
         assert!(pb.contains("P-001") && pb.contains("XSS 확정"), "{pb}");
         assert!(pb.contains("체인"), "{pb}");
         assert!(pb.contains("세션 한정"), "{pb}");
         hits.clear();
-        let empty = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits };
+        let empty = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits, coverage: vec![], needs_validation: vec![], stack: vec![] };
         assert!(session_playbook_block(&empty).is_empty(), "빈 스윕은 무음");
     }
 
@@ -5174,10 +5691,10 @@ mod tests {
     #[test]
     fn p0_evidence_block_carries_chains() {
         let hits = vec![
-            probes::ProbeHit { id: "P-001".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
-            probes::ProbeHit { id: "P-002".into(), category: "xss-reflect".into(), severity: "medium".into(), target: "u".into(), title: "RX".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None },
+            probes::ProbeHit { id: "P-001".into(), category: "openredirect".into(), severity: "high".into(), target: "u".into(), title: "OR".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None, fingerprint: "".into(), verdict: "".into(), fix: "".into() },
+            probes::ProbeHit { id: "P-002".into(), category: "xss-reflect".into(), severity: "medium".into(), target: "u".into(), title: "RX".into(), detail: "".into(), evidence: "".into(), request: "".into(), status: None, fingerprint: "".into(), verdict: "".into(), fix: "".into() },
         ];
-        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits };
+        let rep = probes::ProbeReport { target: "t".into(), started_at: "".into(), duration_ms: 1, probes_run: 10, authenticated: false, verified: 0, danger: false, hits, coverage: vec![], needs_validation: vec![], stack: vec![] };
         let b = p0_evidence_block(&rep, 6000);
         assert!(b.contains("체인 단서") && b.contains("P-001"), "{b}");
     }
@@ -5929,6 +6446,45 @@ mod tests {
         assert!(!excerpt_matches("짧음", "", "짧음"), "20자 미만은 false");
     }
 
+    /// 루트에 URL 이 둘 이상(진입점 + 재현 curl)이어도 하나만 재요청해
+    /// 오등급(사실인 [실증] 이 [징후] 로 내려가는 일)이 없어야 한다.
+    #[test]
+    fn verify_tries_alternative_urls_before_downgrading() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for stream in listener.incoming().take(6) {
+                let Ok(mut s) = stream else { break };
+                let mut buf = [0u8; 2048];
+                let Ok(n) = s.read(&mut buf) else { break };
+                let req = String::from_utf8_lossy(&buf[..n]);
+                let path = req.split_whitespace().nth(1).unwrap_or("/").to_string();
+                // 첫 URL(진입점)은 다른 본문, 두 번째 URL(재현)만 증거를 담는다.
+                let body = if path.starts_with("/repro") {
+                    "SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다"
+                } else {
+                    "평범한 페이지 본문입니다"
+                };
+                let _ = s.write_all(format!("HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes());
+            }
+        });
+        let auth = auth::AuthList { allows: vec!["127.0.0.1".into()], ..Default::default() };
+        let evidence: HashMap<String, String> =
+            [("[P-001]".to_string(), "medium".to_string())].into_iter().collect();
+        let text = format!(
+            "### 루트 1 — .env [P-001]\n진입점: http://127.0.0.1:{port}/home\n재현: curl 'http://127.0.0.1:{port}/repro'\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n"
+        );
+        let rep = verify_report_claims(&text, &evidence, &auth, "");
+        assert_eq!(rep.checks.len(), 1, "{rep:?}");
+        assert!(
+            matches!(rep.checks[0].verdict, ClaimVerdict::Confirmed),
+            "후보 URL 중 하나가 재현되면 확인 유지: {:?}",
+            rep.checks[0].verdict
+        );
+    }
+
     /// 스텁 서버 대조 — 확인/불일치/인가밖/환각P-ID 전 경로.
     #[test]
     fn verify_report_claims_against_stub() {
@@ -5952,11 +6508,12 @@ mod tests {
             }
         });
         let auth = auth::AuthList { allows: vec!["127.0.0.1".into()], ..Default::default() };
-        let valid: HashSet<String> = ["[P-001]".to_string()].into_iter().collect();
+        let evidence: HashMap<String, String> =
+            [("[P-001]".to_string(), "medium".to_string())].into_iter().collect();
         let text = format!(
             "### 루트 1 — .env [P-001]\n진입점: http://127.0.0.1:{port}/env\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n\n### 루트 2 — 가짜 [P-999]\n진입점: http://127.0.0.1:{port}/home\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n\n### 루트 3 — 외부\n진입점: http://evil.test/x\n검증: [실증]\n증거: SECRET_KEY=abcd1234efgh5678 설정값이 그대로 노출되었다\n"
         );
-        let rep = verify_report_claims(&text, &valid, &auth, "");
+        let rep = verify_report_claims(&text, &evidence, &auth, "");
         assert_eq!(rep.checks.len(), 3, "{rep:?}");
         assert!(matches!(rep.checks[0].verdict, ClaimVerdict::Confirmed), "{:?}", rep.checks[0].verdict);
         assert!(matches!(rep.checks[1].verdict, ClaimVerdict::Mismatch(_)), "{:?}", rep.checks[1].verdict);
@@ -5978,11 +6535,12 @@ mod tests {
             ports: Some(vec![1]),
             ..Default::default()
         };
-        let valid: HashSet<String> = ["[P-001]".to_string()].into_iter().collect();
+        let evidence: HashMap<String, String> =
+            [("[P-001]".to_string(), "medium".to_string())].into_iter().collect();
         let text = format!(
             "### 루트 1 — x [P-001]\n진입점: http://127.0.0.1:{port}/env\n검증: [실증]\n증거: SECRET_KEY=abcdef0123456789 설정값 노출\n"
         );
-        let rep = verify_report_claims(&text, &valid, &auth, "");
+        let rep = verify_report_claims(&text, &evidence, &auth, "");
         assert_eq!(rep.checks.len(), 1, "{rep:?}");
         match &rep.checks[0].verdict {
             ClaimVerdict::Skipped(reason) => assert!(reason.contains("인가 밖"), "게이트 사유여야 한다: {reason}"),
@@ -5992,6 +6550,81 @@ mod tests {
         assert_eq!(url_port("https://h.local/x"), Some(443));
         assert_eq!(url_port("http://h.local/x"), Some(80));
         assert_eq!(url_port("notaurl"), None);
+    }
+
+    /// 루트 카드 파싱 — 헤딩 배지 우선, 배지 없으면 '위험도:' 줄 폴백.
+    #[test]
+    fn root_claim_extraction_shapes() {
+        let text = "### 루트 1. SQL 인젝션으로 관리자 탈취 [높음]\n위험도: 높음\n검증: [실증] 재현 확인\n근거: [P-001] 과 [P-002]\n\n### 루트 2. 보안 헤더 누락\n위험도: 중간\n검증: [징후] 헤더 확인\n";
+        let claims = extract_root_claims(text);
+        assert_eq!(claims.len(), 2, "{claims:?}");
+        assert_eq!(claims[0].title, "SQL 인젝션으로 관리자 탈취");
+        assert_eq!(claims[0].severity, "높음");
+        assert_eq!(claims[0].verification, "실증");
+        assert_eq!(claims[0].p_ids, vec!["[P-001]".to_string(), "[P-002]".to_string()]);
+        // 배지 없는 루트 — '위험도:' 줄에서 폴백.
+        assert_eq!(claims[1].title, "보안 헤더 누락");
+        assert_eq!(claims[1].severity, "중간");
+        assert_eq!(claims[1].verification, "징후");
+        assert!(claims[1].p_ids.is_empty());
+        // 루트 헤딩이 없는 리포트는 빈 배열(extract_evidence_claims 와 동일 관대).
+        assert!(extract_root_claims("# 리포트\n위험도: 높음\n검증: [실증]\n").is_empty());
+    }
+
+    /// 위험도 감사 — 과대(강등)/과소(은폐)/일치(무건)/근거없음.
+    #[test]
+    fn severity_audit_over_under_exact_no_evidence() {
+        let text = "### 루트 1. 과대 [치명]\n위험도: 치명\n검증: [실증]\n근거 [P-001]\n\n### 루트 2. 과소 [높음]\n위험도: 높음\n검증: [실증]\n근거 [P-002]\n\n### 루트 3. 일치 [높음]\n위험도: 높음\n검증: [실증]\n근거 [P-003]\n\n### 루트 4. 근거없음 [중간]\n위험도: 중간\n검증: [가정]\n";
+        let claims = extract_root_claims(text);
+        let evidence: HashMap<String, String> = [
+            ("[P-001]".to_string(), "medium".to_string()),
+            ("[P-002]".to_string(), "critical".to_string()),
+            ("[P-003]".to_string(), "high".to_string()),
+        ]
+        .into_iter()
+        .collect();
+        let audits = audit_claim_severities(&claims, &evidence);
+        // 일치 건(루트 3)은 감사 건으로 남지 않는다.
+        assert_eq!(audits.len(), 3, "{audits:?}");
+        let over = audits.iter().find(|a| a.kind == "over").expect("과대 건");
+        assert_eq!(over.claimed, "치명");
+        assert_eq!(over.evidence_max.as_deref(), Some("medium"));
+        let under = audits.iter().find(|a| a.kind == "under").expect("과소 건");
+        assert_eq!(under.claimed, "높음");
+        assert_eq!(under.evidence_max.as_deref(), Some("critical"));
+        let ne = audits.iter().find(|a| a.kind == "no-evidence").expect("근거없음 건");
+        assert!(ne.evidence_max.is_none());
+    }
+
+    /// 존재하지 않는 P-ID 인용은 무시 — 유효 ID 만으로 최대 심각도를 계산한다.
+    #[test]
+    fn severity_audit_ignores_unknown_p_ids() {
+        let claims = extract_root_claims(
+            "### 루트 1. 혼합 인용 [치명]\n위험도: 치명\n검증: [실증]\n근거 [P-001] [P-999]\n",
+        );
+        let evidence: HashMap<String, String> =
+            [("[P-001]".to_string(), "medium".to_string())].into_iter().collect();
+        let audits = audit_claim_severities(&claims, &evidence);
+        assert_eq!(audits.len(), 1, "{audits:?}");
+        assert_eq!(audits[0].kind, "over");
+        assert_eq!(audits[0].evidence_max.as_deref(), Some("medium"));
+    }
+
+    /// 기계 대조 블록에 심각도 대조 소절이 실리고, 과대 건에 낮춤 지시가 붙는다.
+    #[test]
+    fn verify_block_reports_severity_over_audit() {
+        let text = "### 루트 1. SQL 주입 [치명]\n위험도: 치명\n검증: [실증]\n근거 [P-001]\n";
+        let evidence: HashMap<String, String> =
+            [("[P-001]".to_string(), "medium".to_string())].into_iter().collect();
+        let auth = auth::AuthList { allows: vec![], ..Default::default() };
+        let rep = verify_report_claims(text, &evidence, &auth, "");
+        assert_eq!(rep.severity.len(), 1, "{rep:?}");
+        assert_eq!(rep.severity[0].kind, "over");
+        let block = verify_report_block(&rep);
+        assert!(block.contains("심각도 대조"), "{block}");
+        assert!(block.contains("낮출 것"), "{block}");
+        assert!(block.contains("중간"), "{block}");
+        assert!(verify_note_line(&rep).contains("심각도 대조 1건"), "{}", verify_note_line(&rep));
     }
 
     #[test]
@@ -6168,4 +6801,61 @@ mod tests {
         }
         assert!(found.map(|p| p.is_file()).unwrap_or(false), "build.rs 산출물 미발견");
     }
+
+    /// 진단 의도 판별 — 한국어/영어 진단 지시는 진단으로 본다.
+    #[test]
+    fn diagnosis_intent_detected_ko_and_en() {
+        assert!(looks_like_diagnosis("이 사이트 보안 진단해줘"));
+        assert!(looks_like_diagnosis("우리 쇼핑몰 취약점 점검해줘"));
+        assert!(looks_like_diagnosis("로그인 기능 모의해킹 해줘"));
+        assert!(looks_like_diagnosis("please run a security assessment on this site"));
+        assert!(looks_like_diagnosis("do a vulnerability scan of the login page"));
+        assert!(looks_like_diagnosis("취약점 목록 뽑아줘"), "강한 신호는 일반 작업 표현과 함께 있어도 진단");
+    }
+
+    /// 일반 작업 지시는 진단이 아니다 — "파일로 뽑아줘" 류가 오탐되면 안 된다.
+    #[test]
+    fn general_task_is_not_diagnosis() {
+        assert!(!looks_like_diagnosis("파일로 뽑아줘"));
+        assert!(!looks_like_diagnosis("목록 정리해줘"));
+        assert!(!looks_like_diagnosis("다운로드"));
+        assert!(!looks_like_diagnosis("요약해줘"));
+        assert!(!looks_like_diagnosis("사용할 수 있는 API 목록 찾아서 보여줘"));
+        assert!(!looks_like_diagnosis("보안 문서 요약해줘"), "약한 신호 + 일반 작업 지시는 진단 아님");
+        assert!(!looks_like_diagnosis("please review this code"));
+    }
+
+    /// 부정형은 진단이 아니다 — "진단 하지 마"·"don't pentest" 류.
+    #[test]
+    fn negated_diagnosis_is_not_diagnosis() {
+        assert!(!looks_like_diagnosis("진단 하지 마"));
+        assert!(!looks_like_diagnosis("diagnose 하지 마"));
+        assert!(!looks_like_diagnosis("don't pentest"));
+        assert!(!looks_like_diagnosis("보안 점검 하지 마세요"));
+        assert!(!looks_like_diagnosis(""));
+        assert!(!looks_like_diagnosis("   "));
+    }
+
+    /// 심층 의도 — 깊이 신호가 있으면 true, 일반 작업 지시면 승격하지 않는다.
+    #[test]
+    fn deep_intent_needs_depth_signal() {
+        assert!(looks_like_deep_diagnosis("이 사이트를 깊게 진단해줘"));
+        assert!(looks_like_deep_diagnosis("정밀하게 점검해줘"));
+        assert!(looks_like_deep_diagnosis("전면적으로 취약점 봐줘"));
+        assert!(looks_like_deep_diagnosis("thorough vulnerability review"));
+        assert!(looks_like_deep_diagnosis("이 사이트를 깊게 살펴봐줘"));
+        assert!(!looks_like_deep_diagnosis("파일 목록 정리해줘"));
+        assert!(!looks_like_deep_diagnosis("이 사이트를 점검해줘"), "깊이 신호 없음");
+        assert!(!looks_like_deep_diagnosis("이 페이지를 깊게 정리해줘"), "일반 작업 지시");
+        assert!(!looks_like_deep_diagnosis(""), "빈 문자열");
+    }
+
+    /// 영문 키워드는 단어 경계를 지킨다 — 다른 단어의 일부로는 매칭하지 않는다.
+    #[test]
+    fn ascii_keywords_respect_word_boundary() {
+        assert!(!has_kw("useful", &["use"]));
+        assert!(has_kw("a cve-2024-1234 issue", &["cve"]));
+        assert!(!has_kw("cves are filed", &["cve"]));
+    }
+
 }

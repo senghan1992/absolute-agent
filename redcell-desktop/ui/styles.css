@@ -454,6 +454,16 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
   border: 1px solid color-mix(in srgb, var(--accent) 24%, var(--line-2));
 }
 .rs-topline { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; row-gap: 6px; }
+/* 등급 근거 한 줄 — '왜 이 등급인가'를 눈으로 확인하게 한다.
+   D1) 한 줄 잘림(nowrap+ellipsis)을 없애고 2줄까지 보여준다 — 근거가 잘리면 등급을 믿을 수 없다. */
+.rs-why-note {
+  font-size: 11px; color: var(--faint); line-height: 1.45;
+  display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: 2; line-clamp: 2;
+  overflow: hidden;
+}
+.rs-why { display: flex; align-items: baseline; gap: 6px; font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.rs-why-lbl { flex: none; font-size: 10.5px; font-weight: 700; letter-spacing: 0.4px; color: var(--faint); }
+.rs-why-tag { flex: none; font-size: 10.5px; font-weight: 700; color: var(--brand-fg); }
 .rs-grade { display: flex; align-items: center; gap: 8px; flex: none; }
 .rs-letter {
   width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center;
@@ -471,17 +481,34 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .rs-grade-txt { display: flex; flex-direction: column; }
 .rs-grade-txt b { font-size: 13px; letter-spacing: -0.02em; white-space: nowrap; }
 .rs-head { flex: 1 1 auto; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
-.rs-title { font-size: 13px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* D2) 발견 수 + 위험도 분포 — 좁은 창에서 잘리지 않게 줄바꿈을 허용한다. */
+.rs-title { font-size: 13px; color: var(--muted); display: flex; flex-wrap: wrap; align-items: baseline; gap: 0 8px; }
 .rs-title b { color: var(--text); font-size: 13.5px; letter-spacing: -0.02em; }
 /* 위험도별 수 — 항상 한 줄로 보인다 */
-.rs-mini { display: inline-flex; align-items: center; gap: 5px; margin-left: 8px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.rs-mini { display: inline-flex; align-items: center; flex-wrap: wrap; gap: 5px; font-size: 11.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .rs-mini i { font-style: normal; font-weight: 700; white-space: nowrap; }
 .rs-mini i.c-crit { color: var(--sev-critical-fg); }
 .rs-mini i.c-high { color: var(--sev-high-fg); }
 .rs-mini i.c-med { color: var(--sev-medium-fg); }
 .rs-mini i.c-low { color: var(--ok-fg); }
-/* 서랍 안 '직접 확인' 줄 */
-.rs-verify-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+/* H1/B3) 접힘 상태에서도 항상 보이는 영역 — '믿어야 할 정도' + '지금 해야 할 일' */
+.rs-always { display: flex; flex-direction: column; gap: 5px; }
+.rs-trust-row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+.rs-todo { display: flex; flex-direction: column; gap: 3px; padding: 5px 8px; border-radius: 10px; background: color-mix(in srgb, var(--sev-high) 7%, transparent); border: 1px solid color-mix(in srgb, var(--sev-high) 26%, transparent); }
+.rs-todo-head { display: flex; align-items: baseline; gap: 8px; flex-wrap: wrap; }
+.rs-todo-note { font-size: 10.5px; color: var(--faint); }
+.rs-todo-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 2px; }
+.rs-todo-item {
+  display: flex; align-items: baseline; gap: 6px; width: 100%; text-align: left;
+  font: inherit; font-size: 11.5px; color: var(--text); background: none; border: 0; padding: 1px 3px;
+  border-radius: 6px; cursor: pointer;
+}
+.rs-todo-item:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.rs-todo-item.plain { cursor: default; }
+.rs-todo-item.plain:hover { background: none; }
+.rs-todo-item .badge { flex: none; margin: 0; }
+.rt-problem { flex: 0 1 auto; max-width: 55%; font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.rt-action { flex: 1 1 auto; min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rs-vchip { display: inline-flex; align-items: baseline; gap: 5px; font-size: 11px; color: var(--muted); font-weight: 600; }
 .rs-vchip b { font-family: var(--mono); font-size: 12.5px; font-variant-numeric: tabular-nums; }
 .rs-vchip.v-proof b { color: var(--ok-fg); }
@@ -537,7 +564,10 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
   border: 1px solid var(--line-2); border-radius: 8px; padding: 3px 10px 3px 8px;
   background: var(--surface-3); color: var(--muted); transition: all 0.13s;
   display: inline-flex; align-items: center; gap: 7px;
+  /* G2) 칩 폭이 폭발하지 않게 — 라벨은 한 줄에서 잘린다. */
+  max-width: 190px; min-width: 0;
 }
+.rs-jump-chip .jc-label { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .rs-jump-chip:hover { color: var(--text); border-color: var(--faint); background: var(--elev); }
 .rs-jump-chip::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--faint); flex: none; }
 .rs-jump-chip.j-crit::before { background: var(--sev-critical); }
@@ -545,10 +575,17 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .rs-jump-chip.j-med::before { background: var(--sev-medium); }
 .rs-jump-chip.j-low::before { background: var(--ok); }
 .rs-jump-chip.j-none::before { background: var(--faint); }
+/* 종류별 점 색 — 어디로 가는지 색으로도 구분된다 */
+.rs-jump-chip.j-fix::before { background: var(--sev-high); }
+.rs-jump-chip.j-proof::before { background: var(--ok); }
+.rs-jump-chip.j-control::before { background: var(--accent); }
+.rs-jump-chip.j-limit::before, .rs-jump-chip.j-appendix::before, .rs-jump-chip.j-tail::before { background: var(--muted); }
 
 .rs-legend { display: flex; align-items: center; gap: 14px; flex-wrap: wrap; font-size: 10.5px; color: var(--faint); }
 .rs-legend-item { display: inline-flex; align-items: center; gap: 4px; }
 .rs-legend-item .badge { margin: 0; }
+/* F2) 우선순위 범례 한 줄 — P0~P3 이 무엇을 뜻하는지 */
+.rs-legend-prio { color: var(--muted); font-weight: 600; letter-spacing: 0.1px; }
 
 /* 바로가기로 이동한 카드 잠깐 강조 */
 .md-card.flash { border-color: color-mix(in srgb, var(--accent) 55%, var(--line-2)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 22%, transparent); }
@@ -557,7 +594,10 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 @media (max-width: 1180px) {
   .session-header { padding: 10px 12px 11px; gap: 8px; }
   .report-summary { padding: 8px 10px 0; }
-  .rs-mini { display: none; } /* 좁은 창에선 첫 줄을 더 얇게 — 수는 서랍 필터에서 확인 */
+  /* D2) 위험도 분포(.rs-mini)는 항상 보여야 한다 — 좁은 창에서 숨기면 핵심 정보가 사라진다.
+     대신 첫 줄(.rs-topline)이 줄바꿈되게 한다. */
+  .rs-topline { flex-wrap: wrap; row-gap: 6px; }
+  .rs-head { flex: 1 1 240px; }
 }
 @media (max-width: 900px) {
   #workspace { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr) minmax(200px, 40vh); }
@@ -636,7 +676,14 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 }
 .md-kind.root { background: color-mix(in srgb, var(--sev-low) 14%, transparent); border-color: color-mix(in srgb, var(--sev-low) 40%, transparent); color: var(--sev-low-fg); }
 .md-kind.pre { background: rgba(160, 168, 182, 0.12); border-color: var(--line-2); color: var(--muted); }
-.md-kind.tail { background: color-mix(in srgb, var(--ok) 12%, transparent); border-color: color-mix(in srgb, var(--ok) 32%, transparent); color: var(--ok-fg); }
+.md-kind.tail { background: rgba(160, 168, 182, 0.12); border-color: var(--line-2); color: var(--muted); }
+/* A2) 카드 종류별 색 — '해야 할 일' (경고) · '직접 확인' (긍정) · '잘 되고 있는' (정보) ·
+   '한계'·'부록' (중립). 내용과 라벨이 같은 색을 써야 한눈에 들어온다. */
+.md-kind.fix { background: color-mix(in srgb, var(--sev-high) 16%, transparent); border-color: color-mix(in srgb, var(--sev-high) 45%, transparent); color: var(--sev-high-fg); }
+.md-kind.proof { background: color-mix(in srgb, var(--ok) 14%, transparent); border-color: color-mix(in srgb, var(--ok) 38%, transparent); color: var(--ok-fg); }
+.md-kind.control { background: color-mix(in srgb, var(--accent) 16%, transparent); border-color: color-mix(in srgb, var(--accent) 42%, transparent); color: var(--accent-fg); }
+.md-kind.limit { background: rgba(160, 168, 182, 0.12); border-color: var(--line-2); color: var(--muted); }
+.md-kind.appendix { background: rgba(160, 168, 182, 0.12); border-color: var(--line-2); color: var(--faint); }
 .md-card-title { font-weight: 650; color: var(--text); font-size: 12px; }
 .md-card-title:empty { display: none; }
 .md-body { padding: 14px 16px 16px; font-size: 13.5px; line-height: 1.7; color: var(--text); overflow-wrap: break-word; }
@@ -663,6 +710,10 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .md-body pre { background: #070c22; border: 1px solid var(--line-2); border-radius: 10px; padding: 12px 14px; overflow-x: auto; margin: 10px 0; }
 .md-body pre code { background: none; padding: 0; color: #c9d1e6; }
 .md-body table { border-collapse: collapse; width: 100%; margin: 10px 0; font-size: 12.5px; }
+/* D3) 넓은 표(7열 등)는 가로 스크롤로 — 창이 좁아도 표가 붕괴하지 않는다. */
+.md-body .table-scroll { overflow-x: auto; }
+.md-body .table-scroll table { min-width: 520px; }
+.table-scroll { overflow-x: auto; max-width: 100%; }
 .md-body th, .md-body td { border: 1px solid var(--line-2); padding: 6px 10px; text-align: left; }
 .md-body th { background: color-mix(in srgb, var(--brand) 8%, transparent); font-weight: 600; }
 .md-body td { vertical-align: top; }
@@ -689,6 +740,18 @@ html.theme-anim .btn { transition: background-color 0.28s ease, color 0.28s ease
 .badge.bx-info { background: color-mix(in srgb, var(--sev-low) 16%, transparent); color: var(--sev-low-fg); }
 .badge.bx-assume { background: rgba(160, 168, 182, 0.18); color: var(--muted); }
 .badge.bx-p { background: rgba(255, 93, 122, 0.14); color: #ff8da1; }
+/* F1) 우선순위 4단계 색 — P0 빨강 · P1 주황 · P2 노랑 · P3 회색 */
+.badge.bx-p0 { background: color-mix(in srgb, var(--sev-critical) 20%, transparent); color: var(--sev-critical-fg); }
+.badge.bx-p1 { background: color-mix(in srgb, var(--sev-high) 20%, transparent); color: var(--sev-high-fg); }
+.badge.bx-p2 { background: color-mix(in srgb, var(--sev-medium) 20%, transparent); color: var(--sev-medium-fg); }
+.badge.bx-p3 { background: rgba(160, 168, 182, 0.18); color: var(--muted); }
+/* D4/E2) 약점 번호 툴팁 — 점선 밑줄 + 커서 힌트 (B3: 전문어 툴팁도 이 스타일을 재사용) */
+abbr[title] { text-decoration: underline dotted; cursor: help; }
+/* E) 위험 점수 · 벡터 · 분류 */
+.cvss-num { font-family: var(--mono); font-size: 14px; color: var(--sev-critical-fg); font-weight: 700; }
+.cvss-den { margin: 0 4px 0 1px; color: var(--faint); font-size: 11.5px; }
+.cvss-vec { font-family: var(--mono); font-size: 11px; color: var(--muted); background: color-mix(in srgb, var(--surface-3) 70%, transparent); }
+.df-sep { margin: 0 3px; color: var(--faint); }
 
 .diag-flow { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 2px; margin: 10px 0; padding: 12px 14px; background: color-mix(in srgb, var(--surface-2) 60%, transparent); border: 1px solid var(--line-2); border-radius: 12px; }
 .diag-step { display: inline-flex; align-items: center; padding: 5px 11px 5px 8px; border-radius: 999px; font-size: 12px; font-weight: 600; background: var(--surface-3); border: 1.5px solid var(--line-2); color: var(--text); max-width: 240px; overflow-wrap: break-word; gap: 7px; }
@@ -1268,8 +1331,10 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .ns-run .ic { width: 12px; height: 12px; stroke: currentColor; }
 
 /* ── 온보딩 히어로: 심야 출발 안내판 ─────────────────────────────────────── */
+/* A1) 히어로가 '빈 상태' 카드(z-index 50) 위에 있어야 첫 화면으로 보인다.
+   topbar(52px) 아래에서 시작해 상단 버튼(⚙·테마·기록)은 계속 눌러 수 있게 한다. */
 .hero {
-  position: absolute; inset: 0; z-index: 40; overflow-y: auto;
+  position: absolute; inset: 52px 0 0 0; z-index: 55; overflow-y: auto;
   background:
     radial-gradient(900px 380px at 50% -6%, var(--sheen), transparent 60%),
     var(--bg);
@@ -1293,6 +1358,18 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .hero-url:focus { border-color: var(--accent); box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent); }
 .hero-provider { flex: 0 0 190px; font-size: 12.5px; padding: 0 10px; color: var(--text); background: var(--surface); border: 1px solid var(--line-2); border-radius: 10px; outline: none; }
 .hero .btn-lg { flex: none; white-space: nowrap; }
+/* 엔진 선택 + 한 줄 설명 — 호버(title)만으로 못 읽는 사람에게 항상 보이는 설명 */
+.hero-engine-wrap { flex: 0 0 216px; display: flex; flex-direction: column; gap: 5px; min-width: 0; }
+.hero-engine-wrap .hero-engine { flex: none; width: 100%; }
+.hero-engine-hint { margin: 0; font-size: 10.5px; line-height: 1.4; color: var(--muted); }
+@media (max-width: 720px) { .hero-engine-wrap { flex-basis: auto; } }
+/* AI 모델 미연결 안내 카드 — 첫 화면부터(진단 시작 전에) 보인다 */
+.hero-setup { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: 2px 0 10px; padding: 13px 15px; border: 1px solid var(--line-2); border-left: 3px solid var(--accent-2); border-radius: 12px; background: color-mix(in srgb, var(--accent-2) 8%, transparent); }
+.hero-setup .hs-txt { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
+.hero-setup .hs-txt b { font-size: 13px; color: var(--text); }
+.hero-setup .hs-txt span { font-size: 11.5px; color: var(--muted); line-height: 1.5; }
+.hero-setup .btn { flex: none; white-space: nowrap; }
+@media (max-width: 720px) { .hero-setup { flex-direction: column; align-items: stretch; } }
 .hero-error { margin: 2px 0 8px; font-size: 12.5px; color: var(--sev-critical-fg); }
 .hero-engines { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 26px; min-height: 4px; }
 .hero-engines:empty { display: none; }
@@ -1354,6 +1431,10 @@ tr.row-finding td.c-msg { color: var(--text); font-weight: 600; }
 .diag-field.field-evidence .df-body { display: block; width: 100%; }
 .ev-pre { margin: 2px 0 0; padding: 8px 11px; font-family: var(--mono); font-size: 11px; line-height: 1.6; white-space: pre-wrap; word-break: break-all; color: var(--text); background: var(--surface-3); border: 1px solid var(--line); border-radius: 8px; }
 .diag-field.field-repro .df-body { font-family: var(--mono); font-size: 11.5px; }
+/* 객관적 점수 필드 (CVSS·CWE·OWASP) — 도구 산출 기준값이라 모노스페이스로 구분 */
+.diag-field.field-score { background: color-mix(in srgb, var(--accent) 7%, transparent); border: 1px solid color-mix(in srgb, var(--accent) 24%, transparent); }
+.diag-field.field-score .df-label { color: var(--accent-fg); }
+.diag-field.field-score .df-body { font-family: var(--mono); font-size: 11.5px; letter-spacing: -0.01em; }
 
 /* ── 라이브 필터: 기록 종류 고르기 ─────────────────────────────────────────── */
 .live-filter { display: flex; align-items: center; gap: 6px; padding: 8px 14px; border-bottom: 1px solid var(--line); background: var(--surface); flex: none; }

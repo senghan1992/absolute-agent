@@ -135,7 +135,7 @@ function renderActive() {
   if (chatInput) {
     chatInput.placeholder = (s && s.diag)
       ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
-      : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"";
+      : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"  ·  \"진단/점검\" 요청은 표준 진단으로 진행합니다";
   }
   setBadge(s.status);
   renderDangerBtn(s);
@@ -323,6 +323,7 @@ function toast(msg) {
 
 // ── 채팅 미니 마크다운: 어시스턴트 답변 구조화(코드펜스·인라인·개행) ─────────
 function chatHtml(content) {
+  resetTermTips(); // 채팅 답변 하나 = 문서 하나
   const parts = esc(content).split("```");
   return parts.map((p, i) => (i % 2 === 1)
     ? `<pre class="chat-pre">${p.replace(/^\n+|\n+$/g, "")}</pre>`
@@ -1027,15 +1028,31 @@ async function ensureTargetAuthorized() {
 }
 
 async function runEngagement() {
-  const s = cur(); if (!s) return;
-  if (!s.host && !$("shHost").value.trim()) { toast("주소를 먼저 입력하세요."); return; }
+  const s = cur(); if (!s) return null;
+  if (!s.host && !$("shHost").value.trim()) { toast("주소를 먼저 입력하세요."); return null; }
   await persistHeader();
-  if (!activeProvider()) { showProviderModal(); return; } // 미설정 → 모달로 설정 유도
+  if (!activeProvider()) { showProviderModal(); return null; } // 미설정 → 모달로 설정 유도
   await ensureTargetAuthorized();
   try {
     setBadge("running");
     markRunStart(s);
     await invoke("start_engagement", { id: s.id });
+    // 백엔드가 지시문을 '진단' 의도로 판단해 세션을 승격했을 수 있다 —
+    // 결과 탭이 리포트를 받으려면 UI 쪽 diag/deep 플래그를 맞춰야 한다(판정은 백엔드가 한다).
+    // 세션 객체 전체를 교체하면 스트리밍 중 도착한 이벤트가 유실될 수 있어 플래그만 갱신한다.
+    const after = await invoke("get_session", { id: s.id }).catch(() => null);
+    const live = sessions.find((x) => x.id === s.id);
+    if (after && live) {
+      live.diag = !!after.diag;
+      live.deep = !!after.deep;
+    }
+    // 승격 이유 문구 — 백엔드 판정 결과(diag·deep 플래그)를 그대로 옮긴다.
+    if (after && after.diag && !s.diag) {
+      return (after.deep && !s.deep)
+        ? "깊게/정밀 요청으로 판단해 심층 진단(다섯 가지 관점 병렬 + 최종 병합)으로 진행합니다 — 결과 리포트 탭에서 확인하세요."
+        : "진단 요청으로 판단해 표준 진단(리포트 표준 + 자동 기본 점검)으로 진행합니다 — 결과 리포트 탭에서 확인하세요.";
+    }
+    return null;
   } catch (e) {
     const risk = parseConsentError(e);
     if (risk) { // 위험한 작업 — 에러가 아니라 동의 모달로 전환
@@ -1050,6 +1067,7 @@ async function runEngagement() {
     applySession(fresh);
     renderChat();
     toast(msg); // 스폰 실패(전형적: Windows npx 문제, redcell 경로/의존성)를 즉시 알린다
+    return null;
   }
 }
 
@@ -1103,7 +1121,11 @@ async function sendChat() {
   applySession(fresh);
   renderChat();
   switchView("live");
-  if (s.status !== "running") await runEngagement();
+  if (s.status !== "running") {
+    const why = await runEngagement();
+    // WHY 안내 — 백엔드가 진단으로 승격한 이유를 사용자에게 그대로 보여준다.
+    if (why) await pushAssistant(s.id, why);
+  }
 }
 
 // ── 진단 모드 헬퍼: 입력창 플레이스홀더 + 진단 목표 반영 ──────────────────────
@@ -1113,7 +1135,7 @@ function setDiagPlaceholder() {
   const s = cur();
   ci.placeholder = (s && s.diag)
     ? "예: 우리 쇼핑몰은 로그인·주문·결제 기능이 있어요 (없어도 주소만으로 진단합니다)"
-    : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"";
+    : "위에 주소를 입력하세요 · 예: \"사용할 수 있는 API 목록 찾아서 보여줘\"  ·  \"진단/점검\" 요청은 표준 진단으로 진행합니다";
 }
 
 // ── [진단 시작] 원클릭: URL 만으로 심층 진단 (5개 분야 병렬 + 시나리오 리포트) ─
@@ -1201,6 +1223,27 @@ const PROVIDER_CATALOG = [
 ];
 let envReadyMap = {}; // get_providers 의 ready_env (시스템 환경변수 감지)
 let expandedProvider = null;
+
+// A4) 프로바이더 이름을 사람 말로 — 내부 이름(anthropic·openai…)은 화면에 내보내지 않는다.
+const PROVIDER_LABEL = {
+  anthropic: "Anthropic (권장)",
+  openai: "OpenAI",
+  openrouter: "OpenRouter (여러 모델)",
+  "prime-inference": "Prime Intellect",
+  groq: "Groq (고속)",
+  cerebras: "Cerebras (초고속)",
+  xai: "xAI (Grok)",
+  deepseek: "DeepSeek",
+  mistral: "Mistral AI",
+  moonshotai: "Moonshot (Kimi)",
+  zai: "Z.ai (GLM)",
+  "lge-aigw": "사내 AI 게이트웨이",
+  ollama: "직접 연결 (로컬 서버)",
+  custom: "직접 연결",
+};
+function providerLabel(name) {
+  return PROVIDER_LABEL[name] || name;
+}
 
 function activeProvider() {
   const sel = $("shProvider");
@@ -1380,18 +1423,18 @@ async function refreshProviders() {
   const psel = $("shProvider");
   if (psel) {
     const prev = psel.value || ((cur() && cur().provider) || settings.default_provider || "");
-    psel.innerHTML = `<option value="">— AI 모델 선택 —</option>`
-      + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+    psel.innerHTML = `<option value="">— AI 모델을 고르세요 —</option>`
+      + connected.map((p) => `<option value="${esc(p.name)}">${esc(providerLabel(p.name))} ✅</option>`).join("");
     if (prev && connected.some((p) => p.name === prev)) {
       psel.value = prev;
     } else if (prev) {
-      psel.insertAdjacentHTML("beforeend", `<option value="${esc(prev)}">${esc(prev)} (저장됨)</option>`);
+      psel.insertAdjacentHTML("beforeend", `<option value="${esc(prev)}">${esc(providerLabel(prev))} (저장됨)</option>`);
       psel.value = prev;
     }
   }
   const hint = $("providerHint");
   if (hint) {
-    const names = connected.map((p) => p.name);
+    const names = connected.map((p) => providerLabel(p.name));
     hint.textContent = names.length
       ? `AI 모델 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
       : "AI 모델 미연결 — ⚙ 설정에서 연결하세요.";
@@ -1489,11 +1532,53 @@ function resultsTabActive() {
 // (번호 없는 "### 루트. …" 변형도 루트로 인정한다.)
 const ROOT_HEADING_RE = /^#{1,4}\s*루트\s*\d*\.?\s*/;
 
+// 등급 산정 기준값 — 심각도(영향)와 검증(확신)은 서로 다른 축이다.
+//   SEV_INDEX : 심각도만 봤을 때의 위험 지수(0~10)
+//   VER_FACTOR: 직접 확인일수록 확신(가정일수록 낮게 반영)
+const SEV_INDEX = { "치명": 10, "높음": 7.5, "중간": 5, "낮음": 2.5 };
+const VER_FACTOR = { "실증": 1.0, "징후": 0.85, "가정": 0.7 };
+const VER_RANK = { "실증": 3, "징후": 2, "가정": 1 };
+const SEV_RANK = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
+
+// 등급 판정 — 평균으로 묻지 않는다.
+// "직접 확인된 치명 1건 + 추측 낮은 등급 5건"이 평균이면 '안전' 으로 나오는 사고를
+// 막기 위해, 확인된 최악 findings 가 등급의 하한(floor)이 된다.
+// C1) A 는 '발견 0건' 만 뜻한다 — 발견이 1건이라도 있으면 최소 B(양호).
+//     (등급 라벨: A 이상 없음 / B 양호 / C 보통 / D 위험 / F 심각)
+function gradeOf(roots) {
+  if (!roots.length) {
+    return { letter: "A", label: "이상 없음", cls: "g-a", why: "점검 범위 안에서 알려진 결함을 확인하지 못했습니다" };
+  }
+  const has = (sev, ver) => roots.some((r) => r.sev === sev && (!ver || r.ver === ver));
+  if (has("치명", "실증")) {
+    return { letter: "F", label: "심각", cls: "g-f", why: "직접 확인된 치명 취약점이 있습니다 — 즉시 조치 필요" };
+  }
+  if (has("치명")) {
+    return { letter: "D", label: "위험", cls: "g-d", why: "치명으로 추정되는 경로가 있습니다 — 실측 재현으로 확정 필요" };
+  }
+  if (has("높음", "실증")) {
+    return { letter: "D", label: "위험", cls: "g-d", why: "직접 확인된 위험 등급 취약점이 있습니다" };
+  }
+  if (has("높음")) {
+    return { letter: "C", label: "보통", cls: "g-c", why: "위험 등급으로 추정되는 경로가 있습니다 — 실측 재현 필요" };
+  }
+  if (has("중간", "실증")) {
+    return { letter: "C", label: "보통", cls: "g-c", why: "직접 확인된 중간 등급 취약점이 있습니다" };
+  }
+  if (has("중간") || has("낮음", "실증")) {
+    return { letter: "B", label: "양호", cls: "g-b", why: "중간 이하 취약점만 확인됐습니다 — 방어 심층화 권고 수준" };
+  }
+  // C1) A 는 '발견 0건' 만 뜻한다 — 발견이 1건이라도 있으면 최소 B.
+  // (낮음+가정 만으로는 '안전' 이 아니다 — 확인하지 못한 것이 확인되지 않은 것뿐이다.
+  //  화면에 'A 안전' 과 '3개 발견' 이 동시에 뜨던 혼선을 없앤다.)
+  return { letter: "B", label: "양호", cls: "g-b", why: "낮은 등급의 발견만 있습니다 — 즉시 조치보다 확인·보완이 먼저입니다" };
+}
+
 // ── 진단 리포트 요약: 루트별 위험도·검증 상태를 한눈에 (왼쪽 상단 등급 헤더) ──
 function reportStats(docs) {
   const sev = { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 };
   const ver = { "실증": 0, "징후": 0, "가정": 0 };
-  const roots = []; // { sev, ver } — 루트별 증거 기반 위험도 산정용
+  const roots = []; // { sev, ver, title } — 루트별 위험도 산정용
   let cur = null;
   for (const d of docs) {
     for (const raw of (d.text || "").split(/\r?\n/)) {
@@ -1503,13 +1588,27 @@ function reportStats(docs) {
         const key = m ? m[1] : (line.match(/(치명|높음|중간|낮음)/) || [])[1];
         const sk = sev[key] != null ? key : "낮음";
         sev[sk]++;
-        cur = { sev: sk, ver: "가정" };
+        const title = line
+          .replace(ROOT_HEADING_RE, "")
+          .replace(/\s*\[(치명|높음|중간|낮음)\]\s*/, "")
+          .trim();
+        cur = { sev: sk, ver: "가정", title, explicit: false };
         roots.push(cur);
         continue;
       }
-      // 검증(실측/확인/재현) 라인의 [실증]/[징후]/[가정] 을 해당 루트의 증거 상태로 반영.
+      // 검증 상태 — '검증:' 라벨이 붙은 줄이 가장 신뢰할 만한 근거다.
+      // (라벨 줄이 없으면 '실측·확인·재현' 어휘가 있는 줄을 보조 근거로 쓴다.
+      //  라벨 줄을 먼저 찾았다면 뒤의 보조 근거로는 덮어쓰지 않는다 —
+      //  '근거: [가정]' 같은 후속 줄이 확인 상태를 깎아내면 안 된다.)
       const vm = line.match(/\[(실증|징후|가정)\]/);
-      if (vm && /검증|실측|확인|재현/.test(line) && cur) cur.ver = vm[1];
+      if (!vm || !cur) continue;
+      const explicit = /^\**\s*검증\s*[:：]/.test(line);
+      if (explicit) {
+        cur.ver = vm[1];
+        cur.explicit = true;
+      } else if (!cur.explicit && /검증|실측|확인|재현/.test(line)) {
+        cur.ver = vm[1];
+      }
     }
   }
   // 분석은 끝났는데 '루트 N' 헤딩이 없다면(리포트 포맷 편차) 본문의 [위험도] 배지만으로
@@ -1519,7 +1618,12 @@ function reportStats(docs) {
       for (const raw of (d.text || "").split(/\r?\n/)) {
         const re = /\[(치명|높음|중간|낮음)\]/g;
         let mm;
-        while ((mm = re.exec(raw)) !== null) { sev[mm[1]]++; roots.push({ sev: mm[1], ver: "가정" }); }
+        while ((mm = re.exec(raw)) !== null) {
+          sev[mm[1]]++;
+          // 같은 줄에 검증 배지가 있으면 그 상태를, 없으면 '가정' 으로 둔다.
+          const vm = raw.match(/\[(실증|징후|가정)\]/);
+          roots.push({ sev: mm[1], ver: vm ? vm[1] : "가정", title: "", explicit: false });
+        }
         const rv = /\[(실증|징후|가정)\]/g;
         let mv;
         while ((mv = rv.exec(raw)) !== null) ver[mv[1]]++;
@@ -1530,19 +1634,20 @@ function reportStats(docs) {
     // 권고·실측 절의 인용)을 합산하면 '직접 확인' 건수가 부풀려진다.
     for (const r of roots) ver[r.ver]++;
   }
-  // 등급 = 루트별 (위험도 가중치 × 증거 가중치) 평균. 증거가 강할수록 가까이 인정된다.
-  const vw = { "실증": 1.0, "징후": 0.6, "가정": 0.35 };
-  const sw = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
-  const m = roots.length;
-  const score = m ? roots.reduce((a, r) => a + sw[r.sev] * (vw[r.ver] || 0.35), 0) / m : 0;
-  const grade =
-    m === 0 ? { letter: "·", label: "분석 완료", cls: "g-ok" }
-      : score >= 3.3 ? { letter: "F", label: "심각", cls: "g-f" }
-      : score >= 2.7 ? { letter: "D", label: "위험", cls: "g-d" }
-      : score >= 2.0 ? { letter: "C", label: "보통", cls: "g-c" }
-      : score >= 1.3 ? { letter: "B", label: "양호", cls: "g-b" }
-      : { letter: "A", label: "안전", cls: "g-a" };
-  return { roots: m, sev, ver, score, grade };
+  // 위험 지수 — 심각도 × 확신. 가장 위험한 루트가 지수를 결정한다(평균 아님).
+  const score = roots.reduce((acc, r) => {
+    const v = (SEV_INDEX[r.sev] || 0) * (VER_FACTOR[r.ver] || VER_FACTOR["가정"]);
+    return Math.max(acc, v);
+  }, 0);
+  // 등급 = 규칙 기반 (확인된 치명·높음이 하한을 정한다).
+  const grade = gradeOf(roots);
+  // 가장 위험한 루트 — 요약 헤더에 이름을 단다(사건번호 대신 사람이 읽는 한 줄).
+  let worst = null;
+  for (const r of roots) {
+    const k = (SEV_RANK[r.sev] || 0) * 10 + (VER_RANK[r.ver] || 1);
+    if (!worst || k > worst.k) worst = { k, r };
+  }
+  return { roots: roots.length, sev, ver, score, grade, worst: worst ? worst.r : null };
 }
 // ── 리포트 요약 바: 얇은 한 줄(등급 · 위험 수 · 내보내기) + 접히는 서랍 ──
 // 리포트 본문이 상단 요약에 가리지 않도록:
@@ -1613,6 +1718,174 @@ function gotoCardSeg(ix) {
   setTimeout(() => el.classList.remove("flash"), 1200);
 }
 
+// ── B) "지금 해야 할 일" 파싱 ───────────────────────────────────────────────
+// 리포트 본문의 권고 절에서 [P0]/[P1] 항목(또는 루트의 '보완:' 필드)을 최대 3개 뽑아
+// "우선순위 · 문제 한줄 · 조치 한줄" 로 보여준다. 파싱에 실패하면 조용히 숨긴다.
+const PRIO_BY_SEV = { "치명": "P0", "높음": "P1", "중간": "P2", "낮음": "P3" };
+const SEV_ORDER = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
+
+// 최신 발행 리포트 1건의 인덱스 (statsDocs 와 같은 기준).
+function latestReportIndex(docs) {
+  let li = -1;
+  (docs || []).forEach((d, i) => { if (d.report) li = i; });
+  return li;
+}
+
+// "## " 절 단위로 텍스트를 나눈다 (종류 판별은 sectionKind 와 동일 규칙).
+function splitSections(text) {
+  const out = [];
+  let cur = null;
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (/^##\s+/.test(line)) {
+      const title = line.replace(/^#{1,6}\s*/, "").trim();
+      cur = { title, kind: sectionKind(title), lines: [] };
+      out.push(cur);
+      continue;
+    }
+    if (!cur) { cur = { title: "", kind: null, lines: [] }; out.push(cur); }
+    cur.lines.push(raw);
+  }
+  return out;
+}
+
+// 첫 절(구분자 '—'/'·') 까지 = 문제 한줄.
+function firstClause(text) {
+  const t = String(text || "").trim();
+  const m = /^([^—–·]+?)(?=\s+[—–]\s+|\s·\s|$)/.exec(t);
+  return (m ? m[1] : t).trim();
+}
+// '보완:' (또는 '조치:'/'권고:') 뒤 값 = 조치 한줄.
+function pickField(text, labels) {
+  const t = String(text || "");
+  for (const lb of labels) {
+    const re = new RegExp(lb + "\\s*[:：]\\s*(.+?)(?=\\s·\\s|$)");
+    const m = re.exec(t);
+    if (m && m[1].trim()) return m[1].trim();
+  }
+  return "";
+}
+function pickSev(text) {
+  const m = /위험도\s*\[?\s*(치명|높음|중간|낮음)/.exec(String(text || ""));
+  return m ? m[1] : null;
+}
+
+// 루트 블록의 '보완:' 필드 (권고 절에 항목이 없을 때 대체 사용).
+function parseRootFixes(text) {
+  const out = [];
+  let cur = null;
+  for (const raw of String(text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    if (ROOT_HEADING_RE.test(line)) {
+      if (cur && cur.fix) out.push(cur);
+      const txt = line.replace(/^#{1,4}\s*루트\s*\d*\.?\s*/, "").trim();
+      const sevM = txt.match(/\[(치명|높음|중간|낮음)\]/);
+      cur = { title: txt.replace(/\s*\[(치명|높음|중간|낮음)\]\s*/, "").trim(), sev: sevM ? sevM[1] : null, fix: "" };
+      continue;
+    }
+    if (!cur) continue;
+    if (/^#{1,6}\s+/.test(line)) { if (cur.fix) out.push(cur); cur = null; continue; }
+    const f = /^\s*보완\s*[:：]\s*(.+)$/.exec(line);
+    if (f && !cur.fix) cur.fix = f[1].trim();
+  }
+  if (cur && cur.fix) out.push(cur);
+  return out;
+}
+
+// 항목 → 대상 루트 카드 매칭 (제목 포함 관계 → 공통 접두사 → 위험도 일치 순).
+function commonPrefixLen(a, b) {
+  let n = 0;
+  while (n < a.length && n < b.length && a[n] === b[n]) n++;
+  return n;
+}
+function matchRoot(item, roots) {
+  if (!roots.length) return null;
+  const prob = item.problem.replace(/\s+/g, " ").trim();
+  let best = null;
+  for (const r of roots) {
+    const t = (r.it.title || "").replace(/\s+/g, " ").trim();
+    if (!t) continue;
+    if (prob.indexOf(t) >= 0 || t.indexOf(prob) >= 0) {
+      const len = Math.min(t.length, prob.length);
+      if (!best || len > best.len) best = { r, len };
+    }
+  }
+  if (best) return best.r;
+  let bp = null;
+  for (const r of roots) {
+    const t = (r.it.title || "").replace(/\s+/g, " ").trim();
+    const n = commonPrefixLen(prob, t);
+    if (n >= 4 && (!bp || n > bp.n)) bp = { r, n };
+  }
+  if (bp) return bp.r;
+  if (item.sev) {
+    const bySev = roots.find((r) => r.it.sev === item.sev);
+    if (bySev) return bySev;
+  }
+  return null;
+}
+
+// "지금 해야 할 일" 목록 — 최대 3건.
+function parseActionItems(docs, segs) {
+  if (!docs || !docs.length) return [];
+  const li = latestReportIndex(docs);
+  const docIdx = li >= 0 ? li : docs.length - 1;
+  const doc = docs[docIdx];
+  if (!doc) return [];
+  const text = doc.text || "";
+  const items = [];
+  // (1) 권고 절의 [P0]/[P1] 항목
+  for (const sec of splitSections(text)) {
+    if (!sec.kind || sec.kind.kind !== "fix") continue;
+    for (const line of sec.lines) {
+      const m = /^\s*(?:[-*+]\s*)?\[(P[0-3])\]\s*(.+)$/.exec(line);
+      if (!m) continue;
+      const pri = m[1];
+      if (pri !== "P0" && pri !== "P1") continue; // P2/P3 는 '지금' 할 일이 아니다
+      const rest = m[2];
+      const problem = firstClause(rest);
+      const action = pickField(rest, ["보완", "조치", "권고"]);
+      if (!problem || !action) continue;
+      items.push({ pri, problem, action, sev: pickSev(rest), docIdx });
+    }
+  }
+  // (2) 권고 절에 항목이 없으면 루트의 '보완:' 필드로 대체 (심각도 순)
+  if (!items.length) {
+    const fixes = parseRootFixes(text).filter((r) => r.fix);
+    fixes.sort((a, b) => (SEV_ORDER[b.sev] || 0) - (SEV_ORDER[a.sev] || 0));
+    for (const r of fixes) {
+      items.push({ pri: PRIO_BY_SEV[r.sev] || "P3", problem: r.title, action: r.fix, sev: r.sev, docIdx });
+    }
+  }
+  if (!items.length) return [];
+  // 대상 루트 카드(같은 리포트 안의 루트만) 매칭 — 클릭 시 그 카드로 이동.
+  const roots = (segs || []).map((it, i) => ({ it, i })).filter((x) => x.it.kind === "root" && x.it.docIdx === docIdx);
+  for (const it of items) {
+    const r = matchRoot(it, roots);
+    it.goto = r ? r.i : null;
+  }
+  return items.slice(0, 3);
+}
+
+// "지금 해야 할 일" 블록 HTML — 없으면 빈 문자열(빈 영역을 만들지 않는다).
+function renderTodoList(items) {
+  if (!items || !items.length) return "";
+  const rows = items.map((it) => {
+    const pri = `<span class="badge ${DIAG_BADGES[it.pri] || "bx-p3"}">${esc(it.pri)}</span>`;
+    const body = `<span class="rt-problem">${esc(it.problem)}</span><span class="rt-action">${esc(it.action)}</span>`;
+    return it.goto != null
+      ? `<li><button class="rs-todo-item" data-goto="${it.goto}" title="이 항목의 발견 카드로 이동합니다">${pri}${body}</button></li>`
+      : `<li><span class="rs-todo-item plain">${pri}${body}</span></li>`;
+  }).join("");
+  return `<div class="rs-todo">
+    <div class="rs-todo-head">
+      <span class="rs-nav-label">지금 해야 할 일</span>
+      <span class="rs-todo-note">누르면 그 항목의 발견으로 이동합니다</span>
+    </div>
+    <ol class="rs-todo-list">${rows}</ol>
+  </div>`;
+}
+
 function renderReportSummary(s, docs, segs) {
   const top = $("reportSummary");
   if (!top) return;
@@ -1620,15 +1893,21 @@ function renderReportSummary(s, docs, segs) {
   if (!isDiag || !docs.length) { top.classList.add("hidden"); top.innerHTML = ""; return; }
   const st = reportStats(statsDocs(docs));
   top.classList.remove("hidden");
+  const worst = st.worst && st.worst.title
+    ? `<div class="rs-why"><span class="rs-why-lbl">최고 위험</span>${esc(st.worst.title)} <span class="rs-why-tag">${esc(st.worst.sev)}${st.worst.ver === "실증" ? " · 직접 확인" : st.worst.ver === "징후" ? " · 일부 확인" : " · 추측"}</span></div>`
+    : "";
+  // B1) 지금 해야 할 일 — 권고 절의 P0/P1 항목 (없으면 조용히 숨김)
+  const todo = renderTodoList(parseActionItems(docs, segs));
   top.innerHTML = `
     <div class="rs-card">
       <div class="rs-topline">
-        <div class="rs-grade ${st.grade.cls}" title="직접 확인한 정도를 반영한 위험도 등급">
+        <div class="rs-grade ${st.grade.cls}" title="${esc(st.grade.why)}">
           <span class="rs-letter">${st.grade.letter}</span>
-          <div class="rs-grade-txt"><b>${st.grade.label}</b></div>
+          <div class="rs-grade-txt"><b>${esc(st.grade.label)}</b></div>
         </div>
         <div class="rs-head">
-          <div class="rs-title"><b>위험 ${st.roots}개 발견</b><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
+          <div class="rs-title"><b>${st.roots}개 발견</b><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
+          <div class="rs-why-note">${esc(st.grade.why)} · 위험지수 ${st.score.toFixed(1)}/10</div>
         </div>
         <div class="rs-actions">
           <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
@@ -1638,20 +1917,27 @@ function renderReportSummary(s, docs, segs) {
           <button id="rsToggle" class="rs-btn rs-toggle" aria-expanded="false" title="필터·바로가기 펼치기/접기">자세히</button>
         </div>
       </div>
+      ${worst}
+      <!-- H1/B3) 접힘 상태에서도 항상 보이는 정보 — 등급·위험지수·근거·발견 분포 위에
+           '믿어야 할 정도' 와 '지금 해야 할 일' 을 둔다. 서랍에는 필터·점프·범례만 둔다. -->
+      <div class="rs-always">
+        <div class="rs-trust-row" title="직접 열어 확인한 정도 — 직접 확인(초록) · 일부 확인(노랑) · 추측(회색)">
+          <span class="rs-nav-label">이 리포트를 얼마나 믿어야 하나</span>
+          <span class="rs-vchip v-proof" title="직접 요청해 확인한 취약점"><b>${st.ver["실증"]}</b> 직접 확인</span>
+          <span class="rs-vchip v-sig" title="일부 정황만 확인됨"><b>${st.ver["징후"]}</b> 일부 확인</span>
+          <span class="rs-vchip v-assume" title="코드·설명 기반 추론(미확인)"><b>${st.ver["가정"]}</b> 추측</span>
+        </div>
+        ${todo}
+      </div>
       <span id="rsExportStatus" class="rs-export-status"></span>
       <div class="rs-drawer">
         ${renderDiagNav(st, segs)}
-        <div class="rs-verify-row" title="직접 열어 확인한 정도 — 직접 확인(초록) · 일부 확인(노랑) · 추측(회색)">
-          <span class="rs-nav-label">직접 확인</span>
-          <span class="rs-vchip v-proof"><b>${st.ver["실증"]}</b> 직접 확인</span>
-          <span class="rs-vchip v-sig"><b>${st.ver["징후"]}</b> 일부 확인</span>
-          <span class="rs-vchip v-assume"><b>${st.ver["가정"]}</b> 추측</span>
-        </div>
         <div class="rs-legend">
           <span class="rs-legend-item"><span class="badge bx-crit">치명</span>위험도(치명→낮음)</span>
           <span class="rs-legend-item"><span class="badge bx-proof">실증</span>직접 확인함</span>
           <span class="rs-legend-item"><span class="badge bx-sig">징후</span>일부 확인</span>
           <span class="rs-legend-item"><span class="badge bx-assume">가정</span>추측(미확인)</span>
+          <span class="rs-legend-item rs-legend-prio">P0 지금 바로 · P1 이번 주 · P2 한 달 · P3 참고</span>
         </div>
       </div>
     </div>`;
@@ -1708,21 +1994,31 @@ function renderDiagNav(st, segs) {
      <span class="rs-nav-count">${rootCountTxt}</span></div>`;
 }
 
-// 바로가기 내비 — 카드가 많아도 원하는 섹션으로 한 번에 이동(요약·루트 N·권고).
+// 바로가기 내비 — 카드가 많아도 원하는 섹션으로 한 번에 이동(요약·해야 할 일·루트 N·실측…).
 const JUMP_CLS = { "치명": "j-crit", "높음": "j-high", "중간": "j-med", "낮음": "j-low" };
+// G1) 칩 라벨을 종류별로 구분한다 — "위험 N" 뿐이면 무엇인지 모른다.
+const JUMP_LABEL = {
+  report: "리포트",
+  prelude: "요약",
+  fix: "해야 할 일",
+  proof: "직접 확인",
+  control: "잘 되고 있는",
+  limit: "한계",
+  appendix: "부록",
+  tail: "그 밖의 내용",
+};
 function renderJumpNav(segs) {
   if (!segs || segs.length < 3) return "";
   let rootNo = 0;
-  const label = (it) => {
-    if (it.kind === "root") { rootNo++; return `위험 ${rootNo}`; }
-    if (it.kind === "prelude") return "요약";
-    if (it.kind === "tail") return "막는 방법";
-    return "결과";
-  };
+  let lastDoc = null;
   const chips = segs
     .map((it, i) => {
-      const cls = it.sev ? JUMP_CLS[it.sev] || "" : "j-none";
-      return `<button class="rs-jump-chip ${cls}" data-goto="${i}" title="${esc(it.title || label(it))}">${label(it)}</button>`;
+      const cls = it.sev ? (JUMP_CLS[it.sev] || "") : `j-${it.kind || "none"}`;
+      // 루트 라벨은 "위험 N" — 리포트(1차/최종)마다 다시 1부터 센다.
+      if (it.docIdx != null && it.docIdx !== lastDoc) { lastDoc = it.docIdx; rootNo = 0; }
+      const lb = it.kind === "root" ? `위험 ${++rootNo}` : (JUMP_LABEL[it.kind] || "결과");
+      const tip = it.kind === "root" ? (it.title || lb) : (it.sec || it.title || lb);
+      return `<button class="rs-jump-chip ${cls}" data-goto="${i}" title="${esc(tip)}"><span class="jc-label">${esc(lb)}</span></button>`;
     })
     .join("");
   return `<div class="rs-jump"><span class="rs-nav-label">바로가기</span>${chips}</div>`;
@@ -1750,6 +2046,8 @@ body{margin:0;background:#0d1116;color:#dbe4ee;font:14px/1.7 system-ui,'Apple SD
 .md-body pre{background:#0b0f14;border:1px solid #232a34;border-radius:10px;padding:13px 15px;overflow-x:auto;margin:12px 0}
 .md-body pre code{background:none;color:#c9d1d9;padding:0}
 .md-body table{border-collapse:collapse;width:100%;margin:12px 0;font-size:13px}
+.table-scroll{overflow-x:auto}
+.md-body table{min-width:520px}
 .md-body th,.md-body td{border:1px solid #232a34;padding:7px 11px;text-align:left;vertical-align:top}
 .md-body th{background:rgba(255,70,85,.07);font-weight:600}
 .md-body tr:nth-child(even) td{background:rgba(255,255,255,.02)}
@@ -1766,6 +2064,15 @@ body{margin:0;background:#0d1116;color:#dbe4ee;font:14px/1.7 system-ui,'Apple SD
 .bx-proof{background:rgba(93,212,142,.2);color:#7fe0a9;border:1px solid rgba(93,212,142,.4)}
 .bx-sig{background:rgba(242,177,52,.2);color:#ffd073;border:1px solid rgba(242,177,52,.4)}
 .bx-p{background:rgba(255,93,122,.16);color:#ff8da1}
+.bx-p0{background:rgba(240,68,82,.2);color:#ff8d9a}
+.bx-p1{background:rgba(255,138,61,.2);color:#ffb183}
+.bx-p2{background:rgba(255,194,14,.2);color:#ffd25e}
+.bx-p3{background:rgba(160,168,182,.18);color:#aab4c2}
+abbr[title]{text-decoration:underline dotted;cursor:help}
+.df-sep{margin:0 3px;color:#8a94a3}
+.cvss-num{font-family:'JetBrains Mono',Consolas,monospace;font-size:14px;color:#ff8f8f}
+.cvss-den{margin:0 4px 0 1px;color:#8a94a3;font-size:12px}
+.cvss-vec{font-family:'JetBrains Mono',Consolas,monospace;font-size:11px!important;color:#9aa5b3!important;background:rgba(255,255,255,.04)!important}
 .diag-flow{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:12px 0;padding:13px 15px;background:#131920;border:1px solid #232a34;border-radius:12px}
 .diag-step{display:inline-flex;align-items:center;padding:5px 11px;border-radius:999px;font-size:12.5px;font-weight:600;background:rgba(255,255,255,.04);border:1px solid #2b3240;color:#dbe4ee}
 .diag-step.vuln{background:rgba(255,93,93,.15);border-color:rgba(255,93,93,.45);color:#ff9aa4}
@@ -1840,20 +2147,58 @@ function exportHtmlShell(title, meta) {
 </div></body></html>`;
 }
 function diagToExportHtml(s, name) {
+  resetTermTips(); // 내보내기 본문도 문서당 첫 등장만 툴팁
   const body = mdToHtml(reportMarkdown(s));
   const target = s && s.host ? escHtml(s.host + (s.port ? ":" + s.port : "")) : "(—)";
   const title = escHtml((name || "RedCell 진단 리포트").trim() || "RedCell 진단 리포트");
-  return exportHtmlShell(title, `대상 ${target}`).replace("__RC_BODY__", body);
+  return exportHtmlShell(title, `대상 ${target}${reportMetaLine(s)}`).replace("__RC_BODY__", body);
 }
 function segmentToExportHtml(name, target, text) {
+  resetTermTips(); // 절 하나 = 문서 하나
   const body = mdToHtml(text);
   const title = escHtml((name || "RedCell 결과").trim() || "RedCell 결과");
   return exportHtmlShell(title, `대상 ${target || "(—)"}`).replace("__RC_BODY__", body);
 }
 
+// 리포트 표지(메타) — 내보낸 파일·복사본이 스스로를 설명한다.
+// (대상 · 점검일 · 등급 · 위험지수 · 발견 분포 · 검증 상태 분포)
+function reportMetaLine(s) {
+  const st = reportStats(statsDocs(resultDocs(s)));
+  if (!st.roots) return "";
+  return ` · 등급 ${st.grade.letter}(${st.grade.label}) · 위험지수 ${st.score.toFixed(1)}/10 · 발견 ${st.roots}건`
+    + ` (치명 ${st.sev["치명"]}·높음 ${st.sev["높음"]}·중간 ${st.sev["중간"]}·낮음 ${st.sev["낮음"]})`
+    + ` · 직접확인 ${st.ver["실증"]}·추측 ${st.ver["가정"]}`;
+}
+
+// 리포트 표지 블록(마크다운) — MD 저장·클립보드 복사·인쇄용.
+function reportCover(s, docs) {
+  const st = reportStats(docs);
+  const target = (s && s.host) ? (s.host + (s.port ? ":" + s.port : "")) : "(대상 미상)";
+  const now = new Date();
+  const p2 = (n) => String(n).padStart(2, "0");
+  const stamp = `${now.getFullYear()}-${p2(now.getMonth() + 1)}-${p2(now.getDate())} ${p2(now.getHours())}:${p2(now.getMinutes())}`;
+  const sev = st.sev;
+  const lines = [
+    `> **RedCell 보안 진단 리포트**`,
+    `> 대상 ${target} · 점검일 ${stamp}`,
+  ];
+  if (st.roots) {
+    lines.push(`> 등급 ${st.grade.letter} (${st.grade.label}) · 위험지수 ${st.score.toFixed(1)}/10 · 발견 ${st.roots}건`
+      + ` (치명 ${sev["치명"]} · 높음 ${sev["높음"]} · 중간 ${sev["중간"]} · 낮음 ${sev["낮음"]})`);
+    lines.push(`> 검증 상태 — 직접 확인 ${st.ver["실증"]} · 일부 확인 ${st.ver["징후"]} · 추측 ${st.ver["가정"]}`
+      + (st.worst && st.worst.title ? ` · 최고 위험: ${st.worst.title}` : ""));
+  } else {
+    lines.push(`> 등급 ${st.grade.letter} (${st.grade.label}) — 점검 범위 안에서 알려진 결함을 확인하지 못했습니다`);
+  }
+  return lines.join("\n");
+}
+
 function reportMarkdown(s) {
   // 내보내기·복사·인쇄는 최신 발행 리포트(전 차수 취합본) 1건만 — 로그 나열이 아니다.
-  return statsDocs(resultDocs(s)).map((d) => d.text).join("\n\n");
+  const docs = statsDocs(resultDocs(s));
+  const body = docs.map((d) => d.text).join("\n\n");
+  const cover = reportCover(s, docs);
+  return cover ? `${cover}\n\n${body}` : body;
 }
 function reportBaseName(s) {
   return ((s && (s.name || "redcell-report")) || "redcell-report").replace(/[^\w가-힣 -]/g, "").trim() || "redcell-report";
@@ -1946,8 +2291,31 @@ function printSegment(ix, btn) {
   printHtml(segmentToExportHtml(name, segTarget(), seg.text), st);
 }
 
-// ── 진단 리포트를 루트 카드로 분할 (prelude/루트/권고·실측) ──────────────────
+// ── 진단 리포트를 루트 카드로 분할 (prelude/루트/권고·실측·통제·한계·부록) ──
 const RISK_CLS = { "치명": "rk-crit", "높음": "rk-high", "중간": "rk-med", "낮음": "rk-low" };
+
+// A1) "## " 절 경계마다 카드를 만든다.
+//     절 제목 정규화 — 번호·공백·괄호·앞뒤 표현 차이를 허용하고 핵심 키워드로 판별한다.
+//     (예: "## 5. 개선·보완 권고 (우선순위)" 와 "## 5. 개선·보완 권고" · "## 한계와 미검증 영역" 이
+//      같은 종류로 잡히게 — 소문자·공백 제거 후 핵심 키워드로 본다.)
+//     매칭이 안 되는 절은 아래 tail(fallback) 로 모은다(안전).
+const SEC_KINDS = [
+  { kind: "fix", title: "해야 할 일 (우선순위별)", re: /(권고|개선|보완)/ },
+  { kind: "proof", title: "직접 확인한 것", re: /(실측|확인한)/ },
+  { kind: "control", title: "이미 잘 되고 있는 부분", re: /(통제|잘되고)/ },
+  { kind: "limit", title: "확인하지 못한 부분 (한계)", re: /(한계|미검증)/ },
+  { kind: "appendix", title: "부록", re: /부록/ },
+];
+// 카드 최종 순서 — 실측·통제·한계·부록은 루트 뒤로, '기타(tail)' 는 맨 뒤.
+const SEC_ORDER = ["proof", "control", "limit", "appendix", "tail"];
+
+// 절 제목 → 카드 종류 (없으면 null → 기존 tail 동작으로 fallback).
+function sectionKind(title) {
+  const norm = String(title || "").toLowerCase().replace(/\s+/g, "");
+  for (const k of SEC_KINDS) if (k.re.test(norm)) return k;
+  return null;
+}
+
 function reportLabel(d) {
   const h1 = (d.text || "").match(/^#\s+(.*)$/m);
   if (h1) return h1[1].trim().slice(0, 60);
@@ -1956,56 +2324,92 @@ function reportLabel(d) {
 
 function segmentDiag(docs) {
   const out = [];
-  let pre = [];      // 첫 루트 앞(요약·범위·공격 표면)
-  let tail = [];     // 마지막 루트 뒤(권고·실측 확인)
+  docs.forEach((d, di) => {
+    // 리포트가 2건 이상(1차+최종)이면 첫 리포트에도 구분 배너를 단다 —
+    // 없으면 1차 리포트가 어떤 문서인지 카드 목록에서 알 수 없다.
+    if (docs.length > 1) {
+      out.push({ kind: "report", title: reportLabel(d), sev: null, text: "", seq: d.seq, ts: d.ts, docIdx: di });
+    }
+    out.push(...segmentDocDiag(d, di));
+  });
+  return out.filter((it) => it.text.trim() || it.kind === "report");
+}
+
+// 리포트 1건 → 카드 목록.
+// 루트 앞(요약·범위)은 prelude, 루트는 루트 카드, 루트 뒤 "## " 절은 종류별로 카드.
+function segmentDocDiag(d, di) {
+  const out = [];
+  const pre = [];    // 루트 앞(요약·범위)
+  const roots = [];  // 발견(루트) 카드
+  const named = [];  // 절 카드(권고·실측·통제·한계·부록·기타)
   let cur = null;    // 현재 루트 누적
+  let rootNo = 0;
+  let sec = null;    // 현재 이름 있는 절
+  let tail = null;   // 종류를 못 알아본 절(기존 tail 동작으로 fallback)
   let seenRoot = false;
+
   const flushRoot = () => {
-    if (cur) { out.push({ kind: "root", title: cur.title, sev: cur.sev, text: cur.buf.join("\n") }); cur = null; }
+    if (cur) {
+      roots.push({ kind: "root", title: cur.title, sev: cur.sev, text: cur.buf.join("\n"), docIdx: di, rootNo: cur.rootNo });
+      cur = null;
+    }
+  };
+  const flushSec = () => {
+    if (sec) { named.push({ kind: sec.kind, title: sec.title, sec: sec.sec, text: sec.buf.join("\n"), docIdx: di }); sec = null; }
   };
   const flushTail = () => {
-    if (tail.length) { out.push({ kind: "tail", title: "막는 방법 · 확인 내역", sev: null, text: tail.join("\n") }); tail = []; }
+    if (tail && tail.buf.length) { named.push({ kind: "tail", title: tail.title, sec: tail.sec, text: tail.buf.join("\n"), docIdx: di }); }
+    tail = null;
   };
-  // 리포트가 2건 이상(1차+최종)이면 첫 리포트에도 구분 배너를 단다 —
-  // 없으면 1차 리포트가 어떤 문서인지 카드 목록에서 알 수 없다.
-  if (docs.length > 1) {
-    out.push({ kind: "report", title: reportLabel(docs[0]), sev: null, text: "", seq: docs[0].seq, ts: docs[0].ts });
+
+  for (const raw of (d.text || "").split(/\r?\n/)) {
+    const line = raw.trim();
+    // 1) 루트 헤딩 → 새 루트 카드 시작
+    if (ROOT_HEADING_RE.test(line)) {
+      flushRoot(); flushSec(); flushTail();
+      seenRoot = true;
+      rootNo++;
+      const txt = line.replace(/^#{1,4}\s*루트\s*\d*\.?\s*/, "").trim();
+      const sevM = txt.match(/\[(치명|높음|중간|낮음)\]/);
+      cur = {
+        title: txt.replace(/\s*\[(치명|높음|중간|낮음)\]\s*/, "").trim(), // A4) 카드 제목 = 실제 루트 제목
+        sev: sevM ? sevM[1] : null,
+        buf: [raw],
+        rootNo,
+      };
+      continue;
+    }
+    // 2) "## " 절 경계 — 루트가 나온 뒤에만 절을 나눈다(앞부분은 prelude 로 남긴다)
+    if (seenRoot && /^##\s+/.test(line)) {
+      flushRoot(); flushSec();
+      const secTitle = line.replace(/^#{1,6}\s*/, "").trim();
+      const k = sectionKind(secTitle);
+      if (k) {
+        flushTail();
+        sec = { kind: k.kind, title: k.title, sec: secTitle, buf: [raw] };
+      } else if (!tail) {
+        tail = { kind: "tail", title: "그 밖의 내용", sec: secTitle, buf: [raw] };
+      } else {
+        tail.buf.push(raw); // 못 알아본 절은 기존 tail 처럼 한 장에 모은다
+      }
+      continue;
+    }
+    // 3) 내용 누적
+    if (cur) cur.buf.push(raw);
+    else if (sec) sec.buf.push(raw);
+    else if (tail) tail.buf.push(raw);
+    else pre.push(raw);
   }
-  docs.forEach((d, di) => {
-    if (di > 0) { // 새 리포트 시작 — 이전 리포트 카드 마감 + 구분 배너
-      flushRoot();
-      flushTail();
-      if (pre.length) { out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") }); pre = []; }
-      out.push({ kind: "report", title: reportLabel(d), sev: null, text: "", seq: d.seq, ts: d.ts });
-      cur = null; seenRoot = false;
-    }
-    for (const raw of (d.text || "").split(/\r?\n/)) {
-      const isRoot = ROOT_HEADING_RE.test(raw.trim());
-      // 루트 헤딩 → 새 루트 카드 시작
-      if (isRoot) {
-        if (pre.length && !seenRoot) { out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") }); pre = []; }
-        flushRoot();
-        seenRoot = true;
-        const txt = raw.replace(/^#{1,4}\s*루트\s*\d*\.?\s*/, "").trim();
-        const sevM = txt.match(/\[(치명|높음|중간|낮음)\]/);
-        cur = { title: txt.replace(/\s*\[(치명|높음|중간|낮음)\]\s*/, "").trim(), sev: sevM ? sevM[1] : null, buf: [raw] };
-        continue;
-      }
-      // 루트 중간에 '## 섹션' 시작 → 루트 마감, 이후는 tail(권고~)
-      if (cur && /^##\s+/.test(raw.trim())) {
-        flushRoot();
-        tail.push(raw);
-        continue;
-      }
-      if (cur) cur.buf.push(raw);
-      else if (seenRoot) tail.push(raw);
-      else pre.push(raw);
-    }
-  });
-  flushRoot();
-  flushTail();
-  if (pre.length) out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n") });
-  return out.filter((it) => it.text.trim() || it.kind === "report");
+  flushRoot(); flushSec(); flushTail();
+  if (pre.length) out.push({ kind: "prelude", title: "요약 · 점검 범위", sev: null, text: pre.join("\n"), docIdx: di });
+  // A3) 순서 — 요약(prelude) → 해야 할 일(fix) → 발견(루트) → 실측·통제·한계·부록.
+  //     왜 이 순서인가: 이 앱의 사용자는 보안 전문가가 아니다.
+  //     "지금 뭘 해야 하지?" 가 루트 디테일(증거·재현·영향)보다 먼저 보여야 한다 —
+  //     그래서 권고 카드는 요약 바로 다음(루트보다 앞)으로 올린다.
+  const fixes = named.filter((n) => n.kind === "fix");
+  const rest = SEC_ORDER.map((k) => named.filter((n) => n.kind === k)).flat();
+  out.push(...fixes, ...roots, ...rest);
+  return out;
 }
 
 function renderResults() {
@@ -2033,15 +2437,27 @@ function renderResults() {
   }
   resultsSegs = segs;
   renderReportSummary(s, docs, segs);
+  // B2) 툴팁은 '문서(=발행 리포트)당 첫 등장'만 — 1차 리포트와 최종 리포트는 각각 따로 센다.
+  let tipDoc = null;
   el.innerHTML = segs.map((it, i) => {
+    if (it.docIdx != null && it.docIdx !== tipDoc) { tipDoc = it.docIdx; resetTermTips(); }
     const isRoot = it.kind === "root";
     const rk = it.sev ? RISK_CLS[it.sev] || "" : "";
+    // A2) 카드 종류별 배지 — '막는 방법' 처럼 내용과 다른 라벨은 쓰지 않는다.
     const tag = isRoot ? `<span class="md-kind root">발견</span>`
       : it.kind === "report" ? `<span class="md-kind doc">리포트</span>`
       : it.kind === "prelude" ? `<span class="md-kind pre">요약·범위</span>`
-      : it.kind === "tail" ? `<span class="md-kind tail">막는 방법</span>`
+      : it.kind === "fix" ? `<span class="md-kind fix">해야 할 일</span>`
+      : it.kind === "proof" ? `<span class="md-kind proof">직접 확인</span>`
+      : it.kind === "control" ? `<span class="md-kind control">잘 되고 있는</span>`
+      : it.kind === "limit" ? `<span class="md-kind limit">한계</span>`
+      : it.kind === "appendix" ? `<span class="md-kind appendix">부록</span>`
+      : it.kind === "tail" ? `<span class="md-kind tail">기타</span>`
       : `<span class="md-kind doc">결과</span>`;
-    const title = isRoot || it.kind === "report" ? esc(it.title || "") : (it.seq != null ? `#${it.seq}` : "");
+    // 루트 카드는 실제 루트 제목, 절 카드는 원래 절 제목(번호 포함)을 보여준다.
+    const title = isRoot || it.kind === "report" ? esc(it.title || "")
+      : (it.kind === "prelude" || it.kind === "doc") ? (it.seq != null ? `#${it.seq}` : "")
+      : esc(it.sec || it.title || "");
     return `<article class="md-card ${rk}${isRoot ? " is-root" : ""}" data-ix="${i}">
        <header class="md-card-head">
          ${tag}<span class="md-card-title">${title}</span>
@@ -2060,8 +2476,66 @@ function escHtml(s) {
 }
 
 /* 미니 마크다운 → HTML (의존성 없음). 입력은 먼저 이스케이프한 뒤 변환하므로 안전. */
-const DIAG_BADGES = { "치명": "bx-crit", "높음": "bx-high", "중간": "bx-med", "낮음": "bx-low", "정보": "bx-info", "가정": "bx-assume", "실증": "bx-proof", "징후": "bx-sig", "P0": "bx-p", "P1": "bx-p", "P2": "bx-p", "P3": "bx-p" };
+// F1) 우선순위 배지를 4단계로 나눈다 — 전부 같은 색이면 우선순위가 구분되지 않는다.
+const DIAG_BADGES = { "치명": "bx-crit", "높음": "bx-high", "중간": "bx-med", "낮음": "bx-low", "정보": "bx-info", "가정": "bx-assume", "실증": "bx-proof", "징후": "bx-sig", "P0": "bx-p0", "P1": "bx-p1", "P2": "bx-p2", "P3": "bx-p3" };
+
+// ── B) 비전문가용 전문어 툴팁 사전 ────────────────────────────────────────────
+// 이 앱의 사용자는 "보안을 잘 모르는 사람"이다. 리포트 본문에 나오는 전문어를
+// 첫 등장에서만 <abbr title="..."> 로 감싸 한 줄 설명을 건다.
+// (반복 감싸면 화면이 시끄러워지므로 문서당 첫 등장만 감싼다 — B2)
+// CVSS · CWE · OWASP 의 필드용 툴팁은 lane4(classifyHtml) 가 따로 담당한다 —
+// 여기서는 본문에서 자유롭게 등장하는 용어만 맡는다(중복 감싸기 금지).
+const TERM_TIPS = [
+  { key: "cwe", re: /\bCWE-(\d{1,4})\b/, tip: (m) => `소프트웨어 취약점 분류 번호(${m[1]}번 항목)` },
+  { key: "owasp", re: /\bOWASP\s+A(\d{2})(?::(\d{4}))?/, tip: (m) => `OWASP이 매년 공개하는 가장 위험한 웹 취약점 10종 중 ${Number(m[1])}번${m[2] ? `(${m[2]}년 목록)` : ""}` },
+  { key: "idor", re: /\bIDOR\b/, tip: "남의 다른 번호 주소로 들어가 정보를 보는 약점" },
+  { key: "sqli", re: /\bSQL\s*주입(?![가-힣])|\bSQL\s*Injection\b|\bSQLi\b/i, tip: "입력값을 데이터베이스 명령에 섞어 정보를 빼가는 방법" },
+  { key: "xss", re: /\bXSS\b/, tip: "웹 페이지에 스크립트를 심어 다른 사용자 화면에서 실행하는 방법" },
+  { key: "csrf", re: /\bCSRF\b/, tip: "사용자 대신 요청을 보내게 만드는 방법" },
+  { key: "ssrf", re: /\bSSRF\b/, tip: "서버가 대신 다른 주소에 요청하게 만드는 방법" },
+  { key: "cookie-httponly", re: /\bHttpOnly\b/, tip: "브라우저에 로그인 정보를 안전하게 남기는 설정" },
+  { key: "cookie-secure", re: /\bSecure\b(?=[^\n]{0,40}(?:HttpOnly|SameSite|Set-Cookie|쿠키|Cookie|cookie))/, tip: "브라우저에 로그인 정보를 안전하게 남기는 설정" },
+  { key: "cookie-samesite", re: /\bSameSite\b/, tip: "브라우저에 로그인 정보를 안전하게 남기는 설정" },
+  { key: "redirect", re: /리다이렉트/, tip: "사용자를 다른 사이트로 넘기는 동작" },
+  { key: "waf", re: /\bWAF\b/, tip: "공격을 막는 방화벽" },
+  { key: "jwt", re: /\bJWT\b/, tip: "로그인 상태를 담은 서명된 값" },
+  { key: "cors", re: /\bCORS\b/, tip: "다른 사이트가 내 API를 호출해도 되게 열어주는 설정" },
+  { key: "sso", re: /\bSAML\b|\bOIDC\b/, tip: "다른 서비스의 계정으로 로그인하게 해주는 방식" },
+  { key: "csp", re: /\bCSP\b/, tip: "스크립트 실행 규칙을 지정하는 헤더" },
+  { key: "hsts", re: /\bHSTS\b/, tip: "브라우저가 항상 암호화 연결만 쓰게 강제하는 설정" },
+  { key: "race", re: /\brace\s+condition\b/i, tip: "동시에 들어온 요청의 처리 순서가 잘못 엇갈려 생기는 결함" },
+  { key: "race", re: /레이스\s*컨디션/, tip: "동시에 들어온 요청의 처리 순서가 잘못 엇갈려 생기는 결함" },
+  { key: "session-fixation", re: /세션\s*고정/, tip: "로그인 전에 받은 세션 토큰을 로그인 후에도 그대로 쓰는 결함" },
+  { key: "privesc", re: /권한\s*상승/, tip: "일반 사용자 권한으로 관리자 기능에 접근하는 결함" },
+  { key: "path-traversal", re: /경로\s*순회|path\s+traversal/i, tip: "경로에 ../ 등을 넣어 의도한 바깥 파일을 읽는 방법" },
+  { key: "xxe", re: /\bXXE\b/, tip: "XML 안의 외부 참조를 통해 서버 파일을 읽는 방법" },
+  { key: "deserialization", re: /역직렬화/, tip: "신뢰한 데이터를 실행 가능한 형태로 되살리는 과정에서 생기는 결함" },
+];
+// 이미 툴팁을 건 문서 안에서 다시 감싸지 않기 위한 상태 — 문서(리포트 한 편) 단위로 초기화.
+let tipSeen = new Set();
+function resetTermTips() { tipSeen = new Set(); }
+// 전문어 첫 등장만 <abbr title="설명"> 으로 감싼다.
+function tipTerms(s) {
+  // 백틱(코드) 안쪽은 건드리지 않는다 — 코드 식별자는 그대로 둔다.
+  const parts = s.split(/(`[^`]+`)/g);
+  for (let i = 0; i < parts.length; i += 2) {
+    let p = parts[i];
+    for (const t of TERM_TIPS) {
+      if (tipSeen.has(t.key)) continue;
+      const re = new RegExp(t.re.source, t.re.flags.indexOf("g") >= 0 ? t.re.flags : t.re.flags + "g");
+      const m = re.exec(p);
+      if (!m) continue;
+      tipSeen.add(t.key);
+      const tip = typeof t.tip === "function" ? t.tip(m) : t.tip;
+      p = p.slice(0, m.index) + `<abbr title="${esc(tip)}">${m[0]}</abbr>` + p.slice(m.index + m[0].length);
+    }
+    parts[i] = p;
+  }
+  return parts.join("");
+}
 function inlineMd(s) {
+  // B) 전문어 툴팁 — 이스케이프된 평문 단계에서 먼저 감싼다(태그·속성 안을 건드리지 않으려고).
+  s = tipTerms(s);
   s = s.replace(/`([^`]+)`/g, (_, c) => `<code>${c}</code>`);
   s = s.replace(/\[\s*(치명|높음|중간|낮음|정보|가정|실증|징후|P[0-3])\s*\]/g, (_, b) => `<span class="badge ${DIAG_BADGES[b]}">${b}</span>`);
   s = s.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
@@ -2098,9 +2572,123 @@ const VERIFY_ST = [
   ["징후", "bx-sig", "일부만 확인"],
   ["가정", "bx-assume", "추측 (직접 확인 못 함)"],
 ];
+// ── E) 약점 번호 툴팁 사전 ────────────────────────────────────────────────
+// 비전문가는 "CWE-89" 가 무엇인지 모른다 — 번호마다 한국어 한 줄 설명을 붙인다.
+const CWE_TIPS = {
+  "22": "경로 조작으로 서버의 임의 파일을 읽는 약점",
+  "78": "입력값이 명령으로 실행되어 서버 명령이 돌아가는 약점",
+  "79": "웹 페이지에 넣은 스크립트가 그대로 실행되는 약점",
+  "89": "입력값을 검증하지 않아 데이터베이스 명령이 실행되는 약점",
+  "200": "권한 없는 사용자가 제한된 정보를 볼 수 있는 약점",
+  "352": "사용자 요청만으로 다른 사람의 권한이 바뀌는 약점",
+  "434": "업로드한 파일이 실행 가능한 코드로 저장되는 약점",
+  "502": "신뢰할 수 없는 데이터를 역직렬화해 코드가 실행되는 약점",
+  "601": "사용자가 넘긴 주소로 서버가 요청을 보내는 약점",
+  "614": "쿠키에 HttpOnly 가 없어 스크립트로 읽힐 수 있는 약점",
+  "639": "리소스 소유권을 검사하지 않아 남의 정보를 볼 수 있는 약점",
+  "798": "비밀번호·키 같은 자격증명이 코드에 박혀 있는 약점",
+  "918": "서버가 지정된 주소로 요청을 보내 정보가 샐 수 있는 약점",
+};
+const OWASP_TIPS = {
+  "A01": "OWASP 가장 위험한 웹 취약점 10종 중 1번 — 접근통제 위반(남의 정보 열람)",
+  "A02": "OWASP 가장 위험한 웹 취약점 10종 중 2번 — 암호화 실패(평문 전송·약한 암호)",
+  "A03": "OWASP 가장 위험한 웹 취약점 10종 중 3번 — 주입(입력값이 명령으로 실행됨)",
+  "A04": "OWASP 가장 위험한 웹 취약점 10종 중 4번 — 안전하지 않은 설계",
+  "A05": "OWASP 가장 위험한 웹 취약점 10종 중 5번 — 보안 설정 오류",
+  "A06": "OWASP 가장 위험한 웹 취약점 10종 중 6번 — 오래된 라이브러리 사용",
+  "A07": "OWASP 가장 위험한 웹 취약점 10종 중 7번 — 인증·인가 실패",
+  "A08": "OWASP 가장 위험한 웹 취약점 10종 중 8번 — 소프트웨어·데이터 무결성 실패",
+  "A09": "OWASP 가장 위험한 웹 취약점 10종 중 9번 — 기록·모니터링 부족",
+  "A10": "OWASP 가장 위험한 웹 취약점 10종 중 10번 — 서버 요청 위조(SSRF)",
+};
+// CVSS 3.1 벡터 구성요소 → 한국어 (툴팁용).
+const CVSS_PART_KO = {
+  "AV:N": "네트워크로 접근", "AV:A": "인접 네트워크 접근", "AV:L": "로컬에서 접근", "AV:P": "물리적으로 접근",
+  "AC:L": "공격 복잡도 낮음", "AC:H": "공격 복잡도 높음",
+  "PR:N": "인증 불필요", "PR:L": "낮은 권한 필요", "PR:H": "높은 권한 필요",
+  "UI:N": "사용자 상호작용 없음", "UI:R": "사용자 상호작용 필요",
+  "S:U": "영향 범위 그대로", "S:C": "영향 범위 넘어섬",
+  "C:N": "기밀성 영향 없음", "C:L": "기밀성 영향 낮음", "C:H": "기밀성 영향 높음",
+  "I:N": "무결성 영향 없음", "I:L": "무결성 영향 낮음", "I:H": "무결성 영향 높음",
+  "A:N": "가용성 영향 없음", "A:L": "가용성 영향 낮음", "A:H": "가용성 영향 높음",
+};
+function cvssVectorTip(vec) {
+  const parts = String(vec || "").split("/").filter(Boolean);
+  const ko = parts.map((p) => {
+    if (/^CVSS:/i.test(p)) return `CVSS ${p.split(":")[1]} 기준`;
+    return CVSS_PART_KO[p] || p;
+  });
+  return ko.length ? ko.join(" · ") : "CVSS 3.1 벡터";
+}
+function cweList(text) { return String(text || "").match(/CWE-\d+/gi) || []; }
+function owaspList(text) {
+  const t = String(text || "");
+  const strict = t.match(/OWASP\s*A\d{2}(?::\d{4})?/gi) || [];
+  if (strict.length) return strict;
+  return t.match(/\bA\d{2}(?::\d{4})?\b/g) || [];
+}
+// 분류(CWE · OWASP) — abbr + title 툴팁.
+function classifyHtml(cwe, owasp) {
+  const parts = [];
+  for (const c of cwe) {
+    const id = (c.match(/\d+/) || [""])[0];
+    const tip = CWE_TIPS[id] || "CWE(공통 약점 목록) 분류 번호 — 이 번호가 가리키는 취약점 유형";
+    parts.push(`<abbr title="${esc(tip)}">${esc(c)}</abbr>`);
+    tipSeen.add("cwe"); // B2: 이 문서에서 이미 툴팁을 건 용어는 다시 감싸지 않는다
+  }
+  for (const o of owasp) {
+    const code = (o.match(/A\d{2}/i) || [""])[0].toUpperCase();
+    const tip = OWASP_TIPS[code] || "OWASP Top 10 (2021) 분류";
+    parts.push(`<abbr title="${esc(tip)}">${esc(o)}</abbr>`);
+    tipSeen.add("owasp");
+  }
+  return parts.join('<span class="df-sep">·</span>');
+}
+// "CVSS: 9.8 (CVSS:3.1/AV:N/…) · CWE-89 · OWASP A03:2021" → 점수 · 벡터 · 분류
+function splitScoreLine(content) {
+  const s = String(content || "").trim();
+  const scoreM = /^([\d]+(?:\.[\d]+)?)/.exec(s);
+  const vecM = /\(([^)]*)\)/.exec(s);
+  let rest = s;
+  if (scoreM) rest = rest.slice(scoreM[0].length);
+  if (vecM) rest = rest.replace(vecM[0], " ");
+  return {
+    score: scoreM ? scoreM[1] : null,
+    vector: vecM ? vecM[1].trim() : null,
+    cwe: cweList(rest),
+    owasp: owaspList(rest),
+  };
+}
+// E1) CVSS 한 줄을 '위험 점수' + '분류' 두 필드로 분해해 보여준다.
+function scoreFieldsHtml(content) {
+  const p = splitScoreLine(content);
+  let html = "";
+  if (p.score) {
+    html += `<div class="diag-field field-score"><span class="df-label">위험 점수</span><span class="df-body">`
+      + `<b class="cvss-num">${esc(p.score)}</b><span class="cvss-den">/ 10</span>`
+      + (p.vector ? `<code class="cvss-vec" title="${esc(cvssVectorTip(p.vector))}">${esc(p.vector)}</code>` : "")
+      + `</span></div>`;
+  }
+  const cls = classifyHtml(p.cwe, p.owasp);
+  if (cls) {
+    html += `<div class="diag-field field-score"><span class="df-label">분류</span><span class="df-body">${cls}</span></div>`;
+  }
+  if (!html) {
+    html = `<div class="diag-field field-score"><span class="df-label">위험 점수</span><span class="df-body">${inlineMd(escHtml(content))}</span></div>`;
+  }
+  return html;
+}
 function diagFieldHtml(label, content) {
   const l = label.trim();
-  const cls = l.includes("탈취") ? "field-loss" : l === "위험도" ? "field-risk" : l.includes("보완") ? "field-fix" : l === "검증" ? "field-verify" : l.includes("멘토") ? "field-mentor" : l === "증거" ? "field-evidence" : l === "재현" ? "field-repro" : "";
+  const cls = l.includes("탈취") ? "field-loss" : l === "위험도" ? "field-risk" : l.includes("보완") ? "field-fix" : l === "검증" ? "field-verify" : l.includes("멘토") ? "field-mentor" : l === "증거" ? "field-evidence" : l === "재현" ? "field-repro" : (l === "CVSS" || l === "CWE" || l === "OWASP") ? "field-score" : "";
+  // E1/E2) CVSS · CWE · OWASP — 점수·벡터·분류로 분해하고 툴팁을 붙인다.
+  if (l === "CVSS") return scoreFieldsHtml(content);
+  if (l === "CWE" || l === "OWASP") {
+    const list = l === "OWASP" ? owaspList(content) : cweList(content);
+    const cls2 = classifyHtml(l === "OWASP" ? [] : list, l === "OWASP" ? list : []);
+    const body = cls2 || inlineMd(escHtml(content));
+    return `<div class="diag-field field-score"><span class="df-label">분류</span><span class="df-body">${body}</span></div>`;
+  }
   let body;
   if (l.includes("탈취")) {
     body = content.split(/[,，·、\/]/).map((s) => s.trim()).filter(Boolean)
@@ -2249,11 +2837,12 @@ function mdToHtml(src) {
         html += "</tr>";
       }
       html += "</tbody></table>";
-      out.push(html);
+      // D3) 7열 같은 넓은 표가 좁은 창에서 붕괴하지 않도록 가로 스크롤 컨테이너로 감싼다.
+      out.push(`<div class="table-scroll">${html}</div>`);
       continue;
     }
-    // 진단 필드 라인 (위험도:/진입점:/탈취 정보:/공격 방법:/멘토 노트:/증거:/재현:/영향:/보완:/검증:) — 들여쓰기 허용
-    const fld = /^\s*(위험도|진입점|탈취\s*정보|공격\s*방법|멘토\s*노트|증거|재현|영향|보완|검증|우선순위|문제)[:：]\s*(.*)$/.exec(raw);
+    // 진단 필드 라인 (위험도:/진입점:/탈취 정보:/공격 방법:/멘토 노트:/증거:/재현:/영향:/보완:/검증:/CVSS:) — 들여쓰기 허용
+    const fld = /^\s*(위험도|진입점|탈취\s*정보|공격\s*방법|멘토\s*노트|증거|재현|영향|보완|검증|우선순위|문제|CVSS|CWE|OWASP)[:：]\s*(.*)$/.exec(raw);
     if (fld) {
       flushPara();
       const lines2 = [fld[2]];
@@ -2335,7 +2924,7 @@ function updateConnSummary() {
   if (!el) return;
   const connected = PROVIDER_CATALOG.filter(providerConnected);
   const n = connected.length;
-  const names = connected.map((p) => p.name).join(", ");
+  const names = connected.map((p) => providerLabel(p.name)).join(", ");
   el.innerHTML = `<span class="s-dot ${n ? "on" : ""}"></span>`
     + (n
       ? `연결됨 ${n}/${PROVIDER_CATALOG.length} — ${esc(names)}`
@@ -2547,11 +3136,11 @@ function renderDashboard() {
       <div class="ds-stat"><b>${agg.total}</b><span>작업</span></div>
       <div class="ds-stat"><b>${agg.diag}</b><span>진단 완료</span></div>
       <div class="ds-stat"><b>${agg.roots}</b><span>발견한 위험</span></div>
-      <div class="ds-grade ${worst.cls}"><b>${worst.letter}</b><span>가장 낮은 등급</span></div>
+      <div class="ds-grade ${worst.cls}"><b>${worst.letter}</b><span>가장 위험한 등급</span></div>
       <div class="ds-crits">
         <span class="dc crit">치명 ${agg.sev["치명"]}</span><span class="dc high">높음 ${agg.sev["높음"]}</span>
         <span class="dc med">중간 ${agg.sev["중간"]}</span><span class="dc low">낮음 ${agg.sev["낮음"]}</span>
-        <span class="dc v">직접 ${agg.ver["실증"]} · 일부 ${agg.ver["징후"]} · 추측 ${agg.ver["가정"]}</span>
+        <span class="dc v" title="직접 확인 = 직접 요청해 확인한 취약점 · 일부 확인 = 일부 정황만 확인됨 · 추측 = 코드·설명 기반 추론(미확인)">직접 ${agg.ver["실증"]} · 일부 ${agg.ver["징후"]} · 추측 ${agg.ver["가정"]}</span>
       </div>
     </div>
     ` + ordered.map((s) => {
@@ -2562,7 +3151,7 @@ function renderDashboard() {
     let badge, meta;
     if (st.kind === "diag" && !st.pending) {
       badge = `<div class="dash-grade ${st.grade.cls}"><b>${st.grade.letter}</b><span>${st.grade.label}</span></div>`;
-      meta = `<span class="dm-strong">위험 ${st.roots}개</span><i>치명 ${st.sev["치명"]}</i><i>높음 ${st.sev["높음"]}</i><i>중간 ${st.sev["중간"]}</i><i>낮음 ${st.sev["낮음"]}</i><i class="dm-v">직접 ${st.ver["실증"]} · 일부 ${st.ver["징후"]} · 추측 ${st.ver["가정"]}</i>`;
+      meta = `<span class="dm-strong">위험 ${st.roots}개</span><i>치명 ${st.sev["치명"]}</i><i>높음 ${st.sev["높음"]}</i><i>중간 ${st.sev["중간"]}</i><i>낮음 ${st.sev["낮음"]}</i><i class="dm-v" title="직접 확인 = 직접 요청해 확인한 취약점 · 일부 확인 = 일부 정황만 확인됨 · 추측 = 코드·설명 기반 추론(미확인)">직접 ${st.ver["실증"]} · 일부 ${st.ver["징후"]} · 추측 ${st.ver["가정"]}</i>`;
     } else if (st.kind === "diag") {
       badge = `<div class="dash-grade g-run"><b><span class="dash-spin"></span></b><span>진단 중</span></div>`;
       meta = `<span class="dm-strong">리포트 만드는 중</span><i>${esc((s.goal && s.goal.slice(0, 60)) || "대기")}</i>`;
@@ -3002,12 +3591,29 @@ function syncObProvider() {
   const sel = $("obProvider"); if (!sel) return;
   const connected = PROVIDER_CATALOG.filter(providerConnected);
   const prev = sel.value || settings.default_provider || "";
-  sel.innerHTML = `<option value="">— AI 모델 선택 —</option>`
-    + connected.map((p) => `<option value="${esc(p.name)}">${esc(p.name)} ✅</option>`).join("");
+  // A4) 옵션 텍스트는 사람 말로 (값은 그대로 유지 — 내부 이름이 화면에 새지 않게).
+  sel.innerHTML = `<option value="">— AI 모델을 고르세요 —</option>`
+    + connected.map((p) => `<option value="${esc(p.name)}">${esc(providerLabel(p.name))} ✅</option>`).join("");
   if (prev && connected.some((p) => p.name === prev)) sel.value = prev;
   if (!connected.length) {
-    sel.insertAdjacentHTML("beforeend", `<option value="__setup">⚙ AI 모델 연결하기…</option>`);
+    sel.insertAdjacentHTML("beforeend", `<option value="__setup">먼저 연결해 주세요</option>`);
   }
+  syncObSetupCard();
+}
+// A1) AI 모델이 하나도 연결돼 있지 않으면 — '진단 시작' 을 누르기 전부터 안내 카드를 띄운다.
+function syncObSetupCard() {
+  const el = $("obSetup"); if (!el) return;
+  const connected = PROVIDER_CATALOG.filter(providerConnected);
+  if (connected.length) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  el.innerHTML = `
+    <div class="hs-txt">
+      <b>시작하려면 AI 모델 하나를 연결해야 해요</b>
+      <span>설정(⚙) → 모델 연결에서 API 키만 입력하면 1분이면 됩니다.</span>
+    </div>
+    <button id="obSetupBtn" class="btn btn-primary">AI 모델 연결하기</button>`;
+  const btn = $("obSetupBtn");
+  if (btn) btn.onclick = () => openSettings(); // 설정 모달(기존 동작) 재사용
 }
 async function obStart() {
   const raw = $("obUrl").value.trim();
@@ -3015,9 +3621,16 @@ async function obStart() {
   const norm = normalizeTargetInput(raw);
   if (!norm.host) { obError("URL에서 대상을 읽지 못했습니다. https:// 로 시작하는 주소를 입력하세요."); return; }
   let prov = $("obProvider").value || settings.default_provider || "";
-  if (!prov || prov === "__setup") { showProviderModal(); return; }
+  if (!prov || prov === "__setup") {
+    // A2) '진단 시작' 을 눌렀는데 모델이 없으면 — 왜 멈췄는지 정직하게 말한다.
+    const msg = "AI 모델 연결이 필요해요 — 설정(⚙) → 모델 연결에서 API 키를 입력해 주세요.";
+    obError(msg);
+    toast(msg);
+    showProviderModal();
+    return;
+  }
   const eng = $("obEngine").value === "prime" ? "prime" : "";
-  if (eng === "prime" && enginesInfo && !primeAvailable()) { obError("prime-agent가 설치돼 있지 않습니다. pi를 선택하거나 prime-agent를 먼저 설치하세요."); return; }
+  if (eng === "prime" && enginesInfo && !primeAvailable()) { obError("심화 검사 엔진이 설치돼 있지 않습니다. 기본 검사 엔진을 선택하거나 심화 검사 엔진을 먼저 설치하세요."); return; }
   obError(null);
   const port = norm.port ? parseInt(norm.port, 10) : null;
   const s = await invoke("create_session", {
@@ -3038,6 +3651,8 @@ function wireOb() {
   btn.onclick = obStart;
   $("obUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); obStart(); } });
   $("obProvider").addEventListener("change", (e) => { if (e.target.value === "__setup") { e.target.value = ""; showProviderModal(); } });
+  const eng = $("obEngine");
+  if (eng) eng.addEventListener("change", syncEngineHint);
   $("obSkip").onclick = newSession;
 }
 
@@ -3049,17 +3664,34 @@ function engineBadge(ok, name, detail) {
 function primeAvailable() {
   return !!(enginesInfo && enginesInfo.prime_agent && enginesInfo.prime_agent.found);
 }
+// A3) 엔진 이름을 사람 말로 — 내부 식별자(pi · prime-agent)는 화면에 내보내지 않는다.
+const ENGINE_LABELS = { pi: "기본 검사 엔진", prime: "심화 검사 엔진" };
 function syncEngineSelects() {
   const ok = primeAvailable() || !enginesInfo; // 감지 전에는 막지 않음
   ["shEngine", "obEngine"].forEach((id) => {
     const sel = $(id); if (!sel) return;
+    const base = [...sel.options].find((o) => o.value === "pi");
+    if (base) base.textContent = ENGINE_LABELS.pi;
     const opt = [...sel.options].find((o) => o.value === "prime");
-    if (!opt) return;
-    opt.disabled = !ok;
-    opt.textContent = ok ? "prime-agent" : "prime-agent (미설치)";
-    if (!ok && sel.value === "prime") sel.value = "pi";
-    sel.title = ok ? "진단 엔진 — 잘 모르면 pi 그대로 두세요" : "prime-agent 미설치 — pi 엔진 사용 중";
+    if (opt) {
+      opt.disabled = !ok;
+      opt.textContent = ok ? ENGINE_LABELS.prime : `${ENGINE_LABELS.prime} (미설치)`;
+      if (!ok && sel.value === "prime") sel.value = id === "obEngine" ? "" : "pi";
+    }
+    sel.title = ok
+      ? "진단 엔진 — 잘 모르면 '자동(권장)' 또는 기본 검사 엔진 그대로 두세요"
+      : "심화 검사 엔진이 설치돼 있지 않아 기본 엔진으로 진행합니다";
   });
+  syncEngineHint();
+}
+// 엔진 선택 아래 한 줄 설명 — title(호버)만으로는 키보드·터치 사용자가 못 읽는다.
+function syncEngineHint() {
+  const el = $("obEngineHint"); if (!el) return;
+  const sel = $("obEngine");
+  const deep = sel && sel.value === "prime";
+  el.textContent = deep
+    ? "심화 엔진은 더 깊게 여러 관점에서 봅니다 — 시간이 조금 더 걸릴 수 있어요."
+    : "기본 엔진이면 충분해요. 심화 엔진은 더 깊게 여러 관점에서 봅니다.";
 }
 async function refreshEngines() {
   let info = null;
@@ -3076,8 +3708,8 @@ async function refreshEngines() {
     ? "미설치(선택)"
     : (primeStale ? `구버전 ${pv || ""} (최소 ${info.prime_agent.min}) — 업데이트 권장` : `직접 실행 가능${pv ? ` (${pv})` : ""}`);
   const html = info
-    ? engineBadge(!!(info.pi && info.pi.found), "pi-coding-agent", piLabel)
-      + engineBadge(!!(info.prime_agent && info.prime_agent.found), "prime-agent", primeLabel)
+    ? engineBadge(!!(info.pi && info.pi.found), ENGINE_LABELS.pi, piLabel)
+      + engineBadge(!!(info.prime_agent && info.prime_agent.found), ENGINE_LABELS.prime, primeLabel)
     : "";
   const ob = $("obEngines"); if (ob) ob.innerHTML = html;
   const st = $("engineStatus"); if (st) st.innerHTML = html || '<span class="eng-dim">엔진 정보를 가져오지 못했습니다</span>';

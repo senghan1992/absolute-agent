@@ -1,0 +1,26 @@
+{
+  "id": "juice-demo",
+  "target": "https://demo.owasp-juice.shop",
+  "authorized": "OWASP 공식 공개 데모(테스트 목적), 저RPS(5)·미인증·비파괴 스캔",
+  "sweep_args": ["--rps", "5", "--threads", "4", "--timeout", "300",
+    "--seed-url", "https://demo.owasp-juice.shop/rest/products/search?q=juice",
+    "--seed-url", "https://demo.owasp-juice.shop/api/Challenges/?name=x"],
+  "timeout": 420,
+  "clean": false,
+  "note": "공유 인스턴스라 상태·지연이 흔들림. 루트 5xx 시 '대상 루트 5xx' 경고 후 참고용 결과 (인스턴스 장애, 도구 결함 아님). 확인된 참값만 expected에 등록.",
+  "expected": [
+    {"id": "J01", "category": "sqli-signal", "min_severity": "medium", "target_contains": "/rest/products/search/", "title_contains": "500 — 파라미터 'q'"},
+    {"id": "J02", "category": "headers", "min_severity": "medium", "target_contains": "demo.owasp-juice.shop/", "title_contains": "HSTS"},
+    {"id": "J03", "category": "headers", "min_severity": "medium", "target_contains": "demo.owasp-juice.shop/", "title_contains": "CSP"}
+  ],
+  "absent": [
+    {"id": "A-paths", "category": "paths", "min_severity": "high", "note": "SPA 폴백 오탐 회귀 (/.bzr·/actuator·/id_rsa 등, 2026-10-30 수정)"},
+    {"id": "A-secret", "category": "secret", "min_severity": "high", "note": "번들 코드조각 오탐 회귀 (2026-10-30 수정)"}
+  ],
+  "known_misses": [
+    {"id": "M01", "target": "GET /rest/products/search?q= SQLi 확정", "reason": "LIKE 검색이라 boolean 차분 무의미. UNION 행수-차분 검증 필요 (향후 과제)."},
+    {"id": "M02", "target": "POST /rest/user/login SQLi (Juice 대표 취약점)", "reason": "JSON 바디 미지원 — 2단계(POST/JSON 투입)에서 해소 예정."},
+    {"id": "M03", "target": "Stored XSS·도전형 CTF 항목", "reason": "쓰기 검증은 --danger에서만. CTF 로직 결함은 DAST 범위 밖."},
+    {"id": "M04", "target": "JWT·인증 영역", "reason": "미인증 스캔. --login-user/pass 제공 시 CDP 로그인이 인증 표면 도달 (별도 검증 필요)."}
+  ]
+}
