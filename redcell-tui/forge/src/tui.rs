@@ -1783,7 +1783,7 @@ fn draw_findings(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 theme::fg()
             };
             ListItem::new(Line::from(vec![
-                Span::styled(format!(" {:<8}", f.severity), base.patch(theme::severity(&f.severity))),
+                Span::styled(format!(" {:<9}", f.severity), base.patch(theme::severity(&f.severity))),
                 Span::styled(theme::truncate(&f.title, 40), base),
             ]))
         })
