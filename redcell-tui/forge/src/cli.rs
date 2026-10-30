@@ -142,6 +142,11 @@ pub fn help_text() -> String {
 
 /// 명령 실행. TUI 는 `false` 를 반환해 호출부가 TUI 로 넘어간다.
 pub async fn run(args: Args) -> anyhow::Result<bool> {
+    // "--help" / "-h" 플래그도 명령으로 취급한다 (플래그 파서가 명령을 집어삼키기 때문).
+    if args.has("help") || args.has("h") {
+        println!("{}", help_text());
+        return Ok(true);
+    }
     match args.command.as_str() {
         "help" | "--help" | "-h" => {
             println!("{}", help_text());
