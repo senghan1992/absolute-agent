@@ -1,0 +1,13 @@
+# 빌드 산출물 (Rust/Node) — 하위 모든 깊이에서 제외
+target/
+node_modules/
+dist/
+build/
+
+# Python
+__pycache__/
+*.pyc
+
+# 로그·로컬 설정
+*.log
+.env

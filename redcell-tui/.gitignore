@@ -1,2 +1,3 @@
-/target/
+# 하위 모든 깊이의 빌드 산출물 제외 (예: /target/ 와 forge/target/)
+target/
 __pycache__/
