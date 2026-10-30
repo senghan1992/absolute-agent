@@ -10,7 +10,7 @@
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use regex::Regex;
@@ -133,7 +133,6 @@ pub fn default_payloads() -> Vec<String> {
         "\" OR \"1\"=\"1".to_string(),
         "' OR 1=1--".to_string(),
         "1' UNION SELECT null,version()--".to_string(),
-        "'; DROP TABLE users;--".to_string(),
         "1 AND SLEEP(5)".to_string(),
         "1' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT((SELECT user()),0x3a,FLOOR(RAND(0)*2))x FROM information_schema.tables GROUP BY x)a)--".to_string(),
         "1 AND EXTRACTVALUE(1,CONCAT(0x5c,(SELECT database())))".to_string(),
@@ -167,6 +166,8 @@ pub fn default_payloads() -> Vec<String> {
         "&& whoami".to_string(),
     ]);
     // 인코딩/프로토콜
+    // NOTE: 클라우드 메타데이터 주소(169.254.169.254) 는 기본 코퍼스에 넣지 않는다.
+    // SSRF 검증이 필요하면 사용자가 직접 지정해야 한다(무단 요청은 cloud abuse 로 간주된다).
     v.extend([
         "%00".to_string(),
         "\u{0}".to_string(),
@@ -174,7 +175,6 @@ pub fn default_payloads() -> Vec<String> {
         "\n".to_string(),
         "\r\n".to_string(),
         "http://127.0.0.1".to_string(),
-        "http://169.254.169.254/latest/meta-data/".to_string(),
         "gopher://127.0.0.1:6379/_".to_string(),
         "ldap://127.0.0.1".to_string(),
     ]);
@@ -189,6 +189,31 @@ pub fn default_payloads() -> Vec<String> {
         "K".to_string(),
     ]);
     v
+}
+
+/// 요청 수 하드 상한 — 모델/CLI 가 아무리 커도 넘지 않는다.
+pub const MAX_REQUESTS_CEILING: usize = 20_000;
+
+/// 파괴적 페이로드 판정 — `disallow_destructive` 가 켜져 있으면 이런 페이로드는 제거한다.
+///
+/// 완성된 SQL/DML 구문, 파일 파괴 명령, 셸 파괴 명령을 포함한다.
+/// 스톰 엔진은 "반응이 달라졌는가"만 확인해야 하므로 파괴 구문은 필요 없다.
+pub fn is_destructive_payload(payload: &str) -> bool {
+    static PAT: OnceLock<Regex> = OnceLock::new();
+    let re = PAT.get_or_init(|| {
+        Regex::new(r"(?i)\b(drop|truncate)\b\s+(table|database)|;?\s*delete\s+from\b|\bupdate\b\s+\w+\s+set\b|insert\s+into\b|rm\s+-rf|:\(\)\s*\{|shutdown\b|killall\b|mkfs\b|dd\s+if=")
+            .unwrap()
+    });
+    re.is_match(payload)
+}
+
+/// 자가 파괴/자원고갈 성격의 페이로드 (DoS 계열).
+pub fn is_volumetric_payload(payload: &str) -> bool {
+    static PAT: OnceLock<Regex> = OnceLock::new();
+    let re = PAT.get_or_init(|| {
+        Regex::new(r"(?i)sleep\(\s*\d{2,}\s*\)|pg_sleep\(\s*\d{2,}|benchmark\(\s*\d{4,}|waitfor\s+delay\s+'0:0:(1[0-9]|[2-9][0-9])").unwrap()
+    });
+    re.is_match(payload)
 }
 
 /// 응답 서명 — 동적 콘텐츠를 정규화한 해시.
@@ -271,8 +296,6 @@ pub fn normalize_body(body: &str) -> String {
     let s = num.replace_all(&s, "#");
     ws.replace_all(&s, " ").trim().to_string()
 }
-
-use std::sync::OnceLock;
 
 /// 응답 결과.
 #[derive(Debug, Clone)]
@@ -362,19 +385,49 @@ impl std::fmt::Display for StormError {
 }
 
 /// 비동기 토큰 버킷 — 전역 RPS 상한.
+///
+/// RPS 값은 실행 중에도 **엄격하게만** 낮아질 수 있다 (`set_rps`).
+/// CLI 플래그가 인가 상한을 올리지 못하게 하기 위한 장치다.
 pub struct Gate {
-    rps: f64,
+    rps: AtomicU64,
     state: tokio::sync::Mutex<(f64, Instant)>,
 }
 
 impl Gate {
     pub fn new(rps: Option<f64>) -> Self {
         let rps = rps.filter(|v| v.is_finite() && *v > 0.0).unwrap_or(f64::INFINITY);
-        Self { rps, state: tokio::sync::Mutex::new((rps.min(256.0), Instant::now())) }
+        Self {
+            rps: AtomicU64::new(rps.to_bits()),
+            state: tokio::sync::Mutex::new((rps.min(256.0), Instant::now())),
+        }
+    }
+
+    /// 현재 RPS 상한.
+    pub fn rps(&self) -> f64 {
+        f64::from_bits(self.rps.load(Ordering::Relaxed))
+    }
+
+    /// RPS 상한을 낮춘다 (높이면 무시).
+    pub fn set_rps(&self, rps: f64) {
+        if !rps.is_finite() || rps <= 0.0 {
+            return;
+        }
+        let mut cur = self.rps.load(Ordering::Relaxed);
+        loop {
+            let cur_v = f64::from_bits(cur);
+            if cur_v.is_finite() && cur_v <= rps {
+                return;
+            }
+            match self.rps.compare_exchange_weak(cur, rps.to_bits(), Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => return,
+                Err(actual) => cur = actual,
+            }
+        }
     }
 
     pub async fn acquire(&self) {
-        if !self.rps.is_finite() {
+        let rps = self.rps();
+        if !rps.is_finite() {
             return;
         }
         loop {
@@ -382,13 +435,14 @@ impl Gate {
                 let mut st = self.state.lock().await;
                 let now = Instant::now();
                 let elapsed = now.duration_since(st.1).as_secs_f64();
-                st.0 = (st.0 + elapsed * self.rps).min(self.rps.max(1.0));
+                let rps = self.rps();
+                st.0 = (st.0 + elapsed * rps).min(rps.max(1.0));
                 st.1 = now;
                 if st.0 >= 1.0 {
                     st.0 -= 1.0;
                     None
                 } else {
-                    Some(Duration::from_secs_f64((1.0 - st.0) / self.rps))
+                    Some(Duration::from_secs_f64((1.0 - st.0) / rps))
                 }
             };
             match wait {
@@ -397,6 +451,19 @@ impl Gate {
             }
         }
     }
+}
+
+/// 프로세스 전역 공유 게이트 — 모든 클라이언트가 같은 버킷을 쓴다.
+///
+/// 이전에는 클라이언트마다 새 버킷을 만들어 호출마다 리필되어 사실상 무제한이 되었다.
+static GLOBAL_GATE: OnceLock<parking_lot::Mutex<Arc<Gate>>> = OnceLock::new();
+
+/// 전역 공유 RPS 게이트를 얻는다. 가장 엄격한 값이 적용된다.
+pub fn shared_gate(rps: f64) -> Arc<Gate> {
+    let cell = GLOBAL_GATE.get_or_init(|| parking_lot::Mutex::new(Arc::new(Gate::new(Some(rps)))));
+    let gate = cell.lock().clone();
+    gate.set_rps(rps);
+    gate
 }
 
 /// 스톰 엔진.
@@ -445,8 +512,10 @@ impl StormEngine {
         let started_at = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
         let _ = tx.send(StormEvent::Started { templates: plan.templates.len(), payloads: plan.payloads.len() });
 
-        let gate = Arc::new(Gate::new(plan.rps.or_else(|| auth.rps_limit())));
+        let gate = shared_gate(plan.rps.map(|v| v.min(auth.effective_rps())).unwrap_or(auth.effective_rps()));
         let sem = Arc::new(Semaphore::new(plan.concurrency.clamp(1, 512)));
+        // 인가 자격증명(쿠키·베어러)을 모든 요청에 붙인다 — 인증된 표면을 봐야 한다.
+        let cred_headers = auth.credentials.merge_headers();
 
         // 1) 기준선 수집.
         let mut baselines: HashMap<String, (Sig, String)> = HashMap::new();
@@ -458,7 +527,7 @@ impl StormEngine {
                     break;
                 }
                 gate.acquire().await;
-                if let Some(hit) = self.send(&t, None, "").await {
+                if let Some(hit) = self.send(&t, None, "", &cred_headers).await {
                     sigs.push(hit.sig);
                     body = hit.body;
                 }
@@ -474,21 +543,46 @@ impl StormEngine {
         }
 
         // 2) 페이로드 스윕 — (템플릿, 파라미터, 페이로드) 작업 목록.
+        //    파괴적 페이로드는 인가 정책이 막는 한 제거한다.
+        let mut payloads: Vec<String> = plan
+            .payloads
+            .iter()
+            .filter(|p| {
+                if auth.disallow_destructive && is_destructive_payload(p) {
+                    false
+                } else if auth.disallow_dos && is_volumetric_payload(p) {
+                    false
+                } else {
+                    true
+                }
+            })
+            .cloned()
+            .collect();
+        // 페이로드 자체의 개수도 상한을 둔다(모델이 10만 개를 넣어도 메모리가 폭주하지 않게).
+        const MAX_PAYLOADS: usize = 512;
+        payloads.truncate(MAX_PAYLOADS);
+
+        let max_requests = plan.max_requests.clamp(1, MAX_REQUESTS_CEILING);
         let mut jobs: Vec<(Template, Option<String>, String)> = Vec::new();
-        for t in &plan.templates {
+        'outer: for t in &plan.templates {
             if t.params.is_empty() || !plan.per_param {
-                for p in &plan.payloads {
+                for p in &payloads {
                     jobs.push((t.clone(), None, p.clone()));
+                    if jobs.len() >= max_requests {
+                        break 'outer;
+                    }
                 }
             } else {
                 for param in &t.params {
-                    for p in &plan.payloads {
+                    for p in &payloads {
                         jobs.push((t.clone(), Some(param.name.clone()), p.clone()));
+                        if jobs.len() >= max_requests {
+                            break 'outer;
+                        }
                     }
                 }
             }
         }
-        jobs.truncate(plan.max_requests.max(1));
 
         let total = jobs.len() as u64;
         let mut hits: Vec<Hit> = Vec::new();
@@ -504,13 +598,14 @@ impl StormEngine {
             let gate = gate.clone();
             let client = self.client.clone();
             let cancel = self.cancel.clone();
+            let cred_headers = cred_headers.clone();
             set.spawn(async move {
                 let _permit = sem.acquire_owned().await;
                 if cancel.load(Ordering::SeqCst) {
                     return None;
                 }
                 gate.acquire().await;
-                send_with_client(&client, &template, param.as_deref(), &payload).await
+                send_with_client(&client, &template, param.as_deref(), &payload, &cred_headers).await
             });
         }
 
@@ -621,8 +716,14 @@ impl StormEngine {
         Ok(report)
     }
 
-    async fn send(&self, template: &Template, param: Option<&str>, payload: &str) -> Option<Hit> {
-        send_with_client(&self.client, template, param, payload).await
+    async fn send(
+        &self,
+        template: &Template,
+        param: Option<&str>,
+        payload: &str,
+        extra_headers: &[(String, String)],
+    ) -> Option<Hit> {
+        send_with_client(&self.client, template, param, payload, extra_headers).await
     }
 }
 
@@ -642,6 +743,7 @@ async fn send_with_client(
     template: &Template,
     param: Option<&str>,
     payload: &str,
+    extra_headers: &[(String, String)],
 ) -> Option<Hit> {
     let mut url = template.url.clone();
     let mut body = template.body.clone();
@@ -665,6 +767,9 @@ async fn send_with_client(
 
     let method = reqwest::Method::from_bytes(template.method.as_bytes()).unwrap_or(reqwest::Method::GET);
     let mut req = client.request(method, &url);
+    for (k, v) in extra_headers {
+        req = req.header(k.as_str(), v.as_str());
+    }
     for (k, v) in &template.headers {
         req = req.header(k.as_str(), v.as_str());
     }
@@ -791,5 +896,44 @@ mod tests {
         assert!(p.len() > 40, "페이로드 코퍼스가 너무 작음: {}", p.len());
         assert!(p.iter().any(|x| x.contains("UNION")));
         assert!(p.iter().any(|x| x.contains("../")));
+    }
+
+    #[test]
+    fn default_corpus_has_no_destructive_payloads() {
+        for p in default_payloads() {
+            assert!(!is_destructive_payload(&p), "파괴적 페이로드가 기본 코퍼스에 있음: {p}");
+        }
+    }
+
+    #[test]
+    fn default_corpus_has_no_metadata_probe() {
+        for p in default_payloads() {
+            assert!(!p.contains("169.254.169.254"), "클라우드 메타데이터 주소는 기본 코퍼스에 있으면 안 됨: {p}");
+        }
+    }
+
+    #[test]
+    fn detects_destructive_payloads() {
+        assert!(is_destructive_payload("'; DROP TABLE users;--"));
+        assert!(is_destructive_payload("1; delete from accounts"));
+        assert!(is_destructive_payload("rm -rf /tmp/x"));
+        assert!(!is_destructive_payload("' OR 1=1--"));
+        assert!(!is_destructive_payload("../../etc/passwd"));
+    }
+
+    #[test]
+    fn detects_volumetric_payloads() {
+        assert!(is_volumetric_payload("1 AND SLEEP(30)"));
+        assert!(!is_volumetric_payload("1 AND SLEEP(5)"));
+    }
+
+    #[tokio::test]
+    async fn gate_only_tightens() {
+        let g = Gate::new(Some(100.0));
+        assert_eq!(g.rps(), 100.0);
+        g.set_rps(20.0);
+        assert_eq!(g.rps(), 20.0);
+        g.set_rps(500.0);
+        assert_eq!(g.rps(), 20.0, "RPS 상한은 올릴 수 없다");
     }
 }

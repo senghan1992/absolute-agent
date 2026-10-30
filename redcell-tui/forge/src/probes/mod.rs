@@ -57,11 +57,12 @@ impl ProbeClient {
             .timeout(Duration::from_secs(15))
             .connect_timeout(Duration::from_secs(5))
             .redirect(reqwest::redirect::Policy::none())
+            .no_proxy()
             .danger_accept_invalid_certs(insecure)
             .user_agent("REDFORGE/0.1 (+authorized-security-testing)")
             .build()
             .map_err(|e| e.to_string())?;
-        let gate = Arc::new(Gate::new(auth.rps_limit()));
+        let gate = crate::storm::shared_gate(auth.effective_rps());
         Ok(Self { client, auth, gate })
     }
 
@@ -89,8 +90,12 @@ impl ProbeClient {
         }
         let m = reqwest::Method::from_bytes(method.as_bytes()).unwrap_or(reqwest::Method::GET);
         let mut req = self.client.request(m, &full);
-        for (k, v) in self.auth.credentials.merge_headers() {
-            req = req.header(k, v);
+        // 자격증명은 점검 대상 호스트에만 붙인다 (H6).
+        let (host, _, _) = crate::scope::split_authority(&full).map_err(|e| e.to_string())?;
+        if self.auth.applies_to_host(&host) {
+            for (k, v) in self.auth.credentials.merge_headers() {
+                req = req.header(k, v);
+            }
         }
         if let Some(b) = body {
             req = req.body(b.to_string());

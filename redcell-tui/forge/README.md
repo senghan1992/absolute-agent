@@ -42,6 +42,13 @@ prime-agent 처럼 **파이썬 인터프리터를 직접 붙여서** 코드를 �
 | 리포트 | `src/report.rs` | 심각도·근거·재현·보완 포인트 |
 | 기억 | `src/memory.rs` | 지문별 성공 전술 축적 (자기발전) |
 | TUI | `src/tui.rs` | 대시보드 · 커널 편집기 · 스톰 게이지 |
+| 포트 스캔 | `src/net.rs` | TCP connect 스캔 · 서비스/버전 식별 (nmap 대체) |
+| 콘텐츠 디스커버리 | `src/discover.rs` | 경로/파일/백업/가상호스트 퍼징 (ffuf·gobuster 대체) |
+| 템플릿 엔진 | `src/templates.rs` | nuclei형 YAML 템플릿 + 내장 팩 30개 (nuclei 대체) |
+| 기술 지문 | `src/tech.rs` | 서버·프레임워크·CDN·WAF 식별, 보안 헤더·쿠키 감사 |
+| 공유 HTTP 계층 | `src/http.rs` | 인가 검사 · RPS · 리다이렉트 재검사 · 프록시 무시 |
+| 시크릿 마스킹 | `src/redact.rs` | 리포트·LLM 전달 전 자격증명 마스킹 |
+| 코퍼스 | `src/wordlists.rs` | 내장 경로·민감파일·확장자 목록 |
 
 ---
 
@@ -76,7 +83,19 @@ forge kernel --scope ~/.redcell/authorization.yaml --base http://127.0.0.1:8099 
 forge storm --scope ~/.redcell/authorization.yaml \
   --target "http://127.0.0.1:8099/api/item?id=1" --max 200 --concurrency 32 --json
 
-# 5) IDOR 탐지 (id 를 바꿔가며 다른 주체의 리소스 접근 확인)
+# 5) 포트 스캔 (열린 포트 + 서비스/버전)
+forge scan --scope ~/.redcell/authorization.yaml --target 10.13.37.0/24 --ports 22,80,443
+
+# 6) 콘텐츠 디스커버리 (숨은 경로·민감 파일)
+forge discover --scope ~/.redcell/authorization.yaml --target http://127.0.0.1:8099 --ext php,bak
+
+# 7) 템플릿 스캔 (노출·설정·헤더 계열 알려진 이슈)
+forge templates --scope ~/.redcell/authorization.yaml --target http://127.0.0.1:8099 --tags exposure,config
+
+# 8) 기술 스택 지문 + 보안 헤더/쿠키 감사
+forge tech --scope ~/.redcell/authorization.yaml --target http://127.0.0.1:8099
+
+# 9) IDOR 탐지 (id 를 바꿔가며 다른 주체의 리소스 접근 확인)
 forge idor --scope ~/.redcell/authorization.yaml \
   --target "http://127.0.0.1:8099/api/user?id=1" --param id --spread 3
 
@@ -129,23 +148,33 @@ blocked -> ScopeError example.com 는 인가 대상이 아닙니다.
 
 ---
 
-## 4. TUI
+## 4. TUI — 시큐리티 콘솔
+
+단일 디자인 시스템(`src/theme.rs`) 위에 7개 탭이 올라간다.
+색은 256색 인덱스로 정의해 16색 터미널에서도 degrade 된다.
 
 | 탭 | 내용 |
 | --- | --- |
-| 콘솔 | 명령 출력·에이전트 대화·도구 호출 로그 (색 구분) |
-| 커널 | 파이썬 코드 편집기 + 실행 결과. **타이핑 = 코드 편집**, `Ctrl+R` 또는 `Ctrl+Enter` = 실행 |
-| 스톰 | 진행 게이지(요청/총, req/s) + 이상 응답 목록 |
-| 발견 | 기록된 취약점 (심각도별 색) |
-| 리포트 | Markdown 리포트 미리보기 · `/report` 로 저장 |
+| 콘솔 | 명령 출력·에이전트 대화·도구 호출 로그 (종류별 배지 + 색) |
+| 커널 | 파이썬 코드 편집기 + 실행 결과 (좌우 분할) |
+| 스톰 | 진행 바 + 실시간 req/s + 이상 응답 표 |
+| 스캔 | 호스트/포트/서비스/버전 표 |
+| 표면 | 발견된 엔드포인트 목록 (공격 표면) |
+| 발견 | 발견 목록 + 상세(CVSS·근거·재현·보완) 좌우 분할 |
+| 리포트 | Markdown 리포트 미리보기 · `/report` 로 저장(Markdown + HTML) |
 
 ### 키
 
 | 키 | 동작 |
 | --- | --- |
 | `Ctrl+P` | 명령 팔레트 (한글 검색 가능) |
-| `Tab` | 탭 전환 |
-| `Ctrl+R` / `Ctrl+Enter` | 커널 코드 실행 |
+| `1`~`7` | 탭 직접 전환 (**입력창이 비어 있을 때만**) |
+| `Tab` / `Shift+Tab` | 탭 순환 |
+| `F1` / `?` | 도움말 오버레이 |
+| `Ctrl+R` / `Ctrl+Enter` | 커널 코드 실행 (커널 탭) |
+| `PgUp` / `PgDn` | 콘솔 스크롤 · 마우스 휠도 지원 |
+| `↑` / `↓` | 입력 히스토리 / 발견 목록 이동 |
+| `y` / `n` / `a` | 모델 작성 코드 승인 / 거부 / 세션 전체 자동 승인 |
 | `Ctrl+C` | 작업 중지 (작업 없으면 종료) |
 | `Ctrl+Q` | 종료 |
 | `Esc` | 입력 지움 / 팔레트 닫기 |
@@ -155,6 +184,9 @@ blocked -> ScopeError example.com 는 인가 대상이 아닙니다.
 | 명령 | 동작 |
 | --- | --- |
 | `/target <url>` | 대상 설정 |
+| `/scan <호스트\|CIDR>` | 포트 스캔 — 열린 포트·서비스 탐지 |
+| `/discover [최대요청수]` | 콘텐츠 디스커버리 — 숨은 경로·민감 파일 |
+| `/templates [태그]` | 템플릿 스캔 — 알려진 노출·설정 이슈 |
 | `/scope` | 인가 상태 표시 |
 | `/providers` | LLM 연결 상태 |
 | `/recon` | 정찰 — 엔드포인트·지문 추출 |
@@ -285,6 +317,38 @@ LLM(Anthropic Messages API 또는 OpenAI 호환 Chat Completions) 이 아래 도
 - **재현 절차**
 - **보완(수정) 포인트** — 신호별로 구체적 권고
   (예: SQL 오류 → 프리페어드 스테이트먼트 + 오류 메시지 분리, 스택 트레이스 → 디버그 비활성화 + 일반화 응답)
+
+---
+
+## 8-1. 보안 모델 — "Kali 대체"가 되기 위한 최소 조건
+
+이 도구는 실제 대상을 건드리므로, 안전장치는 기능이 아니라 **전제조건**이다.
+
+| 통제 | 구현 | 위치 |
+| --- | --- | --- |
+| fail-closed 인가 | 파일 없으면 전 기능 차단, deny > allow, 기간·포트 제한 | `src/scope.rs` |
+| **실제 포트 검사** | URL 에 포트가 없으면 스킴별로 80/443 을 채워 검사 | `scope::split_authority` |
+| IPv4 축약 우회 | `::ffff:1.2.3.4` → IPv4 로 정규화 후 CIDR 판정 | `scope::normalize_ip` |
+| RPS 상한 | 인가 값이 없으면 보수적 기본값(50). CLI 로 **올릴 수 없음**(엄격하게만) | `storm::Gate::set_rps` |
+| 전역 공유 limiter | 클라이언트마다 새 버킷을 만들지 않음 | `storm::shared_gate` |
+| 리다이렉트 재검사 | 자동 추종 금지 → 매 홉마다 인가 재확인 | `src/http.rs` |
+| 프록시 우회 방지 | `HTTP_PROXY`/`ALL_PROXY` 무시 (`no_proxy`) | `src/http.rs`, `probes/` |
+| 파괴적 페이로드 차단 | `disallow_destructive` 이면 DROP/DELETE 계열 제거 | `storm::is_destructive_payload` |
+| 자기파괴 페이로드 차단 | `disallow_dos` 이면 SLEEP/BENCHMARK 계열 제거 | `storm::is_volumetric_payload` |
+| 기본 코퍼스 안전화 | `DROP TABLE`·클라우드 메타데이터 주소 미포함 | `storm::default_payloads` |
+| 선택적 프로브 opt-in | `optional_probes` 에 없는 프로브는 실행 불가 | `scope::probe_allowed` |
+| **코드 실행 승인** | 모델이 쓴 파이썬은 사람이 `y` 로 승인해야 실행 | `agent::request_approval` |
+| 프롬프트 인젝션 방어 | 도구 출력은 "신뢰할 수 없는 데이터" 로 취급하라고 시스템 프롬프트에 명시 | `agent::system_prompt` |
+| 자격증명 격리 | 인가 대상 호스트에만 `Cookie`/`Bearer` 첨부 | `scope::credentials_for` |
+| 커널 샌드박스 | import 허용목록 + `__builtins__` 축소 + 타입수준 소켓 후킹 + `file://` 차단 + 프록시 무시 + RPS 토큰버킷 + 메모리 제한 | `py/forge_kernel.py` |
+| 커널 스크립트 무결성 | 샌드박스 밖 위치에 기록 + 0500 권한 + SHA-256 검증 | `src/kernel.rs` |
+| 시크릿 마스킹 | 리포트·로그·LLM 전달 전 토큰/키/JWT/비밀값 마스킹 | `src/redact.rs` |
+| 요청 규모 상한 | 페이로드 512개·요청 20,000건 하드 상한 | `src/storm.rs` |
+
+> 참고: 파이썬 커널은 **같은 OS 계정 안의 프로세스**에서 실행된다.
+> 커널 안의 코드는 그 계정의 권한을 얻을 수 없도록 막지만(import·소켓·파일 차단),
+> OS 수준의 격리(컨테이너·네임스페이스)까지 대신하지는 않는다. 자체 서버·외부 대상을
+> 만지기 전에 `--scope` 로 대상을 좁히고, 가능하면 전용 계정에서 실행하라.
 
 ---
 

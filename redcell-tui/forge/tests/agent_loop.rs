@@ -284,7 +284,8 @@ async fn autonomous_loop_runs_tools_and_records_findings() {
         kernel,
         auth: auth.clone(),
         shared: shared.clone(),
-        config: AgentConfig { max_turns: 8, max_tool_calls: 12, ..Default::default() },
+        // 헤드리스 실행이므로 승인 없이 자동 실행 (TUI 에서는 사람이 승인한다).
+        config: AgentConfig { max_turns: 8, max_tool_calls: 12, auto: true, ..Default::default() },
         target: Some(format!("http://127.0.0.1:{}", server.port)),
         fingerprint: "unit-test".into(),
     };
@@ -337,7 +338,7 @@ async fn agent_can_drive_idor_probe() {
         kernel,
         auth: auth.clone(),
         shared: shared.clone(),
-        config: AgentConfig { max_turns: 6, max_tool_calls: 8, ..Default::default() },
+        config: AgentConfig { max_turns: 6, max_tool_calls: 8, auto: true, ..Default::default() },
         target: Some(format!("http://127.0.0.1:{}", server.port)),
         fingerprint: "unit-idor".into(),
     };

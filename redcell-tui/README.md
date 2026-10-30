@@ -14,6 +14,38 @@ cd ../redcell && npx tsx src/cli.ts        # → TUI 실행
 
 TUI 바이너리 탐색 순서: `REDCELL_TUI_BIN` → 형제 `redcell-tui/target/{release,debug}` → PATH.
 
+## REDFORGE — 터미널 자율 보안점검 에이전트 (`forge/`)
+
+이 저장소에는 데스크톱과 별개인, **CLI/TUI 전용** 최강의 점검 에이전트가
+`forge/` 크레이트로 들어 있다. prime-agent 처럼 **파이썬 인터프리터를 직접** 붙여
+코드를 하나씩 실행하며 공격하고, 동시에 **고속 스톰 엔진**으로 초당 수백 번 변이를
+시도한다.
+
+- 인가 게이트 (fail-closed) — `~/.redcell/authorization.yaml`
+- 파이썬 커널 — 영속 네임스페이스, import/소켓/파일 차단으로 샌드박스화
+- 스톰 엔진 — 기준선 대비 응답 분류 · 이상 탐지 (실측 385 req/s)
+- **포트 스캔** — TCP connect + 서비스/버전 식별 (nmap 대체)
+- **콘텐츠 디스커버리** — 경로/파일/백업/가상호스트 퍼징 (ffuf·gobuster 대체)
+- **템플릿 엔진** — nuclei형 YAML + 내장 팩 30개 (nuclei 대체)
+- **기술 지문 감사** — 서버·프레임워크·CDN·WAF + 보안 헤더·쿠키 점검
+- 자율 에이전트 — LLM 이 커널·스톰 도구를 직접 호출 (모델 코드는 사람 승인 후 실행)
+- 리포트 — 발견마다 근거 · 재현 절차 · **보완(수정) 포인트** (Markdown + HTML, 시크릿 마스킹)
+
+```bash
+cd forge && cargo build --release
+./target/release/forge                      # TUI
+./target/release/forge doctor               # 환경 점검
+./target/release/forge storm --target "http://127.0.0.1:8099/api/item?id=1"
+./target/release/forge scan --target 127.0.0.1 --ports 80,443
+./target/release/forge discover --target http://127.0.0.1:8099
+./target/release/forge templates --target http://127.0.0.1:8099
+./target/release/forge tech --target http://127.0.0.1:8099
+```
+
+자세한 문서: [forge/README.md](forge/README.md)
+
+---
+
 ## 기본 흐름
 
 1. 시작 화면에서 `/setup`으로 대상 URL·세션을 설정 (`Ctrl+S` 저장)

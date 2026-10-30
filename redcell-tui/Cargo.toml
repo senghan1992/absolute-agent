@@ -11,5 +11,9 @@ ratatui = "0.30.2"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"
 unicode-width = "0.2.2"
+# src/engine.rs 가 redcell-desktop 의 probes.rs 를 #[path] 로 포함한다 — 그 코드가 rustls 를 쓴다.
+rustls = "=0.21.12"
+webpki-roots = "=0.25.4"
+yaml_serde = "0.10"
 ureq = { version = "2", default-features = false, features = ["tls"] }
 uuid = { version = "1", features = ["v4"] }

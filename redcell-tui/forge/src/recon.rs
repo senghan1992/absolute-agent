@@ -140,9 +140,10 @@ pub fn extract(body: &str, base_url: &str, status: u16) -> ReconResult {
 
     // 5) 공통 경로 후보 (동일 호스트일 때만)
     if let Some(b) = &base {
-        let host = b.host_str().unwrap_or("").to_string();
+        // 포트를 빠뜨리지 않도록 origin 을 그대로 쓴다 (127.0.0.1:8099 → :8099 유지).
         for path in COMMON_PATHS {
-            let url = format!("{}://{}{}", b.scheme(), host, path);
+            let Ok(u) = b.join(path) else { continue };
+            let url = u.to_string();
             if seen.insert(("GET".into(), url.clone())) {
                 endpoints.push(Endpoint { method: "GET".into(), url, params: vec![], source: "common-path".into() });
             }

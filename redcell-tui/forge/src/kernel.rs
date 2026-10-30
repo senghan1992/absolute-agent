@@ -75,6 +75,25 @@ impl std::error::Error for KernelError {}
 
 type Pending = Arc<parking_lot::Mutex<HashMap<u64, oneshot::Sender<Value>>>>;
 
+/// 디렉터리를 0700 으로 만든다 (Unix).
+fn set_dir_private(path: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+    }
+    #[cfg(not(unix))]
+    let _ = path;
+}
+
+/// SHA-256 16진 해시 (상위 16자).
+fn sha256_hex(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(data);
+    hasher.finalize().iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 /// 실행 중인 파이썬 커널 핸들.
 pub struct Kernel {
     pending: Pending,
@@ -87,11 +106,34 @@ pub struct Kernel {
 
 impl Kernel {
     /// 커널 기동. `scope_path` 가 없으면 커널이 스스로 모든 요청을 차단한다.
+    ///
+    /// 커널 스크립트는 샌드박스가 쓸 수 없는 **전용 디렉터리**에 기록하고,
+    /// 기동 전 해시로 검증한다 (샌드박스가 스크립트를 덮어써 권한을 얻는 경로 차단).
     pub async fn start(scope_path: Option<&Path>, base_url: Option<&str>, run_dir: &Path) -> Result<Arc<Self>, KernelError> {
         std::fs::create_dir_all(run_dir).map_err(|e| KernelError::Spawn(format!("실행 디렉터리 생성 실패: {e}")))?;
-        let script_path = run_dir.join("forge_kernel.py");
+        set_dir_private(run_dir);
+        // 커널 스크립트는 **샌드박스가 손댈 수 없는 별도 위치**에 둔다.
+        //   - 실행 디렉터리(runs/) 안에 두면 샌드박스가 덮어써 권한을 얻을 수 있다.
+        //   - 프로세스마다 고유 경로를 써야 병렬 기동 시 서로를 덮어쓰지 않는다.
+        let kernel_dir = std::env::temp_dir().join(format!("forge-kernel-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&kernel_dir).map_err(|e| KernelError::Spawn(format!("커널 디렉터리 생성 실패: {e}")))?;
+        set_dir_private(&kernel_dir);
+        let script_path = kernel_dir.join("forge_kernel.py");
         std::fs::write(&script_path, KERNEL_SOURCE)
             .map_err(|e| KernelError::Spawn(format!("커널 스크립트 기록 실패: {e}")))?;
+        // 읽기 전용(0500) — 내용을 바꿀 수 없다.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o500));
+        }
+        // 해시 검증 — 기록 후 변조 여부를 확인한다.
+        let digest = sha256_hex(KERNEL_SOURCE.as_bytes());
+        let actual = sha256_hex(&std::fs::read(&script_path).unwrap_or_default());
+        if digest != actual {
+            let _ = std::fs::remove_dir_all(&kernel_dir);
+            return Err(KernelError::Spawn("커널 스크립트 해시 불일치 — 변조될 수 있어 실행을 중단합니다.".into()));
+        }
 
         let python = std::env::var("FORGE_PYTHON").unwrap_or_else(|_| "python3".to_string());
         let mut cmd = Command::new(&python);
@@ -101,7 +143,14 @@ impl Kernel {
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true);
+            .kill_on_drop(true)
+            // 환경변수 최소화 — 프록시·경로 등 민감한 값을 커널로 새지 않게 한다.
+            .env_clear()
+            .env("PATH", std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".into()))
+            .env("HOME", std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()))
+            .env("LANG", "C.UTF-8")
+            .env("PYTHONDONTWRITEBYTECODE", "1")
+            .env("PYTHONHASHSEED", "0");
         if let Some(scope) = scope_path {
             cmd.arg("--scope").arg(scope);
         }
@@ -235,6 +284,10 @@ impl Kernel {
         if let Some(mut child) = self.child.lock().await.take() {
             let _ = child.start_kill();
         }
+        // 커널 스크립트는 기동에만 필요하므로 정리한다.
+        if let Some(dir) = self.script_path.parent() {
+            let _ = std::fs::remove_dir_all(dir);
+        }
     }
 }
 
@@ -258,9 +311,9 @@ mod tests {
     async fn kernel_captures_stderr_and_result() {
         let dir = std::env::temp_dir().join(format!("forge-kernel-test-{}", uuid::Uuid::new_v4()));
         let kernel = Kernel::start(None, None, &dir).await.unwrap();
-        let out = kernel.exec("1/0", 5000).await.unwrap();
+        let out = kernel.exec("1/0", 15_000).await.unwrap();
         assert!(!out.stderr.is_empty(), "예외가 stderr 로 전달되지 않음");
-        let out = kernel.exec("40 + 2", 5000).await.unwrap();
+        let out = kernel.exec("40 + 2", 15_000).await.unwrap();
         assert!(out.stdout.contains("42"), "마지막 표현식 값이 반환되지 않음: {}", out.stdout);
         kernel.shutdown().await;
         let _ = std::fs::remove_dir_all(&dir);

@@ -2184,25 +2184,53 @@ fn render(f: &mut Frame, app: &mut App) {
 
 fn render_header(f: &mut Frame, app: &App, area: Rect) {
     let s = &app.session;
-    let safety = if s.danger_consent { " 파괴적:켬 " } else { " 파괴적:끔 " };
+    let safety = if s.danger_consent { " 파괴적 켬 " } else { " 파괴적 끔 " };
     let safety_style = if s.danger_consent {
         Style::default().bg(Color::Red).fg(Color::White).add_modifier(Modifier::BOLD)
-    } else { Style::default().fg(Color::Gray) };
+    } else { Style::default().fg(Color::DarkGray) };
     // 긴 세션명/모델명 때문에 동의 상태가 화면 밖으로 밀리지 않게 고정한다.
     let top = Rect::new(area.x, area.y, area.width, 1);
     let cols = Layout::horizontal([Constraint::Min(0), Constraint::Length(safety.width() as u16)]).split(top);
+    // 좌측 가용 폭을 계산해 세션명·상태가 잘리지 않게 한다.
+    let left_w = cols[0].width.saturating_sub(11) as usize;
+    let name = s.name.chars().take(left_w.saturating_sub(6)).collect::<String>();
+    let status = s.status.clone();
     f.render_widget(Paragraph::new(Line::from(vec![
         Span::styled(" RedCell ", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-        Span::raw(format!(" / {} ", s.name)),
-        Span::styled(format!(" · {}", s.status), status_style(&s.status)),
+        Span::styled(format!(" / {name} "), Style::default().fg(Color::White)),
+        Span::styled(format!("· {status}"), status_style(&status)),
     ])), cols[0]);
     f.render_widget(Paragraph::new(Span::styled(safety, safety_style)), cols[1]);
     if area.height > 1 {
         let second = Rect::new(area.x, area.y + 1, area.width, 1);
-        let cols = Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)]).split(second);
-        f.render_widget(Paragraph::new(format!(" 대상  {}", s.target_label())).style(Style::default().fg(Color::Gray)), cols[0]);
+        // 고정 백분율 대신 최소/길이 제약으로 — 긴 URL·모델명이 잘려도 다른 칸을 밀지 않는다.
+        let cols = Layout::horizontal([Constraint::Min(24), Constraint::Min(18)]).split(second);
+        let target = s.target_label();
+        let tmax = cols[0].width.saturating_sub(6) as usize;
+        let target = if target.chars().count() > tmax {
+            let cut: String = target.chars().take(tmax.saturating_sub(1)).collect();
+            format!("{cut}…")
+        } else { target };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" 대상 ", Style::default().fg(Color::DarkGray)),
+                Span::styled(target, Style::default().fg(Color::Gray)),
+            ])),
+            cols[0],
+        );
         let llm = if app.llm_label.is_empty() { "미설정 · /providers 연결" } else { &app.llm_label };
-        f.render_widget(Paragraph::new(format!(" AI  {llm}")).style(Style::default().fg(Color::Gray)), cols[1]);
+        let lmax = cols[1].width.saturating_sub(6) as usize;
+        let llm = if llm.chars().count() > lmax {
+            let cut: String = llm.chars().take(lmax.saturating_sub(1)).collect();
+            format!("{cut}…")
+        } else { llm.to_string() };
+        f.render_widget(
+            Paragraph::new(Line::from(vec![
+                Span::styled(" AI ", Style::default().fg(Color::DarkGray)),
+                Span::styled(llm, Style::default().fg(Color::Gray)),
+            ])),
+            cols[1],
+        );
     }
 }
 

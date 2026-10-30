@@ -289,7 +289,85 @@ impl Authorization {
     pub fn rps_limit(&self) -> Option<f64> {
         self.max_rps.filter(|v| *v > 0.0)
     }
+
+    /// 자격증명을 이 호스트에 붙여도 되는지 — 점검 대상 호스트에만 붙인다.
+    ///
+    /// 인가 대상이 여러 호스트이고 그 중 하나가 남의 서버일 수 있으므로,
+    /// 자격증명은 **점검 대상 호스트에만** 붙인다.
+    pub fn applies_to_host(&self, host: &str) -> bool {
+        let h = host.trim().trim_matches('.').to_ascii_lowercase();
+        if h.is_empty() {
+            return false;
+        }
+        // target_ref 에 호스트가 지정되어 있으면 그 호스트(및 그 서브도메인) 에만 붙인다.
+        if let Some(reference) = &self.engagement.target_ref {
+            let ref_host = reference
+                .trim()
+                .trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .trim_matches('.')
+                .to_ascii_lowercase();
+            if !ref_host.is_empty() {
+                return h == ref_host || h.ends_with(&format!(".{ref_host}"));
+            }
+        }
+        true
+    }
+
+    /// 자격증명을 이 호스트에 붙여도 되는지 — 점검 대상 호스트에만 붙인다.
+    pub fn credentials_for(&self, host: &str) -> Vec<(String, String)> {
+        if self.applies_to_host(host) {
+            self.credentials.merge_headers()
+        } else {
+            Vec::new()
+        }
+    }
+
+    /// **실제 적용할** RPS 상한 — 인가 파일에 값이 없으면 보수적 기본값을 쓴다.
+    ///
+    /// 무제한은 "실수로 대상을 잠재우는" 가장 위험한 상태이므로 기본값을 둔다.
+    /// CLI 플래그로 이 값을 *올릴* 수는 없다(더 낮출 수만 있다).
+    pub fn effective_rps(&self) -> f64 {
+        self.rps_limit().unwrap_or(DEFAULT_MAX_RPS)
+    }
+
+    /// 선택적 프로브 허용 여부.
+    ///
+    /// - `optional_probes` 가 비어 있으면(명시되지 않음) → 기본 프로브만 허용
+    /// - 목록이 있으면 → 목록에 있는 것만 허용 (`*`/`all` 이면 전부 허용)
+    ///
+    /// 파괴적·외부 의존 프로브(oob, osint 등)는 목록이 **반드시** 있어야 한다.
+    pub fn probe_allowed(&self, name: &str) -> bool {
+        if self.optional_probes.is_empty() {
+            return !DESTRUCTIVE_PROBES.contains(&name);
+        }
+        self.optional_probes.iter().any(|p| {
+            let p = p.trim().to_ascii_lowercase();
+            p == "*" || p == "all" || p == name.to_ascii_lowercase()
+        })
+    }
+
+    /// 인가 파일에 명시적으로 적어야만 허용되는 프로브인가.
+    pub fn requires_explicit_optin(&self, name: &str) -> bool {
+        DESTRUCTIVE_PROBES.contains(&name)
+            && !self.optional_probes.iter().any(|p| {
+                let p = p.trim().to_ascii_lowercase();
+                p == "*" || p == "all" || p == name.to_ascii_lowercase()
+            })
+    }
 }
+
+/// 인가 파일에 미지정 시 적용되는 보수적 RPS 기본값.
+pub const DEFAULT_MAX_RPS: f64 = 50.0;
+
+/// 명시적 opt-in 이 필요한 프로브 (파괴적 · 외부 전송 · 로컬 시스템 접근).
+pub const DESTRUCTIVE_PROBES: &[&str] = &["oob", "osint", "local", "hostinfo", "exploit", "dos"];
 
 fn parse_rules(node: Option<&Yaml>, label: &str) -> Result<Vec<Rule>, String> {
     let mut out = Vec::new();
@@ -326,11 +404,25 @@ fn rule_matches(rule: &Rule, host: &str) -> bool {
     match rule {
         Rule::Host(h) => h == host,
         Rule::Domain(d) => host == d || host.ends_with(&format!(".{d}")),
-        Rule::Cidr(c) => match host.parse::<IpAddr>() {
-            Ok(ip) => c.contains(&ip),
-            Err(_) => false,
+        Rule::Cidr(c) => match normalize_ip(host) {
+            Some(ip) => c.contains(&ip),
+            None => false,
         },
     }
+}
+
+/// IP 문자열 정규화 — IPv4-mapped IPv6(`::ffff:1.2.3.4`) 를 IPv4 로 펼친다.
+///
+/// Cidr 규칙이 IPv4 대역일 때 `::ffff:10.0.0.1` 로 우회되는 것을 막는다.
+pub fn normalize_ip(host: &str) -> Option<IpAddr> {
+    let ip: IpAddr = host.parse().ok()?;
+    Some(match ip {
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => IpAddr::V4(v4),
+            None => IpAddr::V6(v6),
+        },
+        other => other,
+    })
 }
 
 /// 전역 RPS 제한기 — 토큰 버킷.
@@ -406,11 +498,20 @@ pub fn find_authorization() -> Option<PathBuf> {
 }
 
 /// 네트워크 대상에서 host/port 추출.
+///
+/// **포트는 항상 실제 연결 포트**를 돌려준다 — `http://host/` 는 80, `https://host/` 는 443.
+/// (이전에는 `None` 이 돌아와 `ports.allow_tcp` 검사가 통째로 건너뛰어졌다.)
 pub fn split_authority(url: &str) -> Result<(String, Option<u16>, String), String> {
     let parsed = url::Url::parse(url).map_err(|e| format!("URL 파싱 실패 ({url}): {e}"))?;
     let host = parsed.host_str().ok_or("URL 에 호스트가 없습니다.")?.to_string();
-    let port = parsed.port();
     let scheme = parsed.scheme().to_string();
+    let port = parsed
+        .port()
+        .or_else(|| match scheme.as_str() {
+            "https" | "wss" => Some(443),
+            "http" | "ws" => Some(80),
+            _ => None,
+        });
     Ok((host, port, scheme))
 }
 
@@ -502,5 +603,68 @@ limits:
         let c = Cidr::parse("10.13.37.0/24").unwrap();
         assert!(c.contains(&"10.13.37.255".parse().unwrap()));
         assert!(!c.contains(&"10.13.38.1".parse().unwrap()));
+    }
+
+    #[test]
+    fn effective_rps_has_conservative_default() {
+        let a = Authorization::parse(SAMPLE).unwrap();
+        assert_eq!(a.effective_rps(), 20.0);
+        let b = Authorization::parse("scope:\n  allow:\n    - host: \"127.0.0.1\"\n").unwrap();
+        assert!(b.effective_rps() > 0.0, "RPS 기본값이 있어야 한다");
+        assert!(b.effective_rps() <= 100.0, "기본값이 너무 크면 안 된다: {}", b.effective_rps());
+    }
+
+    #[test]
+    fn probe_opt_in_is_respected() {
+        // 목록이 없으면 기본(비파괴) 프로브만 허용한다.
+        let a = Authorization::parse(SAMPLE).unwrap();
+        assert!(a.probe_allowed("idor"));
+        assert!(!a.probe_allowed("oob"));
+        // 목록이 있으면 그 항목만 허용한다.
+        let b = Authorization::parse(
+            "scope:\n  allow:\n    - host: \"127.0.0.1\"\noptional_probes:\n  - idor\n",
+        )
+        .unwrap();
+        assert!(b.probe_allowed("idor"));
+        assert!(!b.probe_allowed("tamper"));
+        assert!(!b.probe_allowed("oob"));
+        // '*' 이면 전부 허용.
+        let c = Authorization::parse(
+            "scope:\n  allow:\n    - host: \"127.0.0.1\"\noptional_probes:\n  - '*'\n",
+        )
+        .unwrap();
+        assert!(c.probe_allowed("oob"));
+    }
+
+    #[test]
+    fn default_port_is_effective() {
+        let (h, p, s) = split_authority("http://example.com/").unwrap();
+        assert_eq!(h, "example.com");
+        assert_eq!(p, Some(80));
+        assert_eq!(s, "http");
+        let (_, p2, _) = split_authority("https://example.com/").unwrap();
+        assert_eq!(p2, Some(443));
+        let (_, p3, _) = split_authority("http://example.com:8099/x").unwrap();
+        assert_eq!(p3, Some(8099));
+    }
+
+    #[test]
+    fn ipv4_mapped_ipv6_matches_ipv4_cidr() {
+        let a = Authorization::parse(SAMPLE).unwrap();
+        // ::ffff:10.13.37.9 는 10.13.37.9 와 동일하게 취급된다.
+        assert!(a.host_allowed("::ffff:10.13.37.9").is_ok());
+    }
+
+    #[test]
+    fn credentials_bound_to_engagement_target() {
+        let a = Authorization::parse(
+            "engagement:\n  target_ref: \"https://app.example.com\"\nscope:\n  allow:\n    - domain: \"example.com\"\n    - host: \"other.test\"\n",
+        )
+        .unwrap();
+        assert!(a.applies_to_host("app.example.com"));
+        // target_ref 의 하위 도메인만 허용 — 다른 호스트로는 자격증명이 새지 않는다.
+        assert!(a.applies_to_host("api.app.example.com"));
+        assert!(!a.applies_to_host("api.example.com"));
+        assert!(!a.applies_to_host("other.test"));
     }
 }

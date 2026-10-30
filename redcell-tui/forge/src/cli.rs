@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use serde_json::json;
+use serde_json::{json, Value};
 
 use crate::kernel::Kernel;
 use crate::scope::{self, Authorization, ScopeError};
@@ -116,7 +116,15 @@ pub fn help_text() -> String {
   forge storm --target URL [--param k=v ...] [--payload P ...]
                              [--max N] [--rps N] [--concurrency N] [--json]
                              스톰 실행 + 결과 JSON 저장
-  forge report --from <storm.json> [--out FILE]
+  forge scan --target HOST|CIDR [--ports 22,80,443] [--json]
+                             포트 스캔 + 서비스/버전 탐지 (nmap 대체)
+  forge discover --target URL [--ext php,bak] [--vhost] [--max N] [--json]
+                             콘텐츠 디스커버리 (ffuf/gobuster 대체)
+  forge templates --target URL [--tags exposure,config] [--severity medium] [--json]
+                             템플릿 스캔 (nuclei 대체)
+  forge tech --target URL [--json]
+                             기술 스택 지문 + 보안 헤더/쿠키 감사
+  forge report --from <storm.json> [--out FILE] [--html]
                              스톰 결과 → Markdown 리포트 (보완 포인트 포함)
   forge idor --target URL --param id [--id V ...] [--spread N]
                              IDOR 탐지 (다른 주체 리소스 접근)
@@ -126,6 +134,9 @@ pub fn help_text() -> String {
 공통 옵션:
   --scope PATH              인가 파일 경로 (기본 ~/.redcell/authorization.yaml)
   --run-dir PATH            실행 디렉터리 (커널·리포트 보관)
+
+주의: --rps 는 인가 파일의 상한을 *올릴* 수 없습니다(낮출 수만 있습니다).
+      파괴적 페이로드는 disallow_destructive 정책에 따라 자동으로 제외됩니다.
 "# .to_string()
 }
 
@@ -282,9 +293,36 @@ pub async fn run(args: Args) -> anyhow::Result<bool> {
                 std::process::exit(2);
             };
             let raw = std::fs::read_to_string(input).map_err(|e| anyhow::anyhow!("읽기 실패: {e}"))?;
-            let storm: serde_json::Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("JSON 파싱 실패: {e}"))?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| anyhow::anyhow!("JSON 파싱 실패: {e}"))?;
+            // 최상위가 배열이면 templates 결과(매칭 목록) 로 본다.
+            let storm: serde_json::Value = if parsed.is_array() {
+                serde_json::json!({ "matches": parsed })
+            } else {
+                parsed
+            };
 
             let mut findings: Vec<crate::report::Finding> = Vec::new();
+            // 스톰이 아니라 다른 결과(templates·discover·scan) 도 같은 리포트로 합친다.
+            if let Some(list) = storm.get("findings").and_then(|v| v.as_array()) {
+                for f in list {
+                    let get = |k: &str| f.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    findings.push(crate::report::Finding {
+                        title: get("title"),
+                        severity: get("severity"),
+                        category: get("category"),
+                        target: get("target"),
+                        evidence: get("evidence"),
+                        reproduction: get("reproduction"),
+                        remediation: get("remediation"),
+                    });
+                }
+            }
+            if let Some(list) = storm.get("matches").and_then(|v| v.as_array()) {
+                findings.extend(crate::templates::to_findings(
+                    &serde_json::from_value::<Vec<crate::templates::TemplateMatch>>(Value::Array(list.clone()))
+                        .unwrap_or_default(),
+                ));
+            }
             let anomalies = storm.get("anomalies").and_then(|v| v.as_array()).cloned().unwrap_or_default();
             for a in anomalies {
                 let signals = a.get("signals").and_then(|v| v.as_array()).cloned().unwrap_or_default();
@@ -333,6 +371,12 @@ pub async fn run(args: Args) -> anyhow::Result<bool> {
             };
 
             let md = crate::report::to_markdown(&rep);
+            if args.has("html") {
+                let dir = crate::cli::report_dir();
+                let html_path = dir.join(format!("report-{}.html", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+                let _ = std::fs::write(&html_path, crate::report::to_html(&rep));
+                println!("HTML 리포트 저장: {}", html_path.display());
+            }
             match args.get("out") {
                 Some(path) => {
                     std::fs::write(path, &md).map_err(|e| anyhow::anyhow!("저장 실패: {e}"))?;
@@ -434,6 +478,204 @@ pub async fn run(args: Args) -> anyhow::Result<bool> {
             let _ = std::fs::write(&path, &json_out);
             println!("
 결과 저장: {}", path.display());
+            Ok(true)
+        }
+        "tech" => {
+            let auth = match load_authorization(args.get("scope").map(std::path::Path::new)) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("✖ {e}");
+                    std::process::exit(3);
+                }
+            };
+            let target = args.get("target").unwrap_or("").to_string();
+            if target.is_empty() {
+                eprintln!("✖ --target 이 필요합니다.");
+                std::process::exit(2);
+            }
+            let client = crate::http::HttpClient::new(Arc::new(auth)).map_err(|e| anyhow::anyhow!(e))?;
+            let resp = client.get(&target).await.map_err(|e| anyhow::anyhow!("요청 실패: {e}"))?;
+            let tech = crate::tech::analyze(&resp.headers, &resp.body, resp.status);
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&tech)?);
+            } else {
+                let fp = &tech.fingerprint;
+                println!("■ 기술 스택");
+                println!("  서버      : {}", fp.web_server.clone().unwrap_or_else(|| "-".into()));
+                println!("  프레임워크: {}", if fp.frameworks.is_empty() { "-".into() } else { fp.frameworks.join(", ") });
+                println!("  CDN       : {}   WAF: {}", fp.cdn.clone().unwrap_or_else(|| "-".into()), fp.waf.clone().unwrap_or_else(|| "-".into()));
+                println!("  지문      : {}", fp.key);
+                println!("\n■ 보안 헤더");
+                for h in &tech.security_headers {
+                    println!("  {} {:<32} {}", if h.present { "✔" } else { "✖" }, h.name,
+                        if h.present { h.value.clone().unwrap_or_default() } else { h.note.to_string() });
+                }
+                if !tech.cookies.is_empty() {
+                    println!("\n■ 쿠키");
+                    for c in &tech.cookies {
+                        println!("  {} secure={} httponly={} samesite={}", c.name, c.secure, c.httponly,
+                            c.samesite.clone().unwrap_or_else(|| "-".into()));
+                        for i in &c.issues {
+                            println!("      - {i}");
+                        }
+                    }
+                }
+                let findings = tech.findings(&target);
+                println!("\n■ 발견 {}건", findings.len());
+                for f in &findings {
+                    println!("  [{}] {} — {}", f.severity, f.title, f.remediation);
+                }
+            }
+            Ok(true)
+        }
+        "scan" => {
+            let auth = match load_authorization(args.get("scope").map(std::path::Path::new)) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("✖ {e}");
+                    std::process::exit(3);
+                }
+            };
+            let target = args.get("target").unwrap_or("").to_string();
+            if target.is_empty() {
+                eprintln!("✖ --target 이 필요합니다 (HOST 또는 CIDR).");
+                std::process::exit(2);
+            }
+            let mut plan = crate::net::ScanPlan {
+                hosts: crate::net::expand_hosts(&target).map_err(|e| anyhow::anyhow!("{e}"))?,
+                ports: match args.get("ports") {
+                    Some(p) => crate::net::parse_ports(p).map_err(|e| anyhow::anyhow!("{e}"))?,
+                    None => crate::net::default_ports(),
+                },
+                timeout_ms: args.num("timeout", 1200.0) as u64,
+                concurrency: args.num("concurrency", 128.0) as usize,
+                grab_banner: !args.has("no-banner"),
+                max_hosts: 4096,
+            };
+            if let Ok(parsed) = url::Url::parse(&target) {
+                if let Some(p) = parsed.port() {
+                    plan.ports = vec![p];
+                }
+            }
+            let report = crate::net::scan(&auth, &plan).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "스캔 완료 — 호스트 {} · 열린 포트 {} · {:.1}초",
+                    report.hosts.len(),
+                    report.open,
+                    report.duration_ms as f64 / 1000.0
+                );
+                for h in &report.hosts {
+                    for p in &h.ports {
+                        let svc = p
+                            .service
+                            .as_ref()
+                            .map(|s| format!("{} {}", s.name, s.version.clone().unwrap_or_default()))
+                            .unwrap_or_default();
+                        println!("  {:<24} {:<6} {:<9} {}", h.host, p.port, p.state.label(), svc);
+                    }
+                }
+                for f in &report.findings {
+                    println!("  [{}] {} — {}", f.severity, f.title, f.remediation);
+                }
+            }
+            let path = report_dir().join(format!("scan-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&report)?);
+            println!("\n결과 저장: {}", path.display());
+            Ok(true)
+        }
+        "discover" => {
+            let auth = match load_authorization(args.get("scope").map(std::path::Path::new)) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("✖ {e}");
+                    std::process::exit(3);
+                }
+            };
+            let target = args.get("target").unwrap_or("").to_string();
+            if target.is_empty() {
+                eprintln!("✖ --target 이 필요합니다.");
+                std::process::exit(2);
+            }
+            let client = crate::http::HttpClient::new(Arc::new(auth)).map_err(|e| anyhow::anyhow!(e))?;
+            let mut plan = crate::discover::default_plan(&target);
+            if let Some(ext) = args.get("ext") {
+                plan.extensions = ext.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            }
+            if args.has("vhost") {
+                plan.vhost = true;
+            }
+            if let Some(n) = args.get("max") {
+                plan.max_requests = n.parse().unwrap_or(plan.max_requests);
+            }
+            let report = crate::discover::run(&client, &plan).await.map_err(|e| anyhow::anyhow!("{e}"))?;
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&report)?);
+            } else {
+                println!(
+                    "디스커버리 완료 — 요청 {}건 · 발견 {}건 (기준선 {})",
+                    report.requests,
+                    report.hits.len(),
+                    report.baseline_status
+                );
+                for h in report.hits.iter().take(60) {
+                    println!("  [{}] {} {}", h.kind.label(), h.status, h.url);
+                }
+                for f in &report.findings {
+                    println!("  [{}] {} — {}", f.severity, f.title, f.remediation);
+                }
+            }
+            let path = report_dir().join(format!("discover-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&report)?);
+            println!("\n결과 저장: {}", path.display());
+            Ok(true)
+        }
+        "templates" => {
+            let auth = match load_authorization(args.get("scope").map(std::path::Path::new)) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("✖ {e}");
+                    std::process::exit(3);
+                }
+            };
+            let target = args.get("target").unwrap_or("").to_string();
+            if target.is_empty() {
+                eprintln!("✖ --target 이 필요합니다.");
+                std::process::exit(2);
+            }
+            let client = crate::http::HttpClient::new(Arc::new(auth)).map_err(|e| anyhow::anyhow!(e))?;
+            let tags: Vec<String> = args
+                .get_all("tags")
+                .iter()
+                .flat_map(|s| s.split(',').map(|x| x.trim().to_string()))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let tag_filter = if tags.is_empty() { None } else { Some(tags.as_slice()) };
+            let min_sev = args.get("severity").unwrap_or("info").to_string();
+            let mut matches = Vec::new();
+            for t in crate::templates::builtin_templates() {
+                match crate::templates::execute(&client, &t, &target, tag_filter, &min_sev).await {
+                    Ok(m) => matches.extend(m),
+                    Err(e) => eprintln!("  (템플릿 {} 실패: {})", t.id, e),
+                }
+            }
+            let findings = crate::templates::to_findings(&matches);
+            if args.has("json") {
+                println!("{}", serde_json::to_string_pretty(&matches)?);
+            } else {
+                println!("템플릿 스캔 완료 — 매칭 {}건", matches.len());
+                for m in &matches {
+                    println!("  [{}] {} — {}", m.severity, m.name, m.url);
+                }
+                for f in &findings {
+                    println!("  [{}] {} — {}", f.severity, f.title, f.remediation);
+                }
+            }
+            let path = report_dir().join(format!("templates-{}.json", chrono::Local::now().format("%Y%m%d-%H%M%S")));
+            let _ = std::fs::write(&path, serde_json::to_string_pretty(&matches)?);
+            println!("\n결과 저장: {}", path.display());
             Ok(true)
         }
         "tui" => Ok(false),
