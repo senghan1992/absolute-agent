@@ -12,7 +12,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
-use std::io::{BufRead, BufReader, Read as _};
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStderr, ChildStdout, Command, Stdio};
 use std::sync::Mutex;
@@ -29,9 +29,12 @@ use deep_instr::*;
 
 mod auth;
 mod deep_instr;
+mod factgate;
 mod probes;
 mod risk;
 mod session_store;
+
+use factgate::{url_host, url_port, url_scheme, verify_fetch};
 
 /// 실행 중인 redcell 자식 프로세스 레지스트리(세션 id → Child). 중지 시 kill 용도.
 struct Procs(Mutex<HashMap<String, Child>>);
@@ -1364,6 +1367,7 @@ fn extract_targets(args: &Value) -> Vec<(String, Option<u16>)> {
 
 /// 툴 호출 인자에서 대상 호스트들을 추출한다 — `extract_targets` 의 호스트 투영.
 /// 포트 맥락이 필요하면 `extract_targets` 를 직접 쓴다.
+#[cfg_attr(not(test), allow(dead_code))]
 fn extract_hosts(_tool_name: &str, args: &Value) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
     for (h, _) in extract_targets(args) {
@@ -1928,10 +1932,12 @@ fn run_prime(
     // 기계 대조 입력 — P-ID → 엔진 심각도(seriousness audit 가 '주장 위험도 ↔ 근거 최대 심각도'
     // 를 비교한다). 맵의 키 집합이 곧 유효 P-ID 목록이다.
     let mut sweep_ids: HashMap<String, String> = HashMap::new();
+    let mut sweep: Option<probes::ProbeReport> = None;
     if s2.diag && !s2.host.trim().is_empty() {
-        let sweep = run_p0_sweep(app, id, &s2.host, s2.port, &s2.auth_cookie, s2.danger_consent);
-        sweep_ids = sweep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
-        instruction.push_str(&p0_evidence_block(&sweep, 6000));
+        let rep = run_p0_sweep(app, id, &s2.host, s2.port, &s2.auth_cookie, s2.danger_consent);
+        sweep_ids = rep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
+        instruction.push_str(&p0_evidence_block(&rep, 6000));
+        sweep = Some(rep);
     }
 
     // RedCell 인가 확장(scope 게이트)을 `-e` 로 **명시 로드**한다 — 전역 설치·트러스트·settings
@@ -1964,8 +1970,10 @@ fn run_prime(
         // 표식이 붙으면 결과 탭의 등급·필터·내보내기·표지가 정상 동작한다.
         let report_tag: Option<&'static str> = if s2.diag { Some("final") } else { None };
         let cookie = s2.auth_cookie.clone();
+        // 발행 게이트 — 진단 세션의 리포트는 반드시事实 검증 후에만 나간다.
+        let gate = if s2.diag { report_gate_for(&app, sweep.as_ref(), &cookie) } else { None };
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, report_tag);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, None, report_tag, gate.as_ref());
             finalize_run(&app, &id, &outcome, "pi");
             finalize_single_turn_report(&app, &id, &outcome, &sweep_ids, &cookie);
             audit_temp_window(&app, &id, run_start);
@@ -2211,7 +2219,7 @@ fn preflight_llm_check(
     let prefix = prep.tool_prefix;
     let (tx, rx) = std::sync::mpsc::channel();
     thread::spawn(move || {
-        let outcome = pump_and_wait(&app2, &id2, &key2, pipes, None, prefix, None, None);
+        let outcome = pump_and_wait(&app2, &id2, &key2, pipes, None, prefix, None, None, None);
         let _ = tx.send(outcome);
     });
     let timeout = std::time::Duration::from_secs(90);
@@ -2503,21 +2511,33 @@ fn pump_and_wait(
     tool_prefix: &str,
     enforce_auth: Option<auth::AuthList>,
     report_tag: Option<&str>,
+    gate: Option<&ReportGate>,
 ) -> PumpOutcome {
     let enforce = enforce_auth.map(|auth| ScopeEnforce { proc_key: proc_key.to_string(), auth });
-    let mut oc = pump_pi_stdio(app, id, pipes, worker, tool_prefix, enforce, report_tag);
+    let mut oc = pump_pi_stdio(app, id, pipes, worker, tool_prefix, enforce, report_tag, gate);
+    // 자식 회수( reap )를 먼저 — 게이트의 네트워크 대조가 끝날 때까지 자식이
+    // 남아 있지 않도록 한다.
     match app.state::<Procs>().0.lock().unwrap().remove(proc_key) {
         Some(mut c) => {
             if !c.wait().map(|st| st.success()).unwrap_or(false) {
                 oc.failed = true;
             }
-            oc
         }
         None => {
             oc.aborted = true;
-            oc
         }
     }
+    // 사실 검증 게이트 — 리포트 본문 전체를 근거와 대조해 고친 뒤에야 발행한다.
+    // (게이트 없으면 원문 그대로 발행 — 게이트는 진단 세션에서만 켠다)
+    if let (Some(g), Some(tag)) = (gate, report_tag) {
+        if !oc.text.trim().is_empty() {
+            let res = g.apply(&oc.text);
+            oc.text = res.text.clone();
+            emit_report_text(app, id, res.text, tag);
+            emit_note(app, id, format!("[sys] {}", res.summary), None);
+        }
+    }
+    oc
 }
 
 /// 단일 실행 마감 — 완료 노트 + 상태 전이 (실행 중일 때만).
@@ -2571,9 +2591,10 @@ fn finalize_run(app: &AppHandle, id: &str, outcome: &PumpOutcome, engine_label: 
 }
 
 /// 단일 턴(비병합) 진단 마감 — 리포트 자동 저장 + 기계 대조 결과 노트.
-/// 심층 경로와 달리 병합 단계가 없다 — 그래서 **자동 수정은 하지 않는다.**
-/// 검증 결과(확인/불일치/미시도·환각 P-ID)를 정직하게 노트로만 노출하고,
-/// 원문은 사용자가 확인·수정할 수 있도록 그대로 둔다.
+///
+/// 본문은 이미 `ReportGate`(사실 검증 게이트)를 통과한 상태로 들어온다 — 근거 없는
+/// [실증] 주장은 강등되고, 위험도는 근거에 맞춰 교정되고, 근거 없는 루트는
+/// '미확인 가능성'으로 옮겨졌다. 여기서는 저장과 잔여 대조 노트만 담당한다.
 fn finalize_single_turn_report(
     app: &AppHandle,
     id: &str,
@@ -2599,17 +2620,11 @@ fn finalize_single_turn_report(
             None,
         );
     }
-    // 기계 대조 — 환각 [P-###] 인용과 근거 없는 [실증] 표기, 그리고 위험도 과대 주장을 잡아낸다.
+    // 잔여 기계 대조 — 환각 [P-###] 인용과 위험도 과대 주장을 한 번 더 잡는다.
     // (심층 경로와 동일한 검증기를 쓴다 — 근거 맵은 P-ID → 엔진 심각도.)
     let vauth = auth::load(&resolve_app_auth_path(app));
     let rep = verify_report_claims(text, evidence, &vauth, cookie);
     emit_note(app, id, verify_note_line(&rep), None);
-    emit_note(
-        app,
-        id,
-        "[sys] 단일 턴 진단은 병합 단계가 없어 대조 결과만 알려줍니다 — 불일치·환각 인용은 자동 수정되지 않습니다(리포트 원문을 확인하세요).".to_string(),
-        None,
-    );
 }
 
 /// prime-agent 단일 턴 — 스코프 스킬 주입 + 반응형 킬게이트 + 세션 dir 연속대화.
@@ -2659,10 +2674,12 @@ fn run_prime_agent(
     // 기계 대조 입력 — P-ID → 엔진 심각도(seriousness audit 가 '주장 위험도 ↔ 근거 최대 심각도'
     // 를 비교한다). 맵의 키 집합이 곧 유효 P-ID 목록이다.
     let mut sweep_ids: HashMap<String, String> = HashMap::new();
+    let mut sweep: Option<probes::ProbeReport> = None;
     if s.diag && !s.host.trim().is_empty() {
-        let sweep = run_p0_sweep(app, id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
-        sweep_ids = sweep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
-        instruction.push_str(&p0_evidence_block(&sweep, 6000));
+        let rep = run_p0_sweep(app, id, &s.host, s.port, &s.auth_cookie, s.danger_consent);
+        sweep_ids = rep.hits.iter().map(|h| (h.id.clone(), h.severity.clone())).collect();
+        instruction.push_str(&p0_evidence_block(&rep, 6000));
+        sweep = Some(rep);
     }
     // prime 무상태 연속 대화 — 앞 턴 기록이 있으면 인계 블록을 앞에 붙인다.
     let carry = prime_carry_context(app, id);
@@ -2699,8 +2716,10 @@ fn run_prime_agent(
         // 진단 세션만 리포트 표식("final")을 붙인다 — 일반 채팅은 노트로 방출된다.
         let report_tag: Option<&'static str> = if s.diag { Some("final") } else { None };
         let cookie = s.auth_cookie.clone();
+        // 발행 게이트 — 진단 세션의 리포트는 반드시 사실 검증 후에만 나간다.
+        let gate = if s.diag { report_gate_for(&app, sweep.as_ref(), &cookie) } else { None };
         thread::spawn(move || {
-            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, report_tag);
+            let outcome = pump_and_wait(&app, &id, &id, pipes, None, prefix, auth, report_tag, gate.as_ref());
             finalize_run(&app, &id, &outcome, "prime-agent");
             finalize_single_turn_report(&app, &id, &outcome, &sweep_ids, &cookie);
             audit_prime_homes(&app, &id);
@@ -2917,8 +2936,85 @@ fn emit_report_text(app: &AppHandle, id: &str, text: String, tag: &str) {
     app.emit("engagement-event", json!({ "sessionId": id, "event": stamped })).ok();
 }
 
+/// 리포트 발행 게이트 — **발행 직전**에 본문을 사실 기준으로 고친다.
+///
+/// LLM 이 쓴 리포트를 그대로 사용자에게 내보내지 않는다. 하네스가 실측 근거
+/// (P0 스윕 히트)와 대조해 — 근거 없는 [실증] 주장을 걷어내고, 위험도를 근거
+/// 최대 심각도로 교정하고, 근거가 전혀 없는 루트는 '미확인 가능성'으로 강등한다.
+pub struct ReportGate {
+    index: factgate::EvidenceIndex,
+    auth: auth::AuthList,
+    cookie: String,
+    mode: factgate::GateMode,
+}
+
+impl Clone for ReportGate {
+    fn clone(&self) -> Self {
+        Self {
+            index: self.index.clone(),
+            auth: self.auth.clone(),
+            cookie: self.cookie.clone(),
+            mode: self.mode,
+        }
+    }
+}
+
+impl ReportGate {
+    /// P0 스윕 결과로부터 게이트를 만든다 — 스윕 히트가 곧 근거 색인이다.
+    pub fn new(rep: &probes::ProbeReport, auth: auth::AuthList, cookie: &str) -> Self {
+        Self {
+            index: factgate::EvidenceIndex::from_report(rep),
+            auth,
+            cookie: cookie.to_string(),
+            mode: factgate::GateMode::Strict,
+        }
+    }
+
+    /// 설명 기반 진단용 완화 게이트 — 실측 대상 자체가 없을 때.
+    /// 항목을 지우지는 않지만 '확인된 취약점' 으로 읽히지 않게 상태를 낮춘다.
+    pub fn lenient(auth: auth::AuthList, cookie: &str) -> Self {
+        Self {
+            index: factgate::EvidenceIndex::default(),
+            auth,
+            cookie: cookie.to_string(),
+            mode: factgate::GateMode::Lenient,
+        }
+    }
+
+    /// 본문 게이트 — 카드별 재요청 검증 후 사실 기준으로 고친 본문.
+    pub fn apply(&self, text: &str) -> factgate::GateResult {
+        let segs = factgate::segment_report(text);
+        let cards: Vec<factgate::RootCard> = segs
+            .iter()
+            .filter_map(|s| match s {
+                factgate::Segment::Card(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect();
+        let fetched = factgate::verify_cards(&cards, &self.auth, &self.cookie);
+        factgate::gate_report(text, &self.index, &fetched, self.mode)
+    }
+}
+
+/// 진단 세션의 발행 게이트를 만든다 — P0 스윕 결과가 곧 실측 근거 색인이다.
+///
+/// 스윕에서 아무것도 못 찾았어도 게이트는 만든다: 근거가 0건인 상태에서 LLM 이
+/// [실증]을 주장하면 그것이 바로 걷어내야 할 환각이기 때문이다.
+/// 스윕 자체가 없으면(대상 URL 없음 — 설명 기반 진단) 완화 모드로 만든다.
+fn report_gate_for(
+    app: &AppHandle,
+    sweep: Option<&probes::ProbeReport>,
+    cookie: &str,
+) -> Option<ReportGate> {
+    let auth = auth::load(&resolve_app_auth_path(app));
+    Some(match sweep {
+        Some(rep) => ReportGate::new(rep, auth, cookie),
+        None => ReportGate::lenient(auth, cookie),
+    })
+}
+
 #[derive(Default)]
-#[allow(dead_code)] // settled: 프로토콜 완성도용 플래그 (완료 판정은 failed/aborted+exit)
+#[cfg_attr(not(test), allow(dead_code))] // settled: 프로토콜 완성도용 플래그 (완료 판정은 failed/aborted+exit)
 struct PumpOutcome {
     text: String, // 어시스턴트 텍스트 전체 누적 (워커 발견·collector 입력용)
     failed: bool, // stopReason=error / exit≠0 계열
@@ -2955,6 +3051,9 @@ struct ScopeEnforce {
 }
 
 /// 어시스턴트 텍스트 1건 확정 — 중복 노트 방지 + outcome 누적 + 전송.
+///
+/// `gate` 가 있으면 리포트 본문은 **지금 내보내지 않는다** — 전체가 모인 뒤
+/// 한 번에 사실 검증 게이트를 통과한 결과만 발행한다(중간 조각은 검증할 수 없다).
 fn flush_assistant_text(
     app: &AppHandle,
     id: &str,
@@ -2963,6 +3062,7 @@ fn flush_assistant_text(
     outcome: &mut PumpOutcome,
     last_text: &mut Option<String>,
     report_tag: Option<&str>,
+    gate: Option<&ReportGate>,
 ) {
     let t = t.trim().to_string();
     if t.is_empty() || last_text.as_deref() == Some(t.as_str()) {
@@ -2975,6 +3075,8 @@ fn flush_assistant_text(
     match worker {
         Some(w) => emit_note(app, id, t.clone(), Some(w)),
         None => match report_tag {
+            // 게이트 활성 → 발행은 pump_and_wait 가 본문 전체에 대해 수행한다.
+            Some(_) if gate.is_some() => {}
             Some(tag) => emit_report_text(app, id, t.clone(), tag),
             None => emit_note(app, id, t.clone(), None),
         },
@@ -3070,6 +3172,7 @@ fn pump_pi_stdio(
     tool_prefix: &str,
     enforce: Option<ScopeEnforce>,
     report_tag: Option<&str>,
+    gate: Option<&ReportGate>,
 ) -> PumpOutcome {
     let PiPipes { out, err } = pipes;
     // stderr → [sys] 노트(모델/스코프 로그·print 모드 오류). 엔진 내부 소음은 걸러낸다.
@@ -3182,7 +3285,7 @@ fn pump_pi_stdio(
                             // 없으면 누적 버퍼로 폴백한다 (provider 정정 반영).
                             let authoritative = ae.get("content").and_then(|c| c.as_str()).unwrap_or("").trim();
                             let b = if authoritative.is_empty() { buf.clone() } else { authoritative.to_string() };
-                            flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
+                            flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag, gate);
                             buf.clear();
                         }
                         _ => {}
@@ -3228,7 +3331,7 @@ fn pump_pi_stdio(
                             for part in content {
                                 if part.get("type").and_then(|t| t.as_str()) == Some("text") {
                                     if let Some(t) = part.get("text").and_then(|t| t.as_str()) {
-                                        flush_assistant_text(app, id, t, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
+                                        flush_assistant_text(app, id, t, worker.as_ref(), &mut outcome, &mut last_text, report_tag, gate);
                                     }
                                 }
                             }
@@ -3268,7 +3371,7 @@ fn pump_pi_stdio(
     }
     if !buf.trim().is_empty() {
         let b = buf.clone();
-        flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag);
+        flush_assistant_text(app, id, &b, worker.as_ref(), &mut outcome, &mut last_text, report_tag, gate);
     }
     if !unknown_types.is_empty() {
         let mut kinds: Vec<(&String, &u64)> = unknown_types.iter().collect();
@@ -3486,6 +3589,7 @@ struct ClaimCheck {
     url: String,
     verdict: ClaimVerdict,
     /// 실제 재요청한 횟수 (후보 URL 중 시도한 것).
+    #[allow(dead_code)] // 기록용 — 재시도 횟수를 리포트에 띄우면 읽힌다
     tried: usize,
 }
 
@@ -3555,9 +3659,15 @@ fn engine_sev_ko(s: &str) -> &'static str {
 /// 일치(exact)·주장 등급 미인식은 감사 건으로 남기지 않는다.
 fn audit_claim_severities(claims: &[RootClaim], evidence: &HashMap<String, String>) -> Vec<SeverityAudit> {
     let mut out: Vec<SeverityAudit> = Vec::new();
+    // 근거 맵의 키는 스윕 히트 id("P-001"), 본문 인용은 "[P-001]" — 정규화해 비교한다.
+    let norm: HashMap<String, &String> = evidence.iter().map(|(k, v)| (p_id_key(k), v)).collect();
     for c in claims {
         // 인용 중 실제 근거로 존재하는 것만 — 존재하지 않는 인용은 무시.
-        let cited: Vec<&String> = c.p_ids.iter().filter(|id| evidence.contains_key(*id)).collect();
+        let cited: Vec<&String> = c
+            .p_ids
+            .iter()
+            .filter_map(|id| norm.get(&p_id_key(id)).copied())
+            .collect();
         if cited.is_empty() {
             out.push(SeverityAudit {
                 route: c.route.clone(),
@@ -3569,12 +3679,11 @@ fn audit_claim_severities(claims: &[RootClaim], evidence: &HashMap<String, Strin
         }
         let mut max_rank: Option<u8> = None;
         let mut max_sev = String::new();
-        for id in cited {
-            let sev = &evidence[id];
+        for sev in cited {
             let r = engine_sev_rank(sev).unwrap_or(0);
             if max_rank.map_or(true, |m| r > m) {
                 max_rank = Some(r);
-                max_sev = sev.clone();
+                max_sev = (*sev).clone();
             }
         }
         let Some(e_rank) = max_rank else { continue };
@@ -3592,100 +3701,6 @@ fn audit_claim_severities(claims: &[RootClaim], evidence: &HashMap<String, Strin
         });
     }
     out
-}
-
-fn url_host(url: &str) -> Option<String> {
-    let rest = url.split_once("://")?.1;
-    let hostport = rest.split('/').next()?;
-    if let Some(b) = hostport.strip_prefix('[') {
-        b.split(']').next().map(|h| h.to_lowercase())
-    } else {
-        hostport.split(':').next().map(|h| h.to_lowercase())
-    }
-}
-
-fn url_scheme(url: &str) -> Option<&str> {
-    let s = url.split_once("://")?.0;
-    if s == "http" || s == "https" {
-        Some(s)
-    } else {
-        None
-    }
-}
-
-/// URL 포트 — 명시 `:port` 우선, 없으면 스킴 기본값(https 443/http 80).
-fn url_port(url: &str) -> Option<u16> {
-    let rest = url.split_once("://")?.1;
-    let hostport = rest.split('/').next()?;
-    let (_, explicit) = split_host_port(hostport);
-    explicit.or(match url_scheme(url) {
-        Some("https") => Some(443),
-        Some("http") => Some(80),
-        _ => None,
-    })
-}
-
-/// 동일 호스트 절대화 — Location 이 상대경로면 base 와 결합, 절대는 호스트 일치 시만.
-fn absolutize_same_host(base: &str, loc: &str) -> Option<String> {
-    let loc = loc.trim();
-    if loc.starts_with('/') && !loc.starts_with("//") {
-        let scheme = url_scheme(base)?;
-        // 포트 보존 — base 의 host:port 를 살린다.
-        let rest = base.split_once("://")?.1;
-        let hostport = rest.split('/').next()?;
-        return Some(format!("{scheme}://{hostport}{loc}"));
-    }
-    if url_scheme(loc).is_some() {
-        if url_host(loc) == url_host(base) {
-            return Some(loc.to_string());
-        }
-    }
-    None
-}
-
-/// 대조 재요청 — GET 1회 + 동일 호스트 리다이렉트 1홉, 8초·200KB 상한.
-fn verify_fetch(url: &str, cookie: &str) -> Result<(u16, String, String), String> {
-    let agent: ureq::Agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(8))
-        .timeout_read(std::time::Duration::from_secs(8))
-        .timeout_write(std::time::Duration::from_secs(8))
-        .redirects(0)
-        .user_agent("Mozilla/5.0 (RedCell authorized-agent; verify)")
-        .build();
-    let mut target = url.to_string();
-    for _ in 0..2 {
-        let mut req = agent.get(&target);
-        if !cookie.trim().is_empty() {
-            req = req.set("Cookie", cookie.trim());
-        }
-        let resp = match req.call() {
-            Ok(r) => r,
-            Err(ureq::Error::Status(_, r)) => r,
-            Err(e) => return Err(e.to_string()),
-        };
-        let status = resp.status();
-        if (300..400).contains(&status) {
-            let loc = resp.header("Location").unwrap_or("").to_string();
-            if let Some(next) = absolutize_same_host(&target, &loc) {
-                target = next;
-                continue;
-            }
-            return Err(format!("리다이렉트 추적 불가 ({status})"));
-        }
-        let mut hs = String::new();
-        for name in resp.headers_names() {
-            for v in resp.all(&name) {
-                hs.push_str(&format!("{name}: {v}\n"));
-            }
-        }
-        let mut buf = Vec::new();
-        resp.into_reader()
-            .take(200_000)
-            .read_to_end(&mut buf)
-            .map_err(|e| e.to_string())?;
-        return Ok((status, hs, String::from_utf8_lossy(&buf).into_owned()));
-    }
-    Err("리다이렉트 과다".into())
 }
 
 /// 기계 대조 — 주장 URL 재요청 + 환각 P-ID 검출 + 위험도 대조.
@@ -3823,6 +3838,7 @@ fn run_collector_merge(
     report_tag: &str,
     label: &str,
     piq: &str,
+    gate: Option<&ReportGate>,
 ) -> PumpOutcome {
     // 구조화 선독 — findings JSON 이 있으면 병합 프롬프트에 덧붙인다.
     let block = collect_findings_block(app, id, engine, piq);
@@ -3836,7 +3852,7 @@ fn run_collector_merge(
         Ok(prep) => match spawn_prepared(&prep, provider, settings) {
             Ok((child, pipes)) => {
                 app.state::<Procs>().0.lock().unwrap().insert(proc_key.to_string(), child);
-                pump_and_wait(app, id, proc_key, pipes, None, prep.tool_prefix, prep.enforce_auth, Some(report_tag))
+                pump_and_wait(app, id, proc_key, pipes, None, prep.tool_prefix, prep.enforce_auth, Some(report_tag), gate)
             }
             Err(e) => {
                 emit_note(app, id, format!("[오류] {label} 실행 실패: {e}"), None);
@@ -3946,6 +3962,10 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         let digest_w = p0_evidence_block(&sweep, 6000);
         let digest_c = p0_evidence_block(&sweep, 12000);
         let playbook = session_playbook_block(&sweep);
+        // 발행 게이트 — 1차·최종 리포트는 반드시 사실 검증(근거 대조)을 통과한
+        // 본문만 사용자에게 나간다. 스윕에서 0건이 나와도 게이트는 켠다 — 근거가
+        // 없는 [실증] 주장이 그 상태에서 가장 위험하다.
+        let gate = report_gate_for(&app, Some(&sweep), &s.auth_cookie);
         // 워커 실행 클로저 — round 0 = 1차, 1+ = 추가 확인 (동일 세션 연속).
         let run_round = |round: u32, ctx: &std::collections::HashMap<String, (String, String)>| -> Vec<(String, PumpOutcome)> {
             for def in DEEP_WORKERS {
@@ -4002,7 +4022,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                         Ok(prep) => match spawn_prepared(&prep, &provider, &settings) {
                             Ok((child, pipes)) => {
                                 app.state::<Procs>().0.lock().unwrap().insert(key.clone(), child);
-                                pump_and_wait(&app, &id, &key, pipes, Some(tag.clone()), prep.tool_prefix, prep.enforce_auth, None)
+                                pump_and_wait(&app, &id, &key, pipes, Some(tag.clone()), prep.tool_prefix, prep.enforce_auth, None, None)
                             }
                             Err(e) => {
                                 emit_note(&app, &id, format!("[오류] {e}"), Some(&tag));
@@ -4083,7 +4103,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
                 merge.push_str(&playbook);
                 let run_tag = if engine == Engine::Prime { "merge-early".to_string() } else { format!("{piq}-merge-early") };
                 let key = format!("{id}#merge-early");
-                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트", &piq);
+                let outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &key, "early", "1차 리포트", &piq, gate.as_ref());
                 if ((!outcome.failed && !outcome.aborted) || has_usable_text(&outcome)) && !outcome.text.trim().is_empty() {
                     early_published = true;
                     early_text = outcome.text.trim().to_string();
@@ -4196,7 +4216,7 @@ fn start_deep_diagnosis(app: AppHandle, id: String) -> Result<(), String> {
         merge.push_str(&verify_block);
         merge.push_str(&playbook);
         let run_tag = if engine == Engine::Prime { "merge".to_string() } else { format!("{piq}-merge") };
-        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트", &piq);
+        let merge_outcome = run_collector_merge(&app, &id, engine, &settings, &provider, &redcell, &run_tag, merge, &id, "final", "최종 리포트", &piq, gate.as_ref());
         let ok = (!merge_outcome.failed && !merge_outcome.aborted) || has_usable_text(&merge_outcome);
         if ok && !merge_outcome.text.trim().is_empty() {
             // 발행 파일 자동 저장 — 실패하면 한 줄로 알린다(열 때 저장됨).
@@ -6625,6 +6645,22 @@ mod tests {
         assert!(block.contains("낮출 것"), "{block}");
         assert!(block.contains("중간"), "{block}");
         assert!(verify_note_line(&rep).contains("심각도 대조 1건"), "{}", verify_note_line(&rep));
+    }
+
+    #[test]
+    fn engine_id_and_bracket_citation_are_the_same_evidence() {
+        // 운영 경로의 근거 맵은 스윕 히트 id("P-001") 형태다. 본문 인용은
+        // "[P-001]" 형태 — 괄호가 달라도 같은 근거로 판정해야 한다.
+        // (이 대조가 죽어 있으면 정당한 인용까지 전부 환각으로 잡혔다.)
+        let text = "### 루트 1. SQL 주입 [치명]\n위험도: 치명\n검증: [실증]\n근거 [P-001]\n";
+        let evidence: HashMap<String, String> =
+            [("P-001".to_string(), "medium".to_string())].into_iter().collect();
+        let auth = auth::AuthList { allows: vec![], ..Default::default() };
+        let rep = verify_report_claims(text, &evidence, &auth, "");
+        assert!(rep.unknown_ids.is_empty(), "정당한 인용이 환각으로 잡혔다: {:?}", rep.unknown_ids);
+        assert_eq!(rep.severity.len(), 1, "{rep:?}");
+        assert_eq!(rep.severity[0].kind, "over");
+        assert_eq!(rep.severity[0].evidence_max.as_deref(), Some("medium"));
     }
 
     #[test]

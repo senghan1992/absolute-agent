@@ -6,9 +6,9 @@
   "date": "2026-11-02",
   "shape": "App screen — 계측 콘솔 (measurement console)",
   "theme": "Rim",
-  "axes": "dark/grotesk-sans/warm",
+  "axes": "dark/grotesk-sans/warm · radius 10/12/16 + pill + round (DESIGN.md 어휘)",
   "hero": "none — app screen: there is no hero stage; the signature bar (대상 지정) leads instead",
-  "nav": "상단 셸: 워드마크 · 세션 탭 · 조작 4개 (테마/새 작업/기록/대상/설정)",
+  "nav": "상단 셸: 워드마크 · 세션 탭 · 조작 5개 (테마/새 작업/기록/대상/설정)",
   "footer": "none — app screen; the AI 도우미 panel closes the right edge instead",
   "imagery": "none — an instrument console shows measurements, not photographs; every value on screen is real data from the run",
   "photos": [],
@@ -22,7 +22,7 @@
    "기록 표 · 검사 결과",
    "AI 도우미"
   ],
-  "signature": "대상 지정 막대 — 점검할 주소 → AI 모델 → 진단 시작",
+  "signature": "대상 지정 막대 — 점검할 주소 → AI 모델 → 진단 시작 · 등급 링(원) · 기록 표의 직각 격자",
   "waived": [],
   "prompt": "RUST로 만드는 데스크톱 앱의 디자인이 촌스러워 — 더 고급지고 처음 쓰는 사람도 직관적으로 바로 쓸 수 있게 전면 개선"
  }

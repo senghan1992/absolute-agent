@@ -1550,8 +1550,8 @@ const ROOT_HEADING_RE = /^#{1,4}\s*루트\s*\d*\.?\s*/;
 //   SEV_INDEX : 심각도만 봤을 때의 위험 지수(0~10)
 //   VER_FACTOR: 직접 확인일수록 확신(가정일수록 낮게 반영)
 const SEV_INDEX = { "치명": 10, "높음": 7.5, "중간": 5, "낮음": 2.5 };
-const VER_FACTOR = { "실증": 1.0, "징후": 0.85, "가정": 0.7 };
-const VER_RANK = { "실증": 3, "징후": 2, "가정": 1 };
+const VER_FACTOR = { "실증": 1.0, "징후": 0.85, "미확인": 0.5, "가정": 0.7 };
+const VER_RANK = { "실증": 3, "징후": 2, "미확인": 0, "가정": 1 };
 const SEV_RANK = { "치명": 4, "높음": 3, "중간": 2, "낮음": 1 };
 
 // 등급 판정 — 평균으로 묻지 않는다.
@@ -1591,9 +1591,10 @@ function gradeOf(roots) {
 // ── 진단 리포트 요약: 루트별 위험도·검증 상태를 한눈에 (왼쪽 상단 등급 헤더) ──
 function reportStats(docs) {
   const sev = { "치명": 0, "높음": 0, "중간": 0, "낮음": 0 };
-  const ver = { "실증": 0, "징후": 0, "가정": 0 };
+  const ver = { "실증": 0, "징후": 0, "미확인": 0, "가정": 0 };
   const roots = []; // { sev, ver, title } — 루트별 위험도 산정용
   let cur = null;
+  let hypo = 0; // '미확인 N.' 항목 수 — 근거 미확보로 강등된 가설
   for (const d of docs) {
     for (const raw of (d.text || "").split(/\r?\n/)) {
       const line = raw.trim();
@@ -1610,11 +1611,19 @@ function reportStats(docs) {
         roots.push(cur);
         continue;
       }
+      // '## ' 절 경계 — 루트 카드가 끝나면 검증 상태 수집도 끝낸다.
+      // (루트 뒤 절에 있는 '검증: [미확인]' 이 마지막 루트를 덮어쓰면 안 된다)
+      if (/^##(?!#)\s/.test(line)) {
+        cur = null;
+        continue;
+      }
+      // 근거 미확보로 강등된 가설 항목 — '발견' 이 아니라 '확인 필요' 로 센다.
+      if (/^#{1,6}\s*미확인\s*\d/.test(line)) hypo++;
       // 검증 상태 — '검증:' 라벨이 붙은 줄이 가장 신뢰할 만한 근거다.
       // (라벨 줄이 없으면 '실측·확인·재현' 어휘가 있는 줄을 보조 근거로 쓴다.
       //  라벨 줄을 먼저 찾았다면 뒤의 보조 근거로는 덮어쓰지 않는다 —
       //  '근거: [가정]' 같은 후속 줄이 확인 상태를 깎아내면 안 된다.)
-      const vm = line.match(/\[(실증|징후|가정)\]/);
+      const vm = line.match(/\[(실증|징후|미확인|가정)\]/);
       if (!vm || !cur) continue;
       const explicit = /^\**\s*검증\s*[:：]/.test(line);
       if (explicit) {
@@ -1635,10 +1644,10 @@ function reportStats(docs) {
         while ((mm = re.exec(raw)) !== null) {
           sev[mm[1]]++;
           // 같은 줄에 검증 배지가 있으면 그 상태를, 없으면 '가정' 으로 둔다.
-          const vm = raw.match(/\[(실증|징후|가정)\]/);
+          const vm = raw.match(/\[(실증|징후|미확인|가정)\]/);
           roots.push({ sev: mm[1], ver: vm ? vm[1] : "가정", title: "", explicit: false });
         }
-        const rv = /\[(실증|징후|가정)\]/g;
+        const rv = /\[(실증|징후|미확인|가정)\]/g;
         let mv;
         while ((mv = rv.exec(raw)) !== null) ver[mv[1]]++;
       }
@@ -1661,7 +1670,7 @@ function reportStats(docs) {
     const k = (SEV_RANK[r.sev] || 0) * 10 + (VER_RANK[r.ver] || 1);
     if (!worst || k > worst.k) worst = { k, r };
   }
-  return { roots: roots.length, sev, ver, score, grade, worst: worst ? worst.r : null };
+  return { roots: roots.length, sev, ver, score, grade, hypo, worst: worst ? worst.r : null };
 }
 // ── 리포트 요약 바: 얇은 한 줄(등급 · 위험 수 · 내보내기) + 접히는 서랍 ──
 // 리포트 본문이 상단 요약에 가리지 않도록:
@@ -1908,7 +1917,7 @@ function renderReportSummary(s, docs, segs) {
   const st = reportStats(statsDocs(docs));
   top.classList.remove("hidden");
   const worst = st.worst && st.worst.title
-    ? `<div class="rs-why"><span class="rs-why-lbl">최고 위험</span>${esc(st.worst.title)} <span class="rs-why-tag">${esc(st.worst.sev)}${st.worst.ver === "실증" ? " · 직접 확인" : st.worst.ver === "징후" ? " · 일부 확인" : " · 추측"}</span></div>`
+    ? `<div class="rs-why"><span class="rs-why-lbl">최고 위험</span>${esc(st.worst.title)} <span class="rs-why-tag">${esc(st.worst.sev)}${st.worst.ver === "실증" ? " · 직접 확인" : st.worst.ver === "징후" ? " · 일부 확인" : st.worst.ver === "미확인" ? " · 미확인" : " · 추측"}</span></div>`
     : "";
   // B1) 지금 해야 할 일 — 권고 절의 P0/P1 항목 (없으면 조용히 숨김)
   const todo = renderTodoList(parseActionItems(docs, segs));
@@ -1940,6 +1949,7 @@ function renderReportSummary(s, docs, segs) {
           <span class="rs-vchip v-proof" title="직접 요청해 확인한 취약점"><b>${st.ver["실증"]}</b> 직접 확인</span>
           <span class="rs-vchip v-sig" title="일부 정황만 확인됨"><b>${st.ver["징후"]}</b> 일부 확인</span>
           <span class="rs-vchip v-assume" title="코드·설명 기반 추론(미확인)"><b>${st.ver["가정"]}</b> 추측</span>
+          ${st.hypo ? `<span class="rs-vchip v-unverified" title="근거를 확보하지 못해 확정 취약점에서 제외된 항목 — 다음 점검 대상"><b>${st.hypo}</b> 미확인 가능성</span>` : ""}
         </div>
         ${todo}
       </div>
@@ -1950,6 +1960,7 @@ function renderReportSummary(s, docs, segs) {
           <span class="rs-legend-item"><span class="badge bx-crit">치명</span>위험도(치명→낮음)</span>
           <span class="rs-legend-item"><span class="badge bx-proof">실증</span>직접 확인함</span>
           <span class="rs-legend-item"><span class="badge bx-sig">징후</span>일부 확인</span>
+          <span class="rs-legend-item"><span class="badge bx-unverified">미확인</span>근거 미확보(확정 아님)</span>
           <span class="rs-legend-item"><span class="badge bx-assume">가정</span>추측(미확인)</span>
           <span class="rs-legend-item rs-legend-prio">P0 지금 바로 · P1 이번 주 · P2 한 달 · P3 참고</span>
         </div>
@@ -2200,6 +2211,7 @@ function reportCover(s, docs) {
     lines.push(`> 등급 ${st.grade.letter} (${st.grade.label}) · 위험지수 ${st.score.toFixed(1)}/10 · 발견 ${st.roots}건`
       + ` (치명 ${sev["치명"]} · 높음 ${sev["높음"]} · 중간 ${sev["중간"]} · 낮음 ${sev["낮음"]})`);
     lines.push(`> 검증 상태 — 직접 확인 ${st.ver["실증"]} · 일부 확인 ${st.ver["징후"]} · 추측 ${st.ver["가정"]}`
+      + (st.hypo ? ` · 미확인 가능성 ${st.hypo}` : "")
       + (st.worst && st.worst.title ? ` · 최고 위험: ${st.worst.title}` : ""));
   } else {
     lines.push(`> 등급 ${st.grade.letter} (${st.grade.label}) — 점검 범위 안에서 알려진 결함을 확인하지 못했습니다`);
@@ -2317,11 +2329,15 @@ const SEC_KINDS = [
   { kind: "fix", title: "해야 할 일 (우선순위별)", re: /(권고|개선|보완)/ },
   { kind: "proof", title: "직접 확인한 것", re: /(실측|확인한)/ },
   { kind: "control", title: "이미 잘 되고 있는 부분", re: /(통제|잘되고)/ },
+  // '미확인 가능성' — 근거 미확보로 공격 시나리오에서 강등된 항목들.
+  //   (한계보다 먼저 검사한다 — '근거 미확보' 제목이 '미검증' 을 포함해 한계로
+  //    잘못 잡히는 것을 막기 위해. 일반 '한계와 미검증 영역' 절은 여기 걸리지 않는다.)
+  { kind: "hypo", title: "미확인 가능성 (검증 필요)", re: /(미확인가능성|근거미확보)/ },
   { kind: "limit", title: "확인하지 못한 부분 (한계)", re: /(한계|미검증)/ },
   { kind: "appendix", title: "부록", re: /부록/ },
 ];
 // 카드 최종 순서 — 실측·통제·한계·부록은 루트 뒤로, '기타(tail)' 는 맨 뒤.
-const SEC_ORDER = ["proof", "control", "limit", "appendix", "tail"];
+const SEC_ORDER = ["proof", "control", "limit", "hypo", "appendix", "tail"];
 
 // 절 제목 → 카드 종류 (없으면 null → 기존 tail 동작으로 fallback).
 function sectionKind(title) {
@@ -2465,6 +2481,7 @@ function renderResults() {
       : it.kind === "proof" ? `<span class="md-kind proof">직접 확인</span>`
       : it.kind === "control" ? `<span class="md-kind control">잘 되고 있는</span>`
       : it.kind === "limit" ? `<span class="md-kind limit">한계</span>`
+      : it.kind === "hypo" ? `<span class="md-kind hypo">미확인 가능성</span>`
       : it.kind === "appendix" ? `<span class="md-kind appendix">부록</span>`
       : it.kind === "tail" ? `<span class="md-kind tail">기타</span>`
       : `<span class="md-kind doc">결과</span>`;
@@ -2491,7 +2508,7 @@ function escHtml(s) {
 
 /* 미니 마크다운 → HTML (의존성 없음). 입력은 먼저 이스케이프한 뒤 변환하므로 안전. */
 // F1) 우선순위 배지를 4단계로 나눈다 — 전부 같은 색이면 우선순위가 구분되지 않는다.
-const DIAG_BADGES = { "치명": "bx-crit", "높음": "bx-high", "중간": "bx-med", "낮음": "bx-low", "정보": "bx-info", "가정": "bx-assume", "실증": "bx-proof", "징후": "bx-sig", "P0": "bx-p0", "P1": "bx-p1", "P2": "bx-p2", "P3": "bx-p3" };
+const DIAG_BADGES = { "치명": "bx-crit", "높음": "bx-high", "중간": "bx-med", "낮음": "bx-low", "정보": "bx-info", "가정": "bx-assume", "실증": "bx-proof", "징후": "bx-sig", "미확인": "bx-unverified", "P0": "bx-p0", "P1": "bx-p1", "P2": "bx-p2", "P3": "bx-p3" };
 
 // ── B) 비전문가용 전문어 툴팁 사전 ────────────────────────────────────────────
 // 이 앱의 사용자는 "보안을 잘 모르는 사람"이다. 리포트 본문에 나오는 전문어를
@@ -2584,6 +2601,7 @@ function diagFlowHtml(content) {
 const VERIFY_ST = [
   ["실증", "bx-proof", "직접 확인함"],
   ["징후", "bx-sig", "일부만 확인"],
+  ["미확인", "bx-unverified", "확인 못 함 (근거 미확보)"],
   ["가정", "bx-assume", "추측 (직접 확인 못 함)"],
 ];
 // ── E) 약점 번호 툴팁 사전 ────────────────────────────────────────────────

@@ -92,10 +92,17 @@
   --color-scrim: oklch(6% 0.005 60 / 0.86);
   --color-well: oklch(11% 0.006 60);
 
-  /* ── 형태 ── */
-  --radius-card: 0px;
-  --radius-pill: 0px;
-  --radius-control: 0px;
+  /* ── 형태: 반지름 척도 ──
+     이 저장소의 잠긴 디자인 시스템(DESIGN.md)이 정한 모양 어휘를 그대로 쓴다:
+     기본 12(--r) · 작은 9(--r-sm) · 카드·팝오버 16 · 칩·상태·카운트는 완전한 pill · 역 도트는 원.
+     계측 격자(표·헤어라인·규칙)만 직각으로 남기고, 손이 닿는 물건과 그 면은 푼다. */
+  --radius-sm: 9px;
+  --radius-control: 10px;   /* 버튼·입력·선택 (DESIGN.md button 10) */
+  --radius-panel: 12px;     /* 카드·컨테이너·코드 블록 (--r) */
+  --radius-dialog: 16px;    /* 모달·팝업 (lg) */
+  --radius-pill: 999px;     /* 칩·태그·상태·카운트 (pill) */
+  --radius-round: 50%;      /* 역 도트·링 (round) */
+  --radius-card: var(--radius-panel);
   --rule-hair: 1px;
   --shadow-card: none;
   --shadow-pop: 0 12px 20px oklch(4% 0.004 60 / 0.66);
@@ -142,9 +149,9 @@
   --shadow-2: var(--shadow-pop);
   --sans: var(--font-display);
   --mono: var(--font-outlier);
-  --r: var(--radius-card);
-  --r-sm: var(--radius-card);
-  --r-lg: var(--radius-card);
+  --r: var(--radius-panel);
+  --r-sm: var(--radius-sm);
+  --r-lg: var(--radius-dialog);
   --ease-run: var(--ease-out);
 }
 

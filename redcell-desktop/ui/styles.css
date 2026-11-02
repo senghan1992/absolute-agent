@@ -1,8 +1,9 @@
 /* Hallmark · shape: app screen · genre: modern-minimal · theme: Rim (deal 1/3, seed desktop-security-diagnosis-console-enter-b79a·90f1bd89·2026-11-02·r0) · redesign: full
  * nav: 상단 셸(워드마크 · 세션 탭 · 조작 5개) · signature: 대상 지정 막대(점검할 주소 → AI 모델 → 진단 시작) · states: 대기, 실행 중, 완료, 오류, 비어 있음
- * axes: dark/grotesk-sans/warm · colourways: rim night(어두움·기본) · rim day(밝은 종이, 이 앱만의 변형) · posture: committed · contrast: pass · v2.0.0 */
+ * axes: dark/grotesk-sans/warm · radius: DESIGN.md 의 9/12/16 + pill + round (Rim의 'nothing is round' 대신 이 저장소의 잠긴 모양 어휘 — 격자는 그대로 두고 물건만 푼다) · colourways: rim night(어두움·기본) · rim day(밝은 종이, 이 앱만의 변형) · posture: committed · contrast: pass · v2.0.0 */
 /* Hallmark · pre-emit critique: P4 H4 E4 S4 R4 V4 · weakest: S, 계측 도구답게 차분해진 만큼 '보안 진단'만의 성격이 옅어짐 — 그래서 첫 화면을 세 단계 안내로 다시 세워 진입 동선을 다시 만들었다 */
 /* Hallmark · answered F4 · the danger confirm is the only filled button inside its own dialog, so the page keeps one filled primary */
+/* Hallmark · answered F7 · the pill radius lands only on DESIGN.md's chips and tags — grade, kind, count, step — never on a card, a well or media */
 /* Hallmark · dropped "00:37", "12:38" · the log time column reads the live session clock, so the sampled times differ on every run */
 /* Hallmark · finish-review: subagent · 8 findings · 6 resolved 1 partial 1 unresolved · gap: the inspector band stays above the log — the order the review asks for is the Floor FAIL 73 the before record already had */
 @import url("./tokens.css");
@@ -16,6 +17,32 @@
 
 /* ── 아이콘: 1.7px 획선, currentColor ── */
 .ic { fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+
+/* ── 형태: 반지름은 DESIGN.md 의 모양 어휘를 따른다 ──
+   계측 격자(표·헤어라인·규칙)는 직각으로 남기고,
+   손이 닿는 물건(10) · 물건을 담는 면(12) · 대화면(16) · 칩·태그·도트(pill·원)만 푼다. */
+:where(.btn, .rs-btn, .sh-target, .sh-provider, .sh-engine, .sh-cookie-input, .mem-add input, .mem-add select,
+       .composer textarea, .diag-info-btn, .rd-exp, .ev-pre, .cvss-vec, .htab) {
+  border-radius: var(--radius-control);
+}
+:where(.rs-card, .md-card, .pcard, .dash-card, .ns-card, .msg, .sim, .sim-bubble, .finding, .finding-evidence,
+       .mem-panel, .activity, .worker-bar, .diag-flow, .diag-field, .diag-step, .risk-level, .risk-flag,
+       .hero-setup, .empty-state, .pi-console, .as-tile, .au-row, .rp-row, .toast,
+       .detail pre, .md-body pre, .md-body code) {
+  border-radius: var(--radius-panel);
+}
+:where(.modal-card, .diag-info-pop) {
+  border-radius: var(--radius-dialog);
+}
+/* 칩 · 태그 · 상태 · 카운트 — 완전한 pill (DESIGN.md) */
+:where(.chip, .lf-chip, .rs-nav-chip, .rs-jump-chip, .af-chip, .dchip, .sim-btn, .wk-chip, .eng-pill,
+       .badge, .sev-tag, .md-kind, .pcard-kind, .dash-grade, .dash-status, .au-badge, .count, .sim-n) {
+  border-radius: var(--radius-pill);
+}
+/* 역 도트 · 링 — 원 (DESIGN.md 의 세 가지 원형 어휘) */
+:where(.tdot, .agent-orb, .activity-dot, .s-dot) {
+  border-radius: var(--radius-round);
+}
 
 /* ── 상단 셸 ── */
 #topbar {
@@ -44,13 +71,21 @@
 .tabs::-webkit-scrollbar { display: none; }
 .tab {
   display: flex; align-items: center; gap: var(--space-xs); padding: var(--space-2xs) var(--space-xs);
-  background: transparent; border: none; border-bottom: 2px solid transparent;
+  background: transparent; border: none;
+  border-radius: var(--radius-pill);
   color: var(--color-muted); cursor: pointer; white-space: nowrap;
   font-size: var(--text-label); font-weight: var(--weight-strong);
   transition: color var(--dur-micro) var(--ease-out), background-color var(--dur-micro) var(--ease-out);
+  position: relative;
+}
+/* 활성 표시줄은 곡선이 아니라 직선 — 라운드가 모서리를 끌어올리는 것을 막는다 */
+.tab::after {
+  content: ""; position: absolute; left: var(--space-xs); right: var(--space-xs); bottom: 0;
+  height: 2px; background: transparent;
 }
 .tab:hover { color: var(--color-ink-2); background: var(--color-paper-3); }
-.tab.active { color: var(--color-ink); border-bottom-color: var(--color-accent); }
+.tab.active { color: var(--color-ink); }
+.tab.active::after { background: var(--color-accent); }
 .tab .tdot { width: 6px; height: 6px; flex: 0 0 auto; background: var(--color-muted-2); }
 .tab .tdot.running { background: var(--color-warn); animation: rc-pulse 1.1s infinite; }
 .tab .tdot.done { background: var(--color-ok); }
@@ -345,14 +380,14 @@ tr.row-finding td.c-msg { color: var(--color-ink); font-weight: var(--weight-str
 .rs-why-lbl { flex: none; font-size: var(--text-micro); font-weight: var(--weight-strong); color: var(--color-muted-2); }
 .rs-why-tag { flex: none; font-size: var(--text-micro); font-weight: var(--weight-strong); color: var(--color-accent-fg); }
 .rs-grade { display: flex; align-items: center; gap: var(--space-xs); flex: none; }
-.rs-letter { width: 34px; height: 34px; display: grid; place-items: center; font-size: var(--text-lead); font-weight: var(--weight-display); font-family: var(--font-outlier); background: var(--color-paper-3); border: var(--rule-hair) solid var(--color-rule); color: var(--color-muted); }
-.rs-grade.g-a .rs-letter { color: var(--color-ok-fg); border-color: var(--color-ok); background: var(--color-tint-ok); }
-.rs-grade.g-b .rs-letter { color: var(--color-sev-low-fg); border-color: var(--color-sev-low); background: var(--color-tint-low); }
-.rs-grade.g-c .rs-letter { color: var(--color-sev-medium-fg); border-color: var(--color-sev-medium); background: var(--color-tint-medium); }
-.rs-grade.g-d .rs-letter { color: var(--color-sev-high-fg); border-color: var(--color-sev-high); background: var(--color-tint-high); }
-.rs-grade.g-f .rs-letter { color: var(--color-sev-critical-fg); border-color: var(--color-sev-critical); background: var(--color-tint-critical); }
+.rs-letter { width: 34px; height: 34px; border-radius: var(--radius-round); display: grid; place-items: center; font-size: var(--text-lead); font-weight: var(--weight-display); font-family: var(--font-outlier); background: var(--color-paper-3); border: 2px solid var(--color-rule); color: var(--color-muted); }
+.rs-grade.g-a .rs-letter { color: var(--color-ok-fg); border-color: color-mix(in oklab, var(--color-ok) 60%, transparent); background: var(--color-tint-ok); }
+.rs-grade.g-b .rs-letter { color: var(--color-sev-low-fg); border-color: color-mix(in oklab, var(--color-sev-low) 60%, transparent); background: var(--color-tint-low); }
+.rs-grade.g-c .rs-letter { color: var(--color-sev-medium-fg); border-color: color-mix(in oklab, var(--color-sev-medium) 60%, transparent); background: var(--color-tint-medium); }
+.rs-grade.g-d .rs-letter { color: var(--color-sev-high-fg); border-color: color-mix(in oklab, var(--color-sev-high) 60%, transparent); background: var(--color-tint-high); }
+.rs-grade.g-f .rs-letter { color: var(--color-sev-critical-fg); border-color: color-mix(in oklab, var(--color-sev-critical) 60%, transparent); background: var(--color-tint-critical); }
 .rs-grade.g-none .rs-letter { color: var(--color-muted); border-color: var(--color-rule); }
-.rs-grade.g-ok .rs-letter { color: var(--color-ok-fg); border-color: var(--color-ok); background: var(--color-tint-ok); }
+.rs-grade.g-ok .rs-letter { color: var(--color-ok-fg); border-color: color-mix(in oklab, var(--color-ok) 60%, transparent); background: var(--color-tint-ok); }
 .rs-grade.g-ok .rs-grade-txt span { color: var(--color-ok-fg); }
 .rs-grade-txt { display: flex; flex-direction: column; }
 .rs-grade-txt b { font-size: var(--text-body); letter-spacing: var(--tracking-tight); white-space: nowrap; }
@@ -384,6 +419,7 @@ tr.row-finding td.c-msg { color: var(--color-ink); font-weight: var(--weight-str
 .rs-vchip.v-proof b { color: var(--color-ok-fg); }
 .rs-vchip.v-sig b { color: var(--color-sev-medium-fg); }
 .rs-vchip.v-assume b { color: var(--color-muted); }
+.rs-vchip.v-unverified b { color: var(--color-muted-2); }
 .rs-actions { flex: none; display: flex; gap: var(--space-2xs); align-items: center; flex-wrap: wrap; margin-left: auto; }
 .rs-btn {
   font: inherit; font-size: var(--text-label); font-weight: var(--weight-strong); cursor: pointer; min-height: 32px;
@@ -464,6 +500,8 @@ tr.row-finding td.c-msg { color: var(--color-ink); font-weight: var(--weight-str
 .md-kind.proof { background: var(--color-tint-ok); border-color: color-mix(in oklab, var(--color-ok) 40%, transparent); color: var(--color-ok-fg); }
 .md-kind.control { background: var(--color-tint-accent-2); border-color: color-mix(in oklab, var(--color-accent-2) 45%, transparent); color: var(--color-accent-2-fg); }
 .md-kind.limit, .md-kind.appendix, .md-kind.pre, .md-kind.tail { background: var(--color-paper-3); border-color: var(--color-rule); color: var(--color-muted-2); }
+/* 미확인 가능성 — 근거 미확보로 확정 취약점에서 제외된 가설. '한계' 와 구분되게 표시한다. */
+.md-kind.hypo { background: var(--color-paper-3); border-color: var(--color-rule); color: var(--color-muted); border-style: dashed; }
 .md-card-title { font-weight: var(--weight-strong); color: var(--color-ink); font-size: var(--text-body); }
 .md-card-title:empty { display: none; }
 
@@ -549,6 +587,8 @@ abbr[title] { text-decoration: underline dotted; cursor: help; }
 .badge.bx-p3 { background: var(--color-paper-4); color: var(--color-muted); }
 .badge.bx-proof { background: var(--color-tint-ok); color: var(--color-ok-fg); border-color: color-mix(in oklab, var(--color-ok) 35%, transparent); }
 .badge.bx-sig { background: var(--color-tint-medium); color: var(--color-sev-medium-fg); border-color: color-mix(in oklab, var(--color-sev-medium) 35%, transparent); }
+/* 미확인 — 근거를 확보하지 못한 항목(확정 취약점이 아님). '가정' 과 구분: 가정은 추측, 미확인은 검증 실패. */
+.badge.bx-unverified { background: var(--color-paper-4); color: var(--color-muted-2); border-color: var(--color-rule); border-style: dashed; }
 .diag-field.field-verify { background: var(--color-paper-3); }
 .diag-field.field-verify .df-label { color: var(--color-accent-2-fg); }
 .verify-chip { padding: 1px var(--space-xs); margin-right: var(--space-2xs); }

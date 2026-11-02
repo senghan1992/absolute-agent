@@ -119,6 +119,18 @@ components:
     padding: "5px 11px"
 ---
 
+# ⚠ 적용 범위 (2026-11-02 갱신)
+
+이 문서는 두 부분으로 읽는다.
+
+**1. 지금 묶고 있는 것 — 모양과 규칙**
+`Shapes` 절의 반지름 어휘(9 / 12 / 16 · pill · round), `Components` 절의 개별 반지름, 그리고 `Layout`·`Elevation`·`Do/Don't`의 구조 규칙은 **그대로 적용된다**. 2026-11-02의 Hallmark 재설계는 데스크톱 콘솔의 모양을 이 문서의 값으로 되돌렸다 — 컨트롤 10px, 카드·컨테이너 12px, 모달·팝업 16px, 칩·태그·상태·카운트는 완전한 pill, 역 도트와 등급 링은 원. 유일한 출처는 `redcell-desktop/ui/tokens.css`의 `--radius-*` 토큰이다.
+
+**2. 지금 적용되지 않는 것 — 팔레트와 서체**
+아래의 에나멜 5단 표면·라인 잉크 4색·시스템 폰트 스택은 **브랜드 기원 기록**이다. 데스크톱 콘솔(`redcell-desktop/ui`)은 2026-11-02부터 Hallmark "Rim" 테마(따뜻한 흑색 종이 + 코랄 신호 하나, 자체 호스팅 Pretendard/JetBrains Mono)로 다시 칠해졌고, 그 값은 `redcell-desktop/ui/tokens.css`에 있다. 콘솔을 다시 칠할 때 **이 문서의 색을 따르지 말고 토큰 파일을 본다.** 기계 판독본 `.impeccable/design.json`은 2026-10-27 스냅샷이라 색이 구형이다 — 같은 취급을 한다.
+
+문서를 통째로 고치지 않은 이유: 색은 세상이 바뀌었고 모양은 세상이 그대로였기 때문이다. 둘을 한 문서에 섞지 않는다.
+
 # Design System: RedCell
 
 ## Overview

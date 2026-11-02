@@ -582,7 +582,7 @@ fn mozilla_roots() -> &'static rustls::RootCertStore {
     static ROOTS: std::sync::OnceLock<rustls::RootCertStore> = std::sync::OnceLock::new();
     ROOTS.get_or_init(|| {
         let mut roots = rustls::RootCertStore::empty();
-        roots.add_server_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
+        roots.add_trust_anchors(webpki_roots::TLS_SERVER_ROOTS.iter().map(|ta| {
             rustls::OwnedTrustAnchor::from_subject_spki_name_constraints(ta.subject, ta.spki, ta.name_constraints)
         }));
         roots
@@ -2393,10 +2393,12 @@ enum ProbeKind {
     Js,
     Xss { param: String, raw: bool, marker: String },
     Sqli { param: String, quote: char },
+    #[allow(dead_code)] // 기록용 필드 — 리포트에 노출되면 읽힌다
     Cmdi { param: String, payload: String },
     Redirect { param: String, payload: &'static str },
     Ssti { param: String, payload: String },
     Ssrf { param: String },
+    #[allow(dead_code)] // 기록용 필드 — 콜백 매칭 로그에 노출되면 읽힌다
     OobSsrf { param: String, token: String },
     Graphql,
     HostHeader { header: &'static str },
@@ -2449,7 +2451,7 @@ fn pct_encode(s: &str) -> String {
 }
 
 #[derive(Clone)]
-struct Job {
+pub(crate) struct Job {
     url: String,
     method: &'static str,
     headers: Vec<(String, String)>,
@@ -3435,6 +3437,7 @@ fn first_on_path(bin: &str) -> Option<std::path::PathBuf> {
 }
 
 /// JS 렌더 DOM 확보 — headless --dump-dom (25초 타임아웃). 실패하면 None.
+#[allow(dead_code)] // 미사용 — DOM 렌더링 프로브를 쓸 때 살린다
 pub fn render_dom(url: &str, cfg: &SweepConfig) -> Option<String> {
     render_dom_with(url, cfg, find_browser())
 }
@@ -3730,6 +3733,7 @@ fn cdp_request_parts(msg: &str) -> Option<(String, String, Option<String>)> {
 }
 
 /// CDP Network.requestWillBeSent 의 http(s) URL 추출.
+#[cfg_attr(not(test), allow(dead_code))]
 fn cdp_request_url(msg: &str) -> Option<String> {
     cdp_request_parts(msg).map(|(u, _, _)| u)
 }
@@ -6942,7 +6946,7 @@ fn redirect_param_of(h: &ProbeHit) -> Option<String> {
 
 /// 전체 스윕 — base 정찰 → 병렬 잡 → 로그인 시도 → P1 검증 → P-### 부여.
 /// 크롤 수집 페이지 — 본문 + 헤더 (클라이언트 표면 스캔용).
-struct CrawledPage {
+pub(crate) struct CrawledPage {
     url: String,
     body: String,
     headers: Vec<(String, String)>,
@@ -9382,6 +9386,7 @@ pub fn sweep_summary_line(rep: &ProbeReport) -> String {
 /// P-ID는 실행별 순번이라 비교 키가 될 수 없다 (지문만 사용).
 /// 지문 없는 구 리포트는 target|category|title 폴백 키로 매칭한다.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct SeverityChange {
     pub fingerprint: String,
     pub title: String,
@@ -9390,6 +9395,7 @@ pub struct SeverityChange {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct ReportDiff {
     pub old_target: String,
     pub new_target: String,
@@ -9402,6 +9408,7 @@ pub struct ReportDiff {
     pub severity_changes: Vec<SeverityChange>,
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn diff_key(h: &ProbeHit) -> String {
     if h.fingerprint.is_empty() {
         format!("{}|{}|{}", h.target, h.category, h.title)
@@ -9410,6 +9417,7 @@ fn diff_key(h: &ProbeHit) -> String {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn diff_reports(old: &ProbeReport, new: &ProbeReport) -> ReportDiff {
     use std::collections::HashMap;
     let mut old_map: HashMap<String, Vec<&ProbeHit>> = HashMap::new();
@@ -9464,6 +9472,7 @@ pub fn diff_reports(old: &ProbeReport, new: &ProbeReport) -> ReportDiff {
 }
 
 /// diff 한 줄 요약 — "신규 N·해소 M·지속 K(격상/격하 S)".
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn diff_summary_line(d: &ReportDiff) -> String {
     format!(
         "[diff] {} → {} — 신규 {}건·해소 {}건·지속 {}건·심각도 변경 {}건{}.",
@@ -9479,7 +9488,7 @@ pub fn diff_summary_line(d: &ReportDiff) -> String {
 
 /// LLM 주입용 증거 다이제스트 — 심각도순, 글자 상한 (초과는 "외 N건 생략").
 /// main 바이너리에서만 쓴다 — sweep 은 같은 모듈을 공유하므로 미사용 경고를 끈다.
-#[allow(dead_code)]
+#[cfg_attr(not(test), allow(dead_code))]
 /// 체인 단서 — 카테고리 쌍이 공격 시나리오로 엮이면 P-ID 인용 힌트 (최대 5개).
 /// 양쪽 다 info 면 점화하지 않는다. 세션 한정·동일 대상 계산 (저장 없음).
 pub fn chain_hints(hits: &[ProbeHit]) -> Vec<String> {
@@ -9601,6 +9610,7 @@ pub fn cvss_base_score(vector: &str) -> Option<f32> {
 
 /// CVSS 요구사항 등급 — L/M/H/X(미정의=1.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum ReqLevel {
     L,
     M,
@@ -9610,6 +9620,7 @@ pub enum ReqLevel {
 
 /// 시간 지표 — E (미정의 X=1.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum TempE {
     X,
     U,
@@ -9626,6 +9637,7 @@ impl Default for TempE {
 
 /// 시간 지표 — RL (미정의 X=1.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum TempRl {
     X,
     O,
@@ -9642,6 +9654,7 @@ impl Default for TempRl {
 
 /// 시간 지표 — RC (미정의 X=1.0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub enum TempRc {
     X,
     U,
@@ -9655,6 +9668,7 @@ impl Default for TempRc {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn req_m() -> ReqLevel {
     ReqLevel::M
 }
@@ -9662,6 +9676,7 @@ fn req_m() -> ReqLevel {
 /// CVSS 환경·시간 지표 — 게이트 정책에서 자산 가치·위협 맥락 주입.
 /// 수정 기본 지표(MAV/MAC/MPR/MUI/MS)는 기본값 승계 (정책은 자산 맥락만 표현).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct EnvMetrics {
     #[serde(default = "req_m")]
     pub cr: ReqLevel,
@@ -9683,6 +9698,7 @@ impl Default for EnvMetrics {
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn req_value(l: ReqLevel) -> f64 {
     match l {
         ReqLevel::L => 0.5,
@@ -9692,6 +9708,7 @@ fn req_value(l: ReqLevel) -> f64 {
 }
 
 /// CVSS 3.1 환경 점수 — FIRST 공식. 중립 지표(M/X)에서는 기본 점수와 일치한다.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn cvss_env_score(vector: &str, env: &EnvMetrics) -> Option<f32> {
     let m = parse_base_vector(vector)?;
     let miss = (1.0
@@ -9733,6 +9750,7 @@ pub fn cvss_env_score(vector: &str, env: &EnvMetrics) -> Option<f32> {
 }
 
 /// 환경 지표 라벨 — SARIF `cvss-env` 속성용.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn env_metrics_label(env: &EnvMetrics) -> String {
     format!("CR:{:?}/IR:{:?}/AR:{:?}/E:{:?}/RL:{:?}/RC:{:?}", env.cr, env.ir, env.ar, env.e, env.rl, env.rc)
 }
@@ -9865,6 +9883,7 @@ pub fn category_cvss_vector(category: &str) -> Option<&'static str> {
 
 /// 심각도 영문 → 한글 — 리포트 본문 배지([치명]/[높음])와 1:1 대응.
 /// LLM 이 영문 severity 를 그대로 옮겨 적는 실수를 막는 유일한 통로다.
+#[allow(dead_code)]
 pub fn severity_ko(sev: &str) -> &'static str {
     match sev {
         "critical" => "치명",
@@ -9877,6 +9896,7 @@ pub fn severity_ko(sev: &str) -> &'static str {
 
 /// 카테고리 → (CWE 번호, CVSS 3.1 벡터, 기본 점수).
 /// 매핑이 없는 카테고리(정찰 메모·정보 항목)는 None — 없는 점수를 지어내지 않는다.
+#[allow(dead_code)]
 pub fn category_scoring(category: &str) -> Option<(u16, &'static str, f32)> {
     let cwe = category_cwe(category)?;
     let vec = category_cvss_vector(category)?;
@@ -9886,6 +9906,7 @@ pub fn category_scoring(category: &str) -> Option<(u16, &'static str, f32)> {
 
 /// 발견 1건의 객관적 점수 표기 — "CVSS 9.8 (CVSS:3.1/…) · CWE-89".
 /// 리포트 표·루트 카드가 이 값을 **그대로 인용**한다 (LLM 재계산·임의 수정 금지).
+#[allow(dead_code)]
 pub fn hit_scoring_note(category: &str) -> Option<String> {
     let (cwe, vec, score) = category_scoring(category)?;
     Some(format!("CVSS {score:.1} ({vec}) · CWE-{cwe}"))
@@ -9894,6 +9915,7 @@ pub fn hit_scoring_note(category: &str) -> Option<String> {
 /// 커버리지 원장 + 미검증 인계 요약 — 리포트 '점검 범위·한계' 섹션의 근거.
 /// 실행하지 못한 항목(out_of_scope·blocked·deferred)이 사실로 전달되어야
 /// LLM 이 "점검했다"고 지어내지 않는다 (한계 섹션이 환각으로 채워지는 것을 차단).
+#[allow(dead_code)]
 pub fn coverage_digest(rep: &ProbeReport, cap_chars: usize) -> String {
     if rep.coverage.is_empty() && rep.needs_validation.is_empty() {
         return String::new();
@@ -9935,12 +9957,14 @@ pub fn coverage_digest(rep: &ProbeReport, cap_chars: usize) -> String {
     out
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn default_fail_on() -> Vec<String> {
     vec!["critical".to_string(), "high".to_string()]
 }
 
 /// 억제 1건 — FP·수용 위험의 명시적 예외 (사유·승인자·만료 필수, 감사 추적).
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct Suppression {
     pub category: String,
     pub target_contains: String,
@@ -9953,6 +9977,7 @@ pub struct Suppression {
 
 /// 게이트 정책 — 기본은 절대 Zero-High.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct GatePolicy {
     #[serde(default = "default_fail_on")]
     pub fail_on: Vec<String>,
@@ -9973,6 +9998,7 @@ impl Default for GatePolicy {
 }
 
 /// 게이트 정책 파싱+검증 — 무효 심각도·빈 사유/승인자·무효 날짜는 거부.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn parse_gate_policy(text: &str) -> Result<GatePolicy, String> {
     let p: GatePolicy = serde_json::from_str(text).map_err(|e| format!("정책 파싱 실패: {e}"))?;
     if p.fail_on.is_empty() {
@@ -10002,6 +10028,7 @@ pub fn parse_gate_policy(text: &str) -> Result<GatePolicy, String> {
 
 /// 억제된 발견 — 원본 + 억제 근거.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct SuppressedHit {
     pub hit: ProbeHit,
     pub reason: String,
@@ -10011,6 +10038,7 @@ pub struct SuppressedHit {
 
 /// 게이트 판정 — `pass` 가 배포可否. `today` 는 YYYY-MM-DD.
 #[derive(Debug, Clone, Serialize)]
+#[cfg_attr(not(test), allow(dead_code))]
 pub struct GateVerdict {
     pub pass: bool,
     pub authenticated: bool,
@@ -10026,6 +10054,7 @@ pub struct GateVerdict {
 
 /// 게이트 평가 — fail_on 심각도 발견 중 유효 억제 없는 것이 1건이라도 있으면 실패.
 /// 만료 억제는 무시하고 `expired` 에 기록한다 (fail-closed).
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn evaluate_gate(rep: &ProbeReport, policy: &GatePolicy, today: &str) -> GateVerdict {
     let mut blocking = Vec::new();
     let mut suppressed = Vec::new();
@@ -10082,6 +10111,7 @@ pub fn evaluate_gate(rep: &ProbeReport, policy: &GatePolicy, today: &str) -> Gat
     }
 }
 
+#[cfg_attr(not(test), allow(dead_code))]
 fn sarif_level(severity: &str) -> &'static str {
     match severity {
         "critical" | "high" => "error",
@@ -10092,6 +10122,7 @@ fn sarif_level(severity: &str) -> &'static str {
 
 /// SARIF 2.1.0 리포트 — CI 코드 스캐닝 연동용 (GitLab·GitHub).
 /// 전 발견을 results 로, 억제는 `suppressions` 로 기록한다.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn sarif_report(rep: &ProbeReport, verdict: &GateVerdict, env: Option<&EnvMetrics>) -> Value {
     let mut rules: Vec<Value> = Vec::new();
     let mut seen_cats: Vec<String> = Vec::new();
@@ -10158,6 +10189,7 @@ pub fn sarif_report(rep: &ProbeReport, verdict: &GateVerdict, env: Option<&EnvMe
     })
 }
 
+#[allow(dead_code)]
 pub fn evidence_digest(rep: &ProbeReport, cap_chars: usize) -> String {
     let mut out = format!(
         "P0 자동 스윕 — 대상 {} · 프로브 {}개 · {:.1}초{}{} · P1 검증 {}건\n",
