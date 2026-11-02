@@ -83,7 +83,7 @@ function rowHtml(e, i) {
     <td class="c-time">${f.time}</td>
     <td class="c-phase">${esc(f.phase)}</td>
     <td class="c-tool"${f.toolAttr}>${esc(f.tool)}</td>
-    <td class="c-msg">${esc(f.msg)}</td>
+    <td class="c-msg"><span class="c-m">${esc(f.msg)}</span></td>
     <td class="c-status">${stTxt}</td>
   </tr>`;
 }
@@ -261,7 +261,7 @@ function setBadge(status) {
   }
   const state = $("agentState");
   state.textContent = running ? "작동 중" : (status === "done" ? "완료" : status === "error" ? "오류" : status === "stopped" ? "중지됨" : "대기");
-  state.className = "agent-state" + (running ? " busy" : "");
+  state.className = "agent-state" + (running ? " busy" : status === "done" ? " done" : status === "error" ? " error" : "");
   const actEl = $("activityText");
   if (running && actEl) {
     // 재렌더/재시작 직후 문구가 비었으면 마지막 이벤트에서 복원한다.
@@ -337,6 +337,19 @@ function syncSendBtn() {
 
 // 실행 구분선 — 세션별 all 인덱스 배열. 재실행해도 기록은 유지하고 구분선만 꽂는다.
 const runMarks = {};
+// 기록의 시간은 bare time 이 아니라 그 장치의 시간을 함께 말한다 — 계측기는 항상 기준을 붙인다.
+function stampTimeZone() {
+  const th = document.querySelector(".cap-table th.c-time");
+  if (!th || th.dataset.zoned) return;
+  th.dataset.zoned = "1";
+  let zone = "";
+  try {
+    const part = new Intl.DateTimeFormat("ko-KR", { timeZoneName: "short" })
+      .formatToParts(new Date()).find((x) => x.type === "timeZoneName");
+    zone = part ? part.value : "";
+  } catch (e) { zone = ""; }
+  th.textContent = zone ? `시간 ${zone}` : "시간";
+}
 function markRunStart(s) {
   if (!s) return;
   const n = eventsOf(s).filter((e) => e.type !== "worker_status").length;
@@ -345,6 +358,7 @@ function markRunStart(s) {
 function renderCapture(s) {
   if (resultsTabActive()) renderResults();
   renderWorkerBar(s);
+  stampTimeZone();
   const body = $("capBody");
   const all = eventsOf(s).filter((e) => e.type !== "worker_status"); // 워커 상태는 상단 칩으로
   const evs = all.filter(rowPassesFilter);
@@ -1436,8 +1450,8 @@ async function refreshProviders() {
   if (hint) {
     const names = connected.map((p) => providerLabel(p.name));
     hint.textContent = names.length
-      ? `AI 모델 연결됨: ${names.join(", ")} — ⚙ 설정에서 변경할 수 있습니다.`
-      : "AI 모델 미연결 — ⚙ 설정에서 연결하세요.";
+      ? `AI 모델 연결됨: ${names.join(", ")}. 설정에서 변경할 수 있습니다.`
+      : "AI 모델 미연결. 설정에서 연결하세요.";
   }
   syncObProvider();
 }
@@ -1906,8 +1920,8 @@ function renderReportSummary(s, docs, segs) {
           <div class="rs-grade-txt"><b>${esc(st.grade.label)}</b></div>
         </div>
         <div class="rs-head">
-          <div class="rs-title"><b>${st.roots}개 발견</b><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i> · <i class="c-high">높음 ${st.sev["높음"]}</i> · <i class="c-med">중간 ${st.sev["중간"]}</i> · <i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
-          <div class="rs-why-note">${esc(st.grade.why)} · 위험지수 ${st.score.toFixed(1)}/10</div>
+          <div class="rs-title"><b>${st.roots}개 발견</b><span class="rs-mini"><i class="c-crit">치명 ${st.sev["치명"]}</i><i class="c-high">높음 ${st.sev["높음"]}</i><i class="c-med">중간 ${st.sev["중간"]}</i><i class="c-low">낮음 ${st.sev["낮음"]}</i></span></div>
+          <div class="rs-why-note"><span class="rs-why-why">${esc(st.grade.why)}</span><span class="rs-why-score">위험지수 ${st.score.toFixed(1)}/10</span></div>
         </div>
         <div class="rs-actions">
           <button id="rsCopy" class="rs-btn" title="리포트 전체를 클립보드에 복사">복사</button>
@@ -3580,7 +3594,7 @@ async function listenEngagement() {
 function syncHero() {
   const hero = $("onboardHero"); if (!hero) return;
   hero.classList.toggle("hidden", sessions.length > 0);
-  if (sessions.length === 0) syncObProvider();
+  if (sessions.length === 0) { syncObProvider(); obSetStep(1); }
 }
 function obError(msg) {
   const el = $("obError"); if (!el) return;
@@ -3611,7 +3625,7 @@ function syncObSetupCard() {
       <b>시작하려면 AI 모델 하나를 연결해야 해요</b>
       <span>설정(⚙) → 모델 연결에서 API 키만 입력하면 1분이면 됩니다.</span>
     </div>
-    <button id="obSetupBtn" class="btn btn-primary">AI 모델 연결하기</button>`;
+    <button id="obSetupBtn" class="btn">AI 모델 연결하기</button>`;
   const btn = $("obSetupBtn");
   if (btn) btn.onclick = () => openSettings(); // 설정 모달(기존 동작) 재사용
 }
@@ -3646,14 +3660,67 @@ async function obStart() {
   await ensureTargetAuthorized();
   await beginDeepDiagnosis(cur());
 }
+// ── 온보딩 3단계: 1 주소 입력 → 2 AI 모델 → 3 진단 시작 ────────────────────
+// 한 화면에서 한 단계씩 보인다. [진단 시작] 은 항상 보이는 액션 바에 둔다.
+let obStep = 1;
+function obSetStep(n) {
+  const hero = $("onboardHero");
+  if (!hero) return;
+  obStep = Math.min(3, Math.max(1, Number(n) || 1));
+  hero.querySelectorAll(".ob-rail-step").forEach((el) => {
+    const on = Number(el.dataset.step) === obStep;
+    el.classList.toggle("current", on);
+    el.setAttribute("aria-selected", on ? "true" : "false");
+  });
+  hero.querySelectorAll(".ob-pane").forEach((el) => {
+    const on = Number(el.dataset.pane) === obStep;
+    el.classList.toggle("current", on);
+    if (on) el.removeAttribute("hidden"); else el.setAttribute("hidden", "");
+  });
+  obError(null);
+  syncObTarget();
+}
+function syncObTarget() {
+  const el = $("obTarget"); if (!el) return;
+  const url = ($("obUrl") ? $("obUrl").value : "").trim();
+  el.textContent = url
+    ? `${url} 주소를 점검합니다. 모든 검사는 사이트를 변경하지 않는 방식으로 진행됩니다.`
+    : "모든 검사는 사이트를 변경하지 않는 안전한 방식으로 진행됩니다";
+}
+// 주소가 채워지면 다음 단계로, 모델이 고르면 마지막 단계로 넘어간다.
+function obAutoStep() {
+  const url = ($("obUrl") ? $("obUrl").value : "").trim();
+  if (obStep === 1 && url && normalizeTargetInput(url).host) { obSetStep(2); return; }
+  const prov = $("obProvider");
+  if (obStep === 2 && prov && prov.value && prov.value !== "__setup") obSetStep(3);
+}
 function wireOb() {
   const btn = $("obDiag"); if (!btn) return;
   btn.onclick = obStart;
-  $("obUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); obStart(); } });
-  $("obProvider").addEventListener("change", (e) => { if (e.target.value === "__setup") { e.target.value = ""; showProviderModal(); } });
+  $("obUrl").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); obAutoStep(); } });
+  $("obUrl").addEventListener("input", () => { syncObTarget(); });
+  $("obProvider").addEventListener("change", (e) => {
+    if (e.target.value === "__setup") { e.target.value = ""; showProviderModal(); return; }
+    obAutoStep();
+  });
   const eng = $("obEngine");
   if (eng) eng.addEventListener("change", syncEngineHint);
   $("obSkip").onclick = newSession;
+
+  // 3단계 레일과 이전/다음 버튼
+  document.querySelectorAll("#onboardHero .ob-rail-step").forEach((el) => {
+    el.addEventListener("click", () => obSetStep(Number(el.dataset.step)));
+  });
+  const next1 = $("obNext1"); if (next1) next1.onclick = () => {
+    const url = ($("obUrl") ? $("obUrl").value : "").trim();
+    if (!url) { obError("진단할 주소를 입력하세요. (예: https://example.com)"); $("obUrl").focus(); return; }
+    if (!normalizeTargetInput(url).host) { obError("주소에서 대상을 읽지 못했습니다. https:// 로 시작하는 주소를 입력하세요."); return; }
+    obSetStep(2);
+  };
+  const next2 = $("obNext2"); if (next2) next2.onclick = () => obSetStep(3);
+  const back2 = $("obBack2"); if (back2) back2.onclick = () => obSetStep(1);
+  const back3 = $("obBack3"); if (back3) back3.onclick = () => obSetStep(2);
+  obSetStep(1);
 }
 
 // ── 엔진 상태: pi + prime-agent(직접 실행) 감지 표시 ────────────────────────────

@@ -1,0 +1,23 @@
+{
+ "scanned": "2026-11-02",
+ "findings": {
+  "fonts": "Pretendard + JetBrains Mono were named in CSS but never loaded (no @font-face, no link) — the redesign self-hosts both as woff2 in ui/fonts/ (ui/tokens.css L31-34, ui/base.css L3-17)",
+  "palette": "the old stylesheet carried raw hex/rgba literals (e.g. #fff, #22d3ee, rgba(255,255,255,0.28)) and no token block — the redesign lifts every colour into an OKLCH token block in ui/tokens.css (dark + light)",
+  "motion": "ad-hoc transitions on the old controls; the redesign keeps transform/opacity only and adds a prefers-reduced-motion fallback (ui/base.css L72-79)",
+  "spacing": "raw px padding/margin on the old layout; the redesign introduces a 10-step spacing scale (--space-3xs … --space-4xl, ui/tokens.css L10-19)",
+  "framework": "static HTML/CSS/JS UI (no framework) in ui/, served by preview.sh for the browser and embedded by the Rust/Tauri shell in src-tauri/ — ui/app.js is a classic script that queries the DOM by id, so the DOM contract is the wiring"
+ },
+ "preserve": [
+  "every id, field, handler, script hook and test hook the old page had (17/17 fields, 15/15 script hooks, 7/7 headings kept)",
+  "the content: the Korean copy, the log table's columns, the report summary's data and the AI 도우미 chat",
+  "the two themes (dark/light) and the theme toggle's behaviour",
+  "the Rust/Tauri side: no change outside ui/"
+ ],
+ "introduce": [
+  "the Rim theme: warm black paper, hairline rules, one coral signal, square corners",
+  "a token system (ui/tokens.css) and a browser baseline (ui/base.css) split out of the page stylesheet",
+  "a type scale with Pretendard for prose and JetBrains Mono for every measurement",
+  "the signature bar — 점검할 주소 → AI 모델 → 진단 시작 — as the one memorable thing on the first screen",
+  "the floor: tokens for every colour and font, focus-visible on every control, overflow-x clip, reduced-motion fallbacks, no tracked-caps labels, no emoji icons"
+ ]
+}

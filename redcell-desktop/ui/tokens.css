@@ -1,0 +1,206 @@
+/* Hallmark · tokens: Rim (night) · brand coral signal · Pretendard + JetBrains Mono
+ * surface = warm black paper, hairlines do the dividing, one signal, mono for every
+ * measurement. severity keeps a warm→cool ramp and always carries its word.
+ */
+
+:root {
+  color-scheme: dark;
+
+  /* ── 여백 척도 ── */
+  --space-3xs: 2px;
+  --space-2xs: 4px;
+  --space-xs: 8px;
+  --space-sm: 12px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 40px;
+  --space-2xl: 64px;
+  --space-3xl: 96px;
+  --space-4xl: 144px;
+
+  /* ── 글자 척도 (앱: 본문 14 · 라벨 12 · 메타 11) ── */
+  --text-display: 1.75rem;   /* 28 — 화면 제목 */
+  --text-section: 1.375rem;  /* 22 — 큰 제목 */
+  --text-title: 1.0625rem;   /* 17 — 항목 제목 */
+  --text-lead: 1rem;         /* 16 — 리드 문장 */
+  --text-body: 0.875rem;     /* 14 — 본문 */
+  --text-label: 0.75rem;     /* 12 — 라벨·표 머리 */
+  --text-micro: 0.6875rem;   /* 11 — 시간·메타 */
+
+  /* ── 서체 ── */
+  --font-display: "Pretendard Variable", Pretendard, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
+  --font-body: var(--font-display);
+  --font-outlier: "JetBrains Mono", ui-monospace, "SF Mono", Consolas, monospace;
+  --weight-display: 600;
+  --weight-body: 400;
+  --weight-strong: 500;
+  --tracking-display: -0.02em;
+  --tracking-tight: -0.03em;
+
+  /* ── 표면: 따뜻한 흑색 종이 ── */
+  --color-paper: oklch(9.5% 0.006 60);      /* 캔버스 */
+  --color-paper-2: oklch(13% 0.007 60);      /* 패널·웰 */
+  --color-paper-3: oklch(16.5% 0.008 60);    /* 들린 표면(호버 행) */
+  --color-paper-4: oklch(20% 0.009 60);      /* 가장 높은 표면 */
+  --color-ink: oklch(95% 0.008 80);
+  --color-ink-2: oklch(86% 0.010 80);
+  --color-muted: oklch(72% 0.010 80);
+  --color-muted-2: oklch(63% 0.010 80);
+  --color-rule: oklch(27% 0.008 78);
+  --color-rule-2: oklch(19% 0.008 78);
+
+  /* ── 신호색: 브랜드 코랄 하나(액션·현재 상태·포커스) ── */
+  --color-accent: oklch(66% 0.19 28);
+  --color-accent-ink: oklch(12% 0.02 28);
+  --color-accent-fg: oklch(78% 0.14 28);
+  --color-accent-2: oklch(72% 0.11 235);     /* 둘째 신호: 스카이블루 */
+  --color-accent-2-ink: oklch(14% 0.02 235);
+  --color-accent-2-fg: oklch(80% 0.09 235);
+  --color-focus: oklch(76% 0.15 28);
+
+  /* ── 위험 등급: 따뜻함 → 차가움, 한 계열 ── */
+  --color-sev-critical: oklch(62% 0.18 15);
+  --color-sev-high: oklch(74% 0.14 62);
+  --color-sev-medium: oklch(80% 0.11 92);
+  --color-sev-low: oklch(70% 0.09 225);
+  --color-sev-info: oklch(62% 0.02 250);
+  --color-sev-critical-fg: oklch(78% 0.15 15);
+  --color-sev-high-fg: oklch(85% 0.12 62);
+  --color-sev-medium-fg: oklch(89% 0.09 92);
+  --color-sev-low-fg: oklch(80% 0.08 225);
+  --color-sev-info-fg: oklch(72% 0.02 250);
+  --color-ok: oklch(72% 0.14 152);
+  --color-ok-fg: oklch(80% 0.13 152);
+  --color-warn: oklch(78% 0.13 75);
+  --color-warn-fg: oklch(86% 0.12 75);
+
+  /* ── 상태 표면(배지·칩의 옅은 바탕) ── */
+  --color-tint-critical: oklch(62% 0.18 15 / 0.14);
+  --color-tint-high: oklch(74% 0.14 62 / 0.13);
+  --color-tint-medium: oklch(80% 0.11 92 / 0.11);
+  --color-tint-low: oklch(70% 0.09 225 / 0.13);
+  --color-tint-info: oklch(62% 0.02 250 / 0.14);
+  --color-tint-ok: oklch(72% 0.14 152 / 0.13);
+  --color-tint-warn: oklch(78% 0.13 75 / 0.13);
+  --color-tint-accent: oklch(66% 0.19 28 / 0.13);
+  --color-tint-accent-2: oklch(72% 0.11 235 / 0.13);
+
+  /* ── 선·유리 ── */
+  --color-hair: oklch(100% 0 0 / 0.08);
+  --color-hair-strong: oklch(100% 0 0 / 0.14);
+  --color-overlay: oklch(6% 0.005 60 / 0.72);
+  --color-scrim: oklch(6% 0.005 60 / 0.86);
+  --color-well: oklch(11% 0.006 60);
+
+  /* ── 형태 ── */
+  --radius-card: 0px;
+  --radius-pill: 0px;
+  --radius-control: 0px;
+  --rule-hair: 1px;
+  --shadow-card: none;
+  --shadow-pop: 0 12px 20px oklch(4% 0.004 60 / 0.66);
+
+  /* ── 모션: 정확하고 고요하게 ── */
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  /* ── 층 ── */
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-sticky-nav: 300;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+
+  /* ── 자주 쓰는 값(구 토큰 호환) ── */
+  --bg: var(--color-paper);
+  --surface: var(--color-paper-2);
+  --surface-2: var(--color-paper-3);
+  --surface-3: var(--color-paper-4);
+  --elev: var(--color-paper-3);
+  --line: var(--color-rule-2);
+  --line-2: var(--color-rule);
+  --sheen: var(--color-hair);
+  --row-hover: var(--color-hair);
+  --text: var(--color-ink);
+  --faint: var(--color-muted-2);
+  --brand: var(--color-accent);
+  --brand-fg: var(--color-accent-fg);
+  --brand-2: var(--color-accent-2);
+  --accent: var(--color-accent-2);
+  --accent-fg: var(--color-accent-2-fg);
+  --accent-2: var(--color-warn);
+  --on-accent: var(--color-accent-ink);
+  --on-run: var(--color-accent-ink);
+  --shadow-1: var(--shadow-pop);
+  --shadow-2: var(--shadow-pop);
+  --sans: var(--font-display);
+  --mono: var(--font-outlier);
+  --r: var(--radius-card);
+  --r-sm: var(--radius-card);
+  --r-lg: var(--radius-card);
+  --ease-run: var(--ease-out);
+}
+
+/* 라이트 테마 — 종이 위의 계측기. 같은 규칙, 반대 톤. */
+:root[data-theme="light"] {
+  color-scheme: light;
+
+  --color-paper: oklch(96.5% 0.004 45);
+  --color-paper-2: oklch(99% 0.002 45);
+  --color-paper-3: oklch(93.5% 0.005 45);
+  --color-paper-4: oklch(90% 0.006 45);
+  --color-ink: oklch(18% 0.012 45);
+  --color-ink-2: oklch(30% 0.012 45);
+  --color-muted: oklch(42% 0.012 45);
+  --color-muted-2: oklch(48% 0.012 45);
+  --color-rule: oklch(78% 0.008 45);
+  --color-rule-2: oklch(88% 0.006 45);
+
+  --color-accent: oklch(55% 0.19 28);
+  --color-accent-ink: oklch(98% 0.01 28);
+  --color-accent-fg: oklch(48% 0.17 28);
+  --color-accent-2: oklch(52% 0.12 240);
+  --color-accent-2-ink: oklch(98% 0.01 240);
+  --color-accent-2-fg: oklch(44% 0.12 240);
+  --color-focus: oklch(55% 0.19 28);
+
+  --color-sev-critical: oklch(52% 0.19 20);
+  --color-sev-high: oklch(58% 0.14 55);
+  --color-sev-medium: oklch(60% 0.11 45);
+  --color-sev-low: oklch(52% 0.10 240);
+  --color-sev-info: oklch(55% 0.02 250);
+  --color-sev-critical-fg: oklch(46% 0.18 20);
+  --color-sev-high-fg: oklch(48% 0.13 55);
+  --color-sev-medium-fg: oklch(48% 0.10 45);
+  --color-sev-low-fg: oklch(44% 0.10 240);
+  --color-sev-info-fg: oklch(46% 0.02 250);
+  --color-ok: oklch(52% 0.13 152);
+  --color-ok-fg: oklch(46% 0.12 152);
+  --color-warn: oklch(60% 0.13 45);
+  --color-warn-fg: oklch(48% 0.12 45);
+
+  --color-tint-critical: oklch(52% 0.19 20 / 0.10);
+  --color-tint-high: oklch(58% 0.14 55 / 0.11);
+  --color-tint-medium: oklch(60% 0.11 80 / 0.12);
+  --color-tint-low: oklch(52% 0.10 240 / 0.10);
+  --color-tint-info: oklch(55% 0.02 250 / 0.10);
+  --color-tint-ok: oklch(52% 0.13 152 / 0.11);
+  --color-tint-warn: oklch(60% 0.13 70 / 0.11);
+  --color-tint-accent: oklch(55% 0.19 28 / 0.09);
+  --color-tint-accent-2: oklch(52% 0.12 240 / 0.10);
+
+  --color-hair: oklch(20% 0.01 60 / 0.10);
+  --color-hair-strong: oklch(20% 0.01 60 / 0.18);
+  --color-overlay: oklch(30% 0.01 60 / 0.32);
+  --color-scrim: oklch(30% 0.01 60 / 0.42);
+  --color-well: oklch(94.5% 0.005 45);
+
+  --shadow-pop: 0 12px 20px oklch(30% 0.02 60 / 0.20);
+}
